@@ -483,7 +483,7 @@ export function isJsonContentType(contentType: string | undefined): boolean {
 
 /**
  * Start the MCP server over Streamable HTTP (JSON responses, no SSE) plus a REST
- * surface, binding localhost only. One store is opened and shared by every
+ * surface, binding the 127.0.0.1 loopback only. One store is opened and shared by every
  * request, so the embedding model stays warm across recalls. Returns a handle for
  * shutdown and port discovery (pass port 0 for an OS-assigned ephemeral port).
  */
@@ -747,7 +747,12 @@ export async function startMcpHttpServer(
 
   await new Promise<void>((resolve, reject) => {
     httpServer.on("error", reject);
-    httpServer.listen(port, "localhost", () => resolve());
+    // Bind the IPv4 loopback explicitly, NOT "localhost". On an IPv6-first host
+    // (e.g. CI, where localhost resolves to ::1) "localhost" binds ::1-only, but the
+    // CLI client connects to 127.0.0.1 (src/client.ts) — so daemon delegation would
+    // silently fail and the end-to-end loopback-guard tests get ECONNREFUSED. 127.0.0.1
+    // is deterministic and is exactly what the client + the loopback guard target.
+    httpServer.listen(port, "127.0.0.1", () => resolve());
   });
   const actualPort = (httpServer.address() as import("node:net").AddressInfo).port;
 
