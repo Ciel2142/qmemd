@@ -1,3 +1,7 @@
 # Windows batch/cmd shims must use CRLF line endings regardless of who commits
 # them (this repo is developed on WSL/Linux, where files default to LF).
 *.cmd text eol=crlf
+
+# Plugin hook scripts run via Node on every platform — pin LF so a Windows
+# autocrlf checkout cannot inject CR (a CRLF shebang also breaks /usr/bin/env).
+hooks/*.mjs text eol=lf

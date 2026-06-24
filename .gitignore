@@ -12,3 +12,7 @@ dist/
 # Local agent tooling — hookify local rules + sync manifest (never publish)
 .claude/*.local.md
 .claude/.hookify-sync-manifest.json
+
+# IDE / npm (this project pins deps with bun.lock; npm install is also supported)
+.idea/
+package-lock.json

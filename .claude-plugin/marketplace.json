@@ -1,12 +1,26 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "qmemd",
-  "owner": { "name": "Ciel2142", "url": "https://github.com/Ciel2142" },
-  "description": "Durable memory for AI agents — remember/recall/forget over markdown facts (skill + MCP + hooks + commands).",
+  "description": "Durable memory engine for Claude Code — remember/recall/forget over markdown facts.",
+  "owner": {
+    "name": "Ciel2142",
+    "url": "https://github.com/Ciel2142"
+  },
   "plugins": [
     {
       "name": "qmemd",
       "source": "./",
-      "description": "Durable memory engine (skill + MCP + hooks + commands) for Claude Code."
+      "description": "Durable memory engine over markdown facts (remember/recall/forget), backed by the qmd SDK: MCP server, SessionStart snapshot + memory-presence beacon hooks, /qmemd:* commands, and the qmemd-memory skill.",
+      "version": "0.3.0",
+      "author": {
+        "name": "Ciel2142",
+        "url": "https://github.com/Ciel2142"
+      },
+      "homepage": "https://github.com/Ciel2142/qmemd#readme",
+      "repository": "https://github.com/Ciel2142/qmemd",
+      "license": "MIT",
+      "keywords": ["memory", "recall", "remember", "markdown", "mcp", "embeddings", "claude", "agent"],
+      "category": "productivity"
     }
   ]
 }
