@@ -56,6 +56,34 @@ describe("CLI --type validation (jzz)", () => {
   });
 });
 
+describe("CLI recall --session emits the SessionStart envelope (banner fix, b6j)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-cli-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  // `recall --session` is hook-only (help: "session snapshot (for hooks)"). A SessionStart
+  // hook that prints RAW stdout surfaces a visible "hook success:" banner that crowds the
+  // user's first prompt, so the snapshot must ride in the JSON envelope with
+  // suppressOutput:true (additionalContext injected silently). The recallSession() engine
+  // string is unchanged — only the CLI stdout framing is.
+  test("wraps the snapshot as {suppressOutput, hookSpecificOutput.additionalContext}", () => {
+    const w = runCli(["remember", "Caveman likes terse output", "--type", "user"], root);
+    expect(w.status).toBe(0);
+    const res = runCli(["recall", "--session"], root);
+    expect(res.status).toBe(0);
+    const out = JSON.parse(res.stdout.trim());
+    expect(out.suppressOutput).toBe(true);
+    expect(out.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    expect(out.hookSpecificOutput.additionalContext).toContain("Caveman likes terse output");
+  });
+
+  test("empty snapshot → no stdout (nothing to inject, no banner)", () => {
+    const res = runCli(["recall", "--session"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout.trim()).toBe("");
+  });
+});
+
 describe("CLI --help / -h prints usage (qmemd-3ix)", () => {
   let root: string;
   beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-cli-")); });

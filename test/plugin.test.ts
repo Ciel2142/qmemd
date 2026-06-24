@@ -113,6 +113,14 @@ describe("inject-rule.mjs (SessionStart rule injection)", () => {
     expect(out.hookSpecificOutput.additionalContext).toContain("# Memory (qmemd)");
   });
 
+  test("buildSessionContext sets suppressOutput so the rule does not banner the prompt", () => {
+    // Raw SessionStart stdout (or an envelope without suppressOutput) surfaces as a
+    // visible "hook success:" banner that crowds the user's first prompt. suppressOutput
+    // injects additionalContext silently.
+    const out = JSON.parse(buildSessionContext("# Memory (qmemd)\nbody"));
+    expect(out.suppressOutput).toBe(true);
+  });
+
   test("ruleFilePath resolves claude/qmemd.md under the plugin root", () => {
     expect(ruleFilePath("/x")).toBe(join("/x", "claude", "qmemd.md"));
   });
@@ -124,6 +132,7 @@ describe("inject-rule.mjs (SessionStart rule injection)", () => {
     expect(r.status).toBe(0);
     const out = JSON.parse(r.stdout);
     expect(out.hookSpecificOutput.additionalContext).toContain("# Memory (qmemd)");
+    expect(out.suppressOutput).toBe(true);
   });
 
   test("fail-open: missing rule file → exit 0 with no output", () => {

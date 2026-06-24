@@ -17,6 +17,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 /** Wrap rule markdown in the Claude Code SessionStart additionalContext envelope. */
 export function buildSessionContext(ruleContent) {
   return JSON.stringify({
+    // suppressOutput: inject the rule as additionalContext silently. Without it (or with
+    // raw stdout) Claude Code echoes a visible "hook success:" banner that crowds the
+    // user's first prompt.
+    suppressOutput: true,
     hookSpecificOutput: {
       hookEventName: "SessionStart",
       additionalContext: ruleContent,

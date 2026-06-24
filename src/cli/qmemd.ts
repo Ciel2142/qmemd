@@ -290,7 +290,14 @@ async function main() {
         const w = sessionSyncWarning(pull);
         if (w) console.error(`${y}warning:${r} ${w}`);
         const out = await recallSession(root, { project: basename(process.cwd()) });
-        if (out) console.log(out);
+        // `recall --session` is the SessionStart hook snapshot. Ride the JSON envelope
+        // with suppressOutput so it is injected as additionalContext silently — raw stdout
+        // surfaces a visible "hook success:" banner that crowds the user's first prompt
+        // (qp-sessionstart-envelope-b6j). recallSession()'s string contract is unchanged.
+        if (out) console.log(JSON.stringify({
+          suppressOutput: true,
+          hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: out },
+        }));
         break;
       }
       const query = rest.join(" ").trim();
