@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # engines is >=22; cover current LTS (22) + latest (24).
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # package-lock.json is gitignored (the repo pins via bun.lock), so `npm ci`
+      # and setup-node's built-in npm cache (both need a committed npm lockfile)
+      # can't be used. Cache the npm download dir keyed on package.json instead.
+      - name: Cache ~/.npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-node${{ matrix.node }}-
+
+      - run: npm install --no-audit --no-fund
+
+      - run: npm run build
+
+      - run: npm test
+
+      # Run the clean-room publish smoke on every PR so a packaging regression
+      # (stale REQUIRED_ASSETS, a tarball asset dropped from files[]) reddens here
+      # instead of failing a release. Node-version-insensitive (the clean room
+      # installs with --ignore-scripts), so once is enough.
+      - name: Clean-room packaging smoke
+        if: matrix.node == '22'
+        run: node scripts/smoke-clean-room.cjs

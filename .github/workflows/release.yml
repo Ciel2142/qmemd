@@ -1,0 +1,43 @@
+name: Release
+
+# Publish to npm when a GitHub Release is published. The release tag (vX.Y.Z) must
+# point at a commit whose package.json version matches — the version guard enforces it.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # OIDC: lets npm Trusted Publishing authenticate + attach provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+
+      - run: npm install --no-audit --no-fund
+
+      # Refuse to publish if the tag and package.json disagree (the "forgot to bump"
+      # / wrong-tag class). GITHUB_REF_NAME is the release tag, e.g. v0.4.1.
+      - name: Verify package.json version matches the release tag
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "package.json=$PKG  release-tag=$TAG"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::package.json version ($PKG) != release tag ($TAG) — bump the manifests and retag."
+            exit 1
+          fi
+
+      # The runner's bundled npm (~10.x) predates OIDC Trusted Publishing; need >= 11.5.
+      - run: npm install -g npm@latest
+
+      # prepublishOnly runs build + the clean-room smoke. OIDC supplies auth (no stored
+      # token); --provenance attaches a build attestation (requires id-token: write).
+      - run: npm publish --access public --provenance
