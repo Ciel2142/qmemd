@@ -10,7 +10,7 @@ allowed-tools: Bash(qmemd:*), mcp__qmemd__remember, mcp__qmemd__recall, mcp__qme
 
 Durable, searchable knowledge store. Plain-markdown facts, one per file, under
 `memory/{user,feedback,project,reference}/`. This is the **knowledge lane** — distinct
-from beads (the work/issue lane). Never duplicate a fact across both.
+from br / beads_rust (the work/issue lane). Never duplicate a fact across both.
 
 ## When to remember
 - A durable user preference or identity fact → `--type user`
@@ -28,9 +28,9 @@ Don't assume the session-start snapshot already handed you the relevant facts �
 ### The snapshot is partial — pull for the rest
 If the SessionStart hook (`qmemd recall --session`) is configured, the snapshot is injected automatically; otherwise run it yourself at task start. It carries every `user` + `feedback` fact (full body) + pinned facts **in scope** (current project + `global` — pin means "never sliced off within scope", not "surface everywhere"; pin with `project: global` to surface in every repo), but only the **most recent** non-pinned `project` and `reference` facts scoped to the current project (cwd basename) plus `global` — older in-scope facts are **sliced off**. When the snapshot ends with a footer like `14 project facts for <proj> (5 shown, 9 more) — qmemd list --type project --project <proj>` (optionally followed by `Unshown tags: …`), those 9 are real facts you have **not** seen — `recall "<topic>"` or `qmemd list` to pull them. An empty or footer-less snapshot is not proof that no relevant facts exist.
 
-## Routing rule vs beads
+## Routing rule vs br
 True regardless of what you're working on → qmemd memory. Only meaningful inside the
-current work (task state, decisions tied to an issue) → beads.
+current work (task state, decisions tied to an issue) → br.
 
 ## Commands
 ```bash

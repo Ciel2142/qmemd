@@ -1,26 +1,19 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
+This project uses **br** (beads_rust) for issue tracking. Run `br robot-docs guide` for the agent workflow.
 
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
->
-> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
+> **Architecture in one line:** issues live in a local SQLite database
+> (`.beads/beads.db`); `.beads/issues.jsonl` is the git-tracked export —
+> commit it to sync across machines. `br sync` reconciles DB ↔ JSONL.
 
 ## Quick Reference
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
+br ready                # Find available work
+br show <id>            # View issue details
+br update <id> --claim  # Claim work (assignee + status=in_progress)
+br close <id>           # Complete work
+br sync                 # Reconcile the SQLite DB with issues.jsonl
 ```
 
 ## Non-Interactive Shell Commands
@@ -47,27 +40,11 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
-## Beads Issue Tracker
+## Rules
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+- Use `br` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `br robot-docs guide` for the detailed command reference and session-close protocol
+- Use **qmemd** (`qmemd remember` / `qmemd recall`) for durable knowledge — do NOT use the issue tracker or MEMORY.md files for facts
 
 ## Session Completion
 
@@ -93,4 +70,3 @@ bd close <id>         # Complete work
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->

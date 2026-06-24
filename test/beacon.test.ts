@@ -262,7 +262,7 @@ describe("runBeacon orchestration (tfu)", () => {
 
   test("per-repo isolation: a capture in repo A leaves repo B's record intact (qmemd-yl3)", () => {
     const deps = { memoryRoot: root, cacheDir: cache, everyN: 20 };
-    runBeacon(evt({ cwd: "/work/repoA", tool_input: { command: "bd close x" } }), deps); // A: capture
+    runBeacon(evt({ cwd: "/work/repoA", tool_input: { command: "br close x" } }), deps); // A: capture
     runBeacon(evt({ cwd: "/work/repoB", tool_input: { command: "mvn test" } }), deps);   // B: work, no capture
     const st = readState(stateFilePath(cache, "s1"))!;
     expect(st.perRepo["repoA"]).toEqual({ calls: 1, captures: 1, writeFired: false });
@@ -274,19 +274,19 @@ describe("isCaptureCommand (write-beacon, qmemd-yl3)", () => {
   test.each([
     'qmemd remember "x" --type project',
     "qmemd reviewed some-slug",
-    'bd remember "insight"',
-    "bd create --title=foo --type=task",
-    "bd close qmemd-1 qmemd-2",
-    "bd update qmemd-1 --claim",
-    "rtk bd close qmemd-1",          // rtk-rewritten prefix still matches
+    "br create --title=foo --type=task",
+    "br close qp-1 qp-2",
+    "br update qp-1 --claim",
+    'br q "quick capture"',
+    "rtk br close qp-1",          // rtk-rewritten prefix still matches
   ])("matches capture verb: %s", (cmd) => {
     expect(isCaptureCommand(cmd)).toBe(true);
   });
 
   test.each([
     'qmemd recall "x"',
-    "bd show qmemd-1",
-    "bd ready",
+    "br show qp-1",
+    "br ready",
     "echo remember to push",
     "git commit -m 'create thing'",
     "",
@@ -353,7 +353,7 @@ describe("formatWriteBeacon (write-beacon, qmemd-yl3)", () => {
     expect(s).toContain("beta");
     expect(s).toContain("31 Bash calls");
     expect(s).toContain("durable → qmemd");
-    expect(s).toContain("work-state → beads");
+    expect(s).toContain("work-state → br");
     expect(s).not.toMatch(/\/(home|Users|work)\//); // no absolute fs path leaks (qmemd-81n); prose slashes (gotcha/decision/preference) are fine
   });
 });

@@ -25,7 +25,7 @@ describe("qmemd-memory SKILL.md conformance (4lr)", () => {
     for (const section of [
       "## When to remember",
       "## When to recall",
-      "## Routing rule vs beads",
+      "## Routing rule vs br",
       "## Commands",
       "## Usage conventions",
     ]) {

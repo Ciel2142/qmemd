@@ -53,6 +53,9 @@ dolt-server.activity
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# br local history backups (per-machine undo history, local-only)
+.br_history/
+
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 

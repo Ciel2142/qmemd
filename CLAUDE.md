@@ -2,27 +2,26 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
-## Beads Issue Tracker
+## Issue Tracker (beads_rust / br)
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+This project uses **br** (beads_rust) for issue tracking. Run `br robot-docs guide` for the agent workflow, and `br --help` for the command list.
 
 ### Quick Reference
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
+br ready                # Find available work
+br show <id>            # View issue details
+br update <id> --claim  # Claim work (assignee + status=in_progress)
+br close <id>           # Complete work
 ```
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- Use `br` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `br robot-docs guide` for the detailed command reference and session-close protocol
+- Use **qmemd** (`qmemd remember` / `qmemd recall`) for durable knowledge — do NOT use the issue tracker or MEMORY.md files for facts
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line:** issues live in a local SQLite DB (`.beads/beads.db`); `.beads/issues.jsonl` is the git-tracked export — commit it to sync across machines; `br sync` reconciles DB ↔ JSONL.
 
 ## Session Completion
 
@@ -48,7 +47,6 @@ bd close <id>         # Complete work
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
 
 
 ## Build & Test
@@ -85,7 +83,7 @@ Memory types: `user | feedback | project | reference`.
 
 ## Conventions & Patterns
 
-- **Two lanes:** durable knowledge → qmemd memory; work/issue state → beads (above). Never duplicate across lanes.
+- **Two lanes:** durable knowledge → qmemd memory; work/issue state → br (beads_rust) (above). Never duplicate across lanes.
 - **Recall scopes to {current project, global} by default** (qmemd-due): `recallQuery` gates hits to the caller's project + `global` whenever a `project` reaches the engine (CLI sends `basename(cwd)`; the MCP tool resolves `project ?? opts.sessionDefaultProject ?? basename(cwd)`; REST passes `body.project` **verbatim** — undefined ⇒ no gate ⇒ whole corpus, the pre-feature contract). `--cross-project` (CLI) / `cross_project:true` (MCP) / `crossProject` (REST body) widen to every project; foreign hits then carry `project` provenance and render fenced — `[<type> ⊥ <project>]` under a `— other projects —` divider (display-only; engine ranking/`limit` unchanged). A `N cross-project matches hidden (--cross-project to include)` footer (the `completenessFooter` idiom, alongside `moreMatches`/`belowFloor`) advertises what the default gate dropped, so narrowing is never silent. The gate mirrors `recallSession`'s `inProject` (already project-gated); `RecallHit.project`/`RecallResult.crossProjectHidden` are the new surfaces.
 - **Dedup is three-tier** (`remember`): Tier-1 exact-slug (file existence), Tier-2 FTS near-duplicate (BM25 score > `DEDUP_SCORE_FTS`; qmd ANDs all query terms, so unrelated facts don't false-dedup as the corpus grows), Tier-2.5 model-free token-set near-dup scan whose contradiction classifier (differing identifier / polarity / antonym) routes a likely update to a **surfaced conflict** (`disposition:"conflict"` + authority comparison) instead of a silent block or silent write. The engine never auto-resolves.
 - **Staleness is surface-only** (qmemd-9su / qmemd-s4w): a fact with no explicit `review_by` inherits a per-type default review window (`project` 90d, `reference` 180d, `user`/`feedback` durable; env-tunable via `QMEMD_TTL_<TYPE>`); `qmemd stale` and `qmemd doctor` list facts **due** (explicit or implicit date past) plus the **never-reviewed backlog** (decay-prone, not yet due) and never mutate. `review_by: never` marks a fact durable. `qmemd reviewed <slug>` forward-sets `review_by` (leaving `updated` honest) to reset the clock. Recall ignores `review_by`; nothing auto-expires.

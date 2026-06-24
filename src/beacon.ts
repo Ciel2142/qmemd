@@ -76,16 +76,16 @@ export function formatBeacon(ov: ProjectOverview, terse: boolean): string {
 export function formatWriteBeacon(repo: string, calls: number): string {
   return [
     `💡 qmemd · ${repo}: ${calls} Bash calls, 0 durable captures in this repo this session —`,
-    `   remember any gotcha/decision/preference before you wrap?  (durable → qmemd, work-state → beads)`,
+    `   remember any gotcha/decision/preference before you wrap?  (durable → qmemd, work-state → br)`,
   ].join("\n");
 }
 
 // Capture verbs across both lanes (qmemd-yl3). Word-boundary anchored so an rtk/env
-// prefix ("rtk bd close …") still matches and prose ("remember to …") does not.
-const CAPTURE_RE = /\bqmemd\s+(remember|reviewed)\b|\bbd\s+(remember|create|close|update)\b/;
+// prefix ("rtk br close …") still matches and prose ("remember to …") does not.
+const CAPTURE_RE = /\bqmemd\s+(remember|reviewed)\b|\bbr\s+(create|close|update|q)\b/;
 
 /** True iff `cmd` invokes a durable-capture verb (qmemd remember/reviewed or
- *  bd remember/create/close/update). Pure; used by the write beacon's per-repo counter. */
+ *  br create/close/update/q). Pure; used by the write beacon's per-repo counter. */
 export function isCaptureCommand(cmd: string): boolean {
   return CAPTURE_RE.test(cmd);
 }

@@ -3,7 +3,7 @@
 
 # Memory (qmemd)
 
-Durable knowledge lives in **qmemd memory** (knowledge lane); work/issue state lives in **beads** (work lane). Built-in Claude Code auto-memory is OFF (`autoMemoryEnabled: false`) — use qmemd, not `~/.claude/projects/*/memory/`.
+Durable knowledge lives in **qmemd memory** (knowledge lane); work/issue state lives in **br (beads_rust)** (work lane). Built-in Claude Code auto-memory is OFF (`autoMemoryEnabled: false`) — use qmemd, not `~/.claude/projects/*/memory/`.
 
 **Remember** (`remember` MCP tool, or `qmemd remember "<fact>" --type <type>`) when: the user states a durable preference (`type: user`), gives guidance/correction on how to work (`type: feedback`), I discover a non-obvious gotcha or a repo/system fact not in code/git (`type: project`), or hit a reference worth keeping — URL/dashboard/discovery (`type: reference`).
 
@@ -17,7 +17,7 @@ The snapshot injects every user + feedback fact, pinned facts **in scope** (curr
 
 **Recall is project-scoped by default** (qmemd-due): a `recall` query returns only facts for the current project (cwd basename) + `global` — another project's facts no longer surface unlabeled. To search across all projects (e.g. "have I hit this error in another repo?"), pass `--cross-project` (CLI) or `cross_project:true` (MCP `recall`); foreign hits then come back labeled with their project. When the default scope hid relevant foreign matches, recall prints a `N cross-project matches hidden (--cross-project to include)` footer — so a thin or empty result may be a **scoping** effect, not a true miss; widen before concluding a fact isn't stored.
 
-**Routing tiebreaker:** true regardless of current work → qmemd; only meaningful inside this work → beads. Never duplicate across lanes. Update with `qmemd remember --replace <slug>` (or edit the file, then `qmemd reindex` — a bare `recall` does not pick up file edits); remove with `qmemd forget <slug>`. Store: `$QMD_MEMORY_DIR`.
+**Routing tiebreaker:** true regardless of current work → qmemd; only meaningful inside this work → br. Never duplicate across lanes. Update with `qmemd remember --replace <slug>` (or edit the file, then `qmemd reindex` — a bare `recall` does not pick up file edits); remove with `qmemd forget <slug>`. Store: `$QMD_MEMORY_DIR`.
 
 Full how-to: the `qmemd-memory` skill.
 
