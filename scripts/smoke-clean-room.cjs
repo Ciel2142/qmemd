@@ -21,7 +21,8 @@ const MODULE_NOT_FOUND_RE = /Cannot find module|MODULE_NOT_FOUND|ERR_MODULE_NOT_
 const REQUIRED_ASSETS = [
   "skills/qmemd-memory/SKILL.md",
   ".claude-plugin/plugin.json",
-  "hooks/qmemd-shim.sh",
+  "hooks/inject-rule.mjs",
+  "hooks/run-qmemd.mjs",
   "commands/stale.md",
   "claude/qmemd.md",
   "integrations/cursor/qmemd.mdc",
