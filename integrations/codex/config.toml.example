@@ -1,0 +1,8 @@
+# qmemd MCP server for the OpenAI Codex CLI.
+# Paste this block into ~/.codex/config.toml, or run:
+#   codex mcp add qmemd -- qmemd mcp
+# Requires `qmemd` on PATH (npm i -g @ciel2142/qmemd).
+# npx fallback: command = "npx", args = ["-y", "@ciel2142/qmemd", "mcp"]
+[mcp_servers.qmemd]
+command = "qmemd"
+args = ["mcp"]

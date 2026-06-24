@@ -1,0 +1,14 @@
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+node_modules/
+dist/
+*.sqlite
+*.sqlite-*
+
+# Local agent tooling — hookify local rules + sync manifest (never publish)
+.claude/*.local.md
+.claude/.hookify-sync-manifest.json

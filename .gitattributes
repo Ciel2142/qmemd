@@ -1,0 +1,3 @@
+# Windows batch/cmd shims must use CRLF line endings regardless of who commits
+# them (this repo is developed on WSL/Linux, where files default to LF).
+*.cmd text eol=crlf

@@ -1,0 +1,12 @@
+{
+  "name": "qmemd",
+  "owner": { "name": "Ciel2142", "url": "https://github.com/Ciel2142" },
+  "description": "Durable memory for AI agents — remember/recall/forget over markdown facts (skill + MCP + hooks + commands).",
+  "plugins": [
+    {
+      "name": "qmemd",
+      "source": "./",
+      "description": "Durable memory engine (skill + MCP + hooks + commands) for Claude Code."
+    }
+  ]
+}

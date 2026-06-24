@@ -1,0 +1,62 @@
+{
+  "name": "@ciel2142/qmemd",
+  "version": "0.3.0",
+  "description": "Durable memory engine — remember/recall/forget over markdown facts, backed by the qmd SDK",
+  "keywords": [
+    "memory",
+    "mcp",
+    "recall",
+    "remember",
+    "markdown",
+    "embeddings",
+    "cli",
+    "claude",
+    "agent"
+  ],
+  "homepage": "https://github.com/Ciel2142/qmemd#readme",
+  "bugs": {
+    "url": "https://github.com/Ciel2142/qmemd/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ciel2142/qmemd.git"
+  },
+  "license": "MIT",
+  "author": "Ciel2142",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "skills",
+    ".claude-plugin",
+    "hooks",
+    "commands",
+    "claude/qmemd.md",
+    "integrations"
+  ],
+  "bin": {
+    "qmemd": "dist/cli/qmemd.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --reporter=verbose",
+    "qmemd": "tsx src/cli/qmemd.ts",
+    "bench:recall": "QMEMD_EMBED_TIMEOUT_MS=120000 tsx scripts/recall-bench.ts",
+    "prepublishOnly": "npm run build && node scripts/smoke-clean-room.cjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@tobilu/qmd": "2.5.3",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.8"
+  }
+}
