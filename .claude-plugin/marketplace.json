@@ -11,7 +11,7 @@
       "name": "qmemd",
       "source": "./",
       "description": "Durable memory engine over markdown facts (remember/recall/forget), backed by the qmd SDK: MCP server, SessionStart snapshot + memory-presence beacon hooks, /qmemd:* commands, and the qmemd-memory skill.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "author": {
         "name": "Ciel2142",
         "url": "https://github.com/Ciel2142"

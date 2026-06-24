@@ -1,6 +1,6 @@
 {
   "name": "qmemd",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Durable memory engine — remember/recall/forget over markdown facts, backed by the qmd SDK.",
   "author": { "name": "Ciel2142", "url": "https://github.com/Ciel2142" },
   "homepage": "https://github.com/Ciel2142/qmemd#readme",
