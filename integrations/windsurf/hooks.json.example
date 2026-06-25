@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "pre_user_prompt": [
+      {
+        "command": "qmemd recall --session | node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).hookSpecificOutput.additionalContext||'')}catch{}})\"",
+        "show_output": true
+      }
+    ]
+  }
+}

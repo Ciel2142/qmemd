@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": "qmemd recall --session" }
+    ],
+    "preToolUse": [
+      { "command": "qmemd hook beacon" }
+    ]
+  }
+}
