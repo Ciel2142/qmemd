@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write # OIDC: lets npm Trusted Publishing authenticate + attach provenance
 
 jobs:
   publish:
@@ -35,9 +34,12 @@ jobs:
             exit 1
           fi
 
-      # The runner's bundled npm (~10.x) predates OIDC Trusted Publishing; need >= 11.5.
+      # Pull a recent npm (the runner's bundled ~10.x has install/publish quirks).
       - run: npm install -g npm@latest
 
-      # prepublishOnly runs build + the clean-room smoke. OIDC supplies auth (no stored
-      # token); --provenance attaches a build attestation (requires id-token: write).
-      - run: npm publish --access public --provenance
+      # prepublishOnly runs build + the clean-room smoke. Auth via the NPM_TOKEN repo
+      # secret (granular/automation publish token); OIDC Trusted Publishing E404'd on
+      # every fresh-version publish, so we use a stored token instead (no provenance).
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
