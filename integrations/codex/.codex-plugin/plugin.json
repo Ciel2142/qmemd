@@ -1,6 +1,6 @@
 {
   "name": "qmemd",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Durable memory engine for Codex — remember/recall/forget over markdown facts, with a SessionStart snapshot + PreToolUse beacon.",
   "author": { "name": "Ciel2142", "url": "https://github.com/Ciel2142" },
   "homepage": "https://github.com/Ciel2142/qmemd#readme",
