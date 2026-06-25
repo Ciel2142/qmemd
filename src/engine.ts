@@ -1435,9 +1435,21 @@ export async function remember(
       const stripped = top.filepath.startsWith("qmd://") ? top.filepath.slice(6) : top.filepath;
       const dupType = (stripped.split("/").slice(-2, -1)[0] ?? type) as MemoryType;
       const dupPath = memoryFilePath(root, dupType, dupSlug);
+      // An FTS hit is usually a paraphrase to BLOCK, but BM25 also matches a CONTRADICTION
+      // whose differing value still shares enough terms to clear the (tiny) floor — e.g.
+      // "…JDK 21" vs "…JDK 25", where the i5y AND-query assumption does not hold and Tier-2
+      // fires before Tier-2.5 can classify (qmemd-5td). Classify here too instead of assuming
+      // "duplicate", mirroring Tier-2.5, so an FTS-caught conflict SURFACES with its authority
+      // comparison rather than being silently swallowed as a dup. Fall back to "duplicate" if
+      // the matched fact is unreadable (mirrors duplicatePreview — never block on the lookup).
+      const existing = getFact(root, dupSlug);
+      const disposition: RememberDisposition = existing
+        ? classifyNearMatch(`${slug} ${firstLine(input.fact)}`, `${existing.frontmatter.name} ${firstLine(existing.body)}`)
+        : "duplicate";
       // No write happened, so nothing is newly unindexed (qmemd-32x). Surface the
       // matched fact so the decider isn't blocked blind (qmemd-cs0).
-      return { wrote: false, slug: dupSlug, path: dupPath, type: dupType, duplicateOf: dupSlug, disposition: "duplicate", indexed: true, synced: true, dedupSkipped, ...duplicatePreview(root, dupSlug) };
+      return { wrote: false, slug: dupSlug, path: dupPath, type: dupType, duplicateOf: dupSlug, disposition, indexed: true, synced: true, dedupSkipped, ...duplicatePreview(root, dupSlug),
+        ...(disposition === "conflict" ? { authorityComparison: buildAuthorityComparison(root, type, input.source, dupSlug) } : {}) };
     }
 
     // Tier 2.5: model-free near-duplicate pre-pass (qmemd-i5y) + contradiction classifier
