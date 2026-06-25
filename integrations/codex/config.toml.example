@@ -8,7 +8,7 @@ command = "qmemd"
 args = ["mcp"]
 
 # Optional — Claude-style memory hooks (auto session snapshot + beacon).
-# Enable Codex's experimental hooks engine, then drop hooks.json.example at
+# Enable Codex's experimental hooks engine, then drop hooks/hooks.json at
 # ~/.codex/hooks.json. Needs a recent Codex CLI (hooks shipped v0.114.0+).
 [features]
 codex_hooks = true

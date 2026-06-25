@@ -1,0 +1,16 @@
+{
+  "name": "qmemd",
+  "version": "0.4.1",
+  "description": "Durable memory engine for Cursor — remember/recall/forget over markdown facts, with a SessionStart snapshot + PreToolUse beacon.",
+  "author": { "name": "Ciel2142", "url": "https://github.com/Ciel2142" },
+  "homepage": "https://github.com/Ciel2142/qmemd#readme",
+  "repository": "https://github.com/Ciel2142/qmemd",
+  "license": "MIT",
+  "keywords": ["memory", "recall", "remember", "markdown", "mcp", "agent", "cursor"],
+  "rules": "./qmemd.mdc",
+  "skills": "./skills/",
+  "hooks": "./hooks.json",
+  "mcpServers": {
+    "qmemd": { "command": "qmemd", "args": ["mcp"] }
+  }
+}

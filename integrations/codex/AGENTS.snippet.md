@@ -1,6 +1,6 @@
 <!-- Paste into ~/.codex/AGENTS.md (global) or your repo-root AGENTS.md. -->
 <!-- Adapted from claude/qmemd.md for Codex: memory is pull-only by default. Wire the
-     optional hooks (qmemd's integrations/codex/hooks.json.example) for Claude-style auto
+     optional hooks (qmemd's integrations/codex/hooks/hooks.json, or the native Codex plugin)
      snapshot + beacon. Re-apply by hand if claude/qmemd.md changes — don't blind-copy. -->
 
 # Memory (qmemd)
@@ -9,7 +9,7 @@ Durable knowledge lives in **qmemd memory** (knowledge lane); work/issue state l
 
 **Remember** (`remember` MCP tool, or `qmemd remember "<fact>" --type <type>`) when: the user states a durable preference (`type: user`), gives guidance/correction on how to work (`type: feedback`), I discover a non-obvious gotcha or a repo/system fact not in code/git (`type: project`), or hit a reference worth keeping — URL/dashboard/discovery (`type: reference`).
 
-**Recall** (`recall` MCP tool, or `qmemd recall "<topic>"`) — **pull-only** unless you wired the optional hooks (qmemd's `integrations/codex/hooks.json.example`: a `SessionStart` snapshot + `PreToolUse` beacon, Claude-style). With them a *partial* snapshot + beacon fire automatically; either way, pull explicitly at these concrete moments:
+**Recall** (`recall` MCP tool, or `qmemd recall "<topic>"`) — **pull-only** unless you wired the optional hooks (qmemd's `integrations/codex/hooks/hooks.json`, or the native plugin: a `SessionStart` snapshot + `PreToolUse` beacon, Claude-style). With them a *partial* snapshot + beacon fire automatically; either way, pull explicitly at these concrete moments:
 - **Before diagnosing any build/env/tooling error** — the cause and fix may already be documented.
 - **On first touch of a repo/system/tool this session** — the trigger is *first touch*, including a mid-session sub-issue pivot.
 - **When a user instruction names a mechanism you're about to implement** — recall it before designing.

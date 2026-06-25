@@ -1,13 +1,46 @@
 # qmemd integrations (Codex, Cursor & Windsurf)
 
-qmemd's Claude Code packaging is a native plugin (see the repo README). Codex,
-Cursor, and Windsurf wire qmemd in by hand: an **MCP server** for the
-`remember`/`recall`/`forget` tools, plus an **always-on rule** so the agent recalls
-proactively. Every file here is copy-paste; nothing is generated.
+qmemd's Claude Code packaging is a native plugin (see the repo README). **Cursor and
+Codex now have native plugins too** (next section) — the recommended path. Windsurf, and
+anyone who prefers manual wiring, can copy-paste the pieces by hand: an **MCP server** for
+the `remember`/`recall`/`forget` tools, plus an **always-on rule** so the agent recalls
+proactively.
 
 Install the CLI first so the MCP server resolves: `npm i -g @ciel2142/qmemd`
 (the command is `qmemd`). A first-ever `npx` MCP cold-start can exceed the client's
 initialize timeout, so a global install is the reliable path for the MCP server.
+
+## Install as a native plugin (Cursor & Codex)
+
+Cursor and Codex now have plugin formats that bundle the MCP server, the skill, and the
+snapshot + beacon hooks into a single install — the same shape as qmemd's Claude Code
+plugin. The plugin dirs sit alongside the manual snippets and share one skill
+(`skills/qmemd-memory/`, symlinked in). The CLI prereq above still applies. Validated
+against each vendor's published plugin spec (2026-06) — install locally and test before
+publishing to any marketplace.
+
+**Cursor** — manifest `cursor/.cursor-plugin/plugin.json` (rule + skill + MCP +
+`sessionStart`/`preToolUse` hooks):
+
+- **Local:** copy the `cursor/` dir to `~/.cursor/plugins/local/qmemd/` — available
+  immediately, no marketplace.
+- **Marketplace:** submit the repo for review at `cursor.com/marketplace/publish`. Cursor
+  has no self-host "add owner/repo" marketplace yet; Enterprise team marketplaces can import
+  the GitHub repo directly.
+
+**Codex** — manifest `codex/.codex-plugin/plugin.json` (skill + MCP + hooks at
+`codex/hooks/hooks.json`). Enable the hooks engine first (`codex_hooks = true`, see
+`codex/config.toml.example`):
+
+- **Personal:** add the plugin to `~/.agents/plugins/marketplace.json`, then enable it from
+  `codex /plugins`.
+- **Repo marketplace:** `codex plugin marketplace add Ciel2142/qmemd`, then install from
+  `codex /plugins`.
+
+Codex has no always-on *rule* component, so the remember/recall policy still comes from
+`codex/AGENTS.snippet.md` (append to `AGENTS.md`) — the SessionStart hook supplies the live
+memory snapshot. Marketplace publishing also wants the `interface` block's privacy/terms URLs
+and a logo; fill those into `plugin.json` before submitting.
 
 ## Codex CLI
 
@@ -52,7 +85,7 @@ E2E-test in your client before relying on it — hook schemas move fast.
 1. Enable the hooks engine: add a `[features]` section with `codex_hooks = true` to
    `~/.codex/config.toml` (already in `codex/config.toml.example`). Needs a recent Codex CLI
    (hooks shipped v0.114.0+).
-2. Copy `codex/hooks.json.example` to `~/.codex/hooks.json` (user) or `.codex/hooks.json` (repo):
+2. Copy `codex/hooks/hooks.json` to `~/.codex/hooks.json` (user) or `.codex/hooks.json` (repo):
    `SessionStart` → snapshot, `PreToolUse` (Bash) → beacon. Codex reads `additionalContext` from
    the same envelope Claude does.
 
@@ -62,7 +95,7 @@ E2E-test in your client before relying on it — hook schemas move fast.
   (`.claude/settings.json`), enable Cursor Settings → *third-party skills*. Cursor maps
   `SessionStart → sessionStart` and `PreToolUse → preToolUse` and parses `hookSpecificOutput`,
   so the snapshot + beacon fire unchanged.
-- **Or native:** copy `cursor/hooks.json.example` to `.cursor/hooks.json`.
+- **Or native:** copy `cursor/hooks.json` to `.cursor/hooks.json` (or install the plugin above).
 
 ### Windsurf — partial (no session-start event)
 

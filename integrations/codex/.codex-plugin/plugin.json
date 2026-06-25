@@ -1,0 +1,25 @@
+{
+  "name": "qmemd",
+  "version": "0.4.1",
+  "description": "Durable memory engine for Codex — remember/recall/forget over markdown facts, with a SessionStart snapshot + PreToolUse beacon.",
+  "author": { "name": "Ciel2142", "url": "https://github.com/Ciel2142" },
+  "homepage": "https://github.com/Ciel2142/qmemd#readme",
+  "repository": "https://github.com/Ciel2142/qmemd",
+  "license": "MIT",
+  "keywords": ["memory", "recall", "remember", "markdown", "mcp", "agent", "codex"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "qmemd",
+    "shortDescription": "Durable memory: remember / recall / forget",
+    "longDescription": "Durable memory engine over markdown facts. Bundles the qmemd MCP server (remember/recall/forget), the qmemd-memory skill, and lifecycle hooks that inject a SessionStart memory snapshot and a PreToolUse memory-presence beacon — the same behaviour qmemd ships for Claude Code.",
+    "developerName": "Ciel2142",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "https://github.com/Ciel2142/qmemd",
+    "defaultPrompt": [
+      "Recall what we know about this repo before diagnosing.",
+      "Remember this as a durable project fact."
+    ]
+  }
+}
