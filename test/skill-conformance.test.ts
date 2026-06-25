@@ -42,4 +42,16 @@ describe("qmemd-memory SKILL.md conformance (4lr)", () => {
   test("warns that the session snapshot is partial", () => {
     expect(raw.toLowerCase()).toContain("partial");
   });
+
+  // 751594b: the cursor/codex plugins ship a real *copy* of the root skill (plugin
+  // packaging can't carry symlinks), so nothing makes them track root except this guard.
+  test("plugin skill copies are byte-identical to root (no drift)", async () => {
+    for (const copy of [
+      join(__dirname, "..", "integrations", "cursor", "skills", "qmemd-memory", "SKILL.md"),
+      join(__dirname, "..", "integrations", "codex", "skills", "qmemd-memory", "SKILL.md"),
+    ]) {
+      const body = await readFile(copy, "utf-8");
+      expect(body, `${copy} drifted — re-copy skills/qmemd-memory/SKILL.md over it`).toEqual(raw);
+    }
+  });
 });

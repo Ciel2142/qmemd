@@ -2,7 +2,7 @@
 name: qmemd-memory
 description: Store and recall durable knowledge with qmemd memory (remember/recall/forget). Use when learning a durable user preference, a non-obvious gotcha, a reference worth keeping, or when starting a task that touches a system/tool/repo you may have notes on.
 license: MIT
-compatibility: Requires the qmemd CLI or MCP server. qmemd is unversioned pre-1.0 (package.json is at 0.2.0, no CHANGELOG) — feature availability tracks the checkout's git log, not a version floor.
+compatibility: Requires the qmemd CLI or MCP server. qmemd is unversioned pre-1.0 (no CHANGELOG) — feature availability tracks the checkout's git log, not a version floor.
 allowed-tools: Bash(qmemd:*), mcp__qmemd__remember, mcp__qmemd__recall, mcp__qmemd__forget, mcp__qmemd__get, mcp__qmemd__list
 ---
 

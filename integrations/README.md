@@ -14,8 +14,9 @@ initialize timeout, so a global install is the reliable path for the MCP server.
 
 Cursor and Codex now have plugin formats that bundle the MCP server, the skill, and the
 snapshot + beacon hooks into a single install — the same shape as qmemd's Claude Code
-plugin. The plugin dirs sit alongside the manual snippets and share one skill
-(`skills/qmemd-memory/`, symlinked in). The CLI prereq above still applies. Validated
+plugin. The plugin dirs sit alongside the manual snippets and each carry a copy of the
+root skill (`skills/qmemd-memory/`), kept byte-identical by a conformance test (plugin
+packaging can't ship symlinks reliably). The CLI prereq above still applies. Validated
 against each vendor's published plugin spec (2026-06) — install locally and test before
 publishing to any marketplace.
 
