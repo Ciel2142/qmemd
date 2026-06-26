@@ -5,6 +5,7 @@ import { openMemoryStore, MEMORY_COLLECTION } from "../store.js";
 import { remember, recallQueryWithStatus, recallSession, forget, getFact, listFacts, staleFacts, markReviewed, projectOverview, formatTagHistogram, countUnreadableFacts, pendingVectorPhrase, completenessFooter, MEMORY_TYPES, PLATFORMS, DEFAULT_MIN_SCORE, applyMerge } from "../engine.js";
 import type { MemoryType, Platform, RecallResult, RecallHit, MergePlan, StaleReport } from "../engine.js";
 import { tryDaemonRecall } from "../client.js";
+import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capability.js";
 import { runBeacon, runWriteBeacon } from "../beacon.js";
 import { gitPullFfOnly, sessionSyncWarning } from "../git.js";
 import { memoryRoot, cacheDir, daemonPaths, systemdUserDir, qmemdConfigDir, launchAgentsDir, macLogsDir } from "../paths.js";
@@ -172,7 +173,7 @@ function printUsage(): void {
   console.log("    --supersedes <slug>: write this fact AND retire <slug> (hidden from recall, linked in frontmatter, one commit)");
   console.log("    --ttl <N>d|w|m|y / --review-by <date>: schedule a re-verify date for a fact that ages — `qmemd stale` surfaces it once due");
   console.log("    on --replace: omit --tags/--platforms/--review-by to keep the existing values, or pass \"\" to clear them");
-  console.log("  qmemd recall <query> [--lex] [--cross-project] [--type T] [--platform P|--all-platforms] [--limit N] [--min-score N] [--full|--skim] [--json]");
+  console.log("  qmemd recall <query> [--lex|--hybrid] [--cross-project] [--type T] [--platform P|--all-platforms] [--limit N] [--min-score N] [--full|--skim] [--json]");
   console.log("  qmemd recall --session                 - session snapshot (for hooks)");
   console.log("  qmemd show <slug>                      - print one fact in full (no model)");
   console.log("  qmemd list [--type T] [--tag t] [--project p] [--platform P] [--json]  - browse the corpus (no model)");
@@ -198,7 +199,7 @@ async function main() {
     options: {
       type: { type: "string" }, tags: { type: "string" }, project: { type: "string" },
       source: { type: "string" }, as: { type: "string" }, replace: { type: "string" },
-      pin: { type: "boolean" }, force: { type: "boolean" }, lex: { type: "boolean" },
+      pin: { type: "boolean" }, force: { type: "boolean" }, lex: { type: "boolean" }, hybrid: { type: "boolean" },
       session: { type: "boolean" }, limit: { type: "string" }, json: { type: "boolean" },
       full: { type: "boolean" }, skim: { type: "boolean" }, tag: { type: "string" },
       http: { type: "boolean" }, daemon: { type: "boolean" }, port: { type: "string" },
@@ -301,7 +302,7 @@ async function main() {
         break;
       }
       const query = rest.join(" ").trim();
-      if (!query) { console.error(`Usage: qmemd recall <query> [--lex] [--type T] [--platform P|--all-platforms] [--limit N] [--min-score N] [--full] [--skim] [--json]\n       qmemd recall --session`); process.exit(1); }
+      if (!query) { console.error(`Usage: qmemd recall <query> [--lex|--hybrid] [--type T] [--platform P|--all-platforms] [--limit N] [--min-score N] [--full] [--skim] [--json]\n       qmemd recall --session`); process.exit(1); }
       const type = requireValidType(values.type); // reject before opening the store (qmemd-jzz)
       // No `|| default` on numeric input: it silently swallowed --limit 0 and
       // --limit abc as 10 (qmemd-1jt). Missing → default; given → must be an int >= 1.
@@ -333,6 +334,13 @@ async function main() {
         process.exit(1);
       }
       const platform = allPlatforms ? "all" : requireValidPlatform(values.platform);
+      // --lex / --hybrid force the mode for this call and are mutually exclusive — like
+      // --platform/--all-platforms, reject the combo instead of letting one silently win.
+      if (values.lex && values.hybrid) {
+        console.error("--lex and --hybrid are mutually exclusive — pass only one. --lex forces lexical (fast, model-free); --hybrid forces full hybrid recall.");
+        process.exit(1);
+      }
+      const modeDecision = resolveExplicitMode({ lex: !!values.lex, hybrid: !!values.hybrid });
       // Project scope (qmemd-due): default recall is gated to this repo (cwd basename) + global;
       // --cross-project widens to every project. basename(cwd) mirrors `recall --session` (line 287).
       const project = basename(process.cwd());
@@ -342,7 +350,9 @@ async function main() {
       // --lex is model-free and as fast locally, so it never probes. Best-effort: null
       // (daemon down / different root / older daemon / bad response) → the local path
       // below runs exactly as before.
-      if (!values.lex) {
+      // Warm daemon serves hybrid at warm latency — try it for any non-lex mode (incl. auto:
+      // a reachable warm daemon outranks the local probe). Explicit lex never delegates.
+      if (modeDecision.mode !== "lex") {
         const delegated = await tryDaemonRecall(root, {
           query, type, limit, minScore, fullBody: !!values.full, skim: !!values.skim, platform, project, crossProject,
         });
@@ -350,8 +360,19 @@ async function main() {
       }
       const store = await openMemoryStore();
       try {
+        // No warm daemon answered. Auto resolves via the cached GPU probe; explicit modes pass through.
+        const mode: RecallMode = modeDecision.mode === "auto" ? await autoRecallMode() : modeDecision.mode;
+        const lexOnly = mode === "lex";
+        // Downgrade note: only when lex was host-driven (forced-CPU or the auto probe), never when
+        // the user explicitly asked for lex. Stderr only, so --json output is untouched.
+        if (lexOnly && !values.json) {
+          if (modeDecision.source === "force-cpu")
+            console.error(`${y}note:${r} QMD_FORCE_CPU set — using lex recall (fast). Force hybrid with --hybrid.`);
+          else if (modeDecision.mode === "auto")
+            console.error(`${y}note:${r} CPU-only host — using lex recall (fast). Force hybrid with --hybrid or QMEMD_RECALL_MODE=hybrid.`);
+        }
         const result = await recallQueryWithStatus(store, root, query, {
-          type, limit, lexOnly: !!values.lex, fullBody: !!values.full, skim: !!values.skim, minScore, platform, project, crossProject,
+          type, limit, lexOnly, fullBody: !!values.full, skim: !!values.skim, minScore, platform, project, crossProject,
         });
         printRecallResult(result, !!values.json, minScore, { project, crossProject });
       } finally { await store.close(); }

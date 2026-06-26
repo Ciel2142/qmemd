@@ -418,6 +418,41 @@ describe("CLI remember --replace inherits metadata (q65)", () => {
   });
 });
 
+function runCliEnv(args: string[], root: string, extraEnv: Record<string, string>) {
+  return spawnSync(TSX, [CLI, ...args], {
+    encoding: "utf-8",
+    env: { ...process.env, QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), ...extraEnv },
+  });
+}
+
+describe("recall mode resolution (capability gate)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-mode-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  test("--lex and --hybrid are mutually exclusive", () => {
+    const res = runCli(["recall", "anything", "--lex", "--hybrid"], root);
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("mutually exclusive");
+  });
+
+  test("QMD_FORCE_CPU forces lex and prints a downgrade note (model-free)", () => {
+    expect(runCli(["remember", "rabbit season fact", "--type", "project"], root).status).toBe(0);
+    const res = runCliEnv(["recall", "rabbit"], root, { QMD_FORCE_CPU: "1" });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("rabbit season fact");
+    expect(res.stderr).toContain("lex recall");
+  });
+
+  test("QMEMD_RECALL_MODE=lex forces lex WITHOUT a note (user chose it)", () => {
+    expect(runCli(["remember", "duck season fact", "--type", "project"], root).status).toBe(0);
+    const res = runCliEnv(["recall", "duck"], root, { QMEMD_RECALL_MODE: "lex" });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("duck season fact");
+    expect(res.stderr).not.toContain("lex recall");
+  });
+});
+
 function runHook(stdin: string, root: string, cache: string, everyN?: string) {
   return spawnSync(TSX, [CLI, "hook", "beacon"], {
     encoding: "utf-8",
