@@ -1,4 +1,7 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join as pathJoin } from "node:path";
 import { createRequire } from "node:module";
+import { cacheDir } from "./paths.js";
 
 export type GpuVerdict = "metal" | "cuda" | "vulkan" | false;
 export type RecallMode = "lex" | "hybrid";
@@ -68,4 +71,55 @@ export function nodeLlamaCppVersion(): string {
   } catch {
     return "unknown";
   }
+}
+
+export interface CapabilityCache { gpu: GpuVerdict; nlcVersion: string; probedAt: string; }
+export interface CapabilityDeps {
+  probe?: () => Promise<GpuVerdict>;
+  nlcVersion?: string;
+  cacheDir?: string;
+  now?: () => string;
+}
+
+const VALID_GPU = new Set<unknown>(["metal", "cuda", "vulkan", false]);
+
+/** Read + shape-validate the cache file; any error or invalid shape => null (=> re-probe). */
+function readCapabilityCache(file: string): CapabilityCache | null {
+  if (!existsSync(file)) return null;
+  try {
+    const obj = JSON.parse(readFileSync(file, "utf-8")) as Partial<CapabilityCache>;
+    if (!VALID_GPU.has(obj.gpu) || typeof obj.nlcVersion !== "string") return null;
+    return { gpu: obj.gpu as GpuVerdict, nlcVersion: obj.nlcVersion, probedAt: String(obj.probedAt ?? "") };
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort write; a read-only cache dir must not break recall. */
+function writeCapabilityCache(file: string, value: CapabilityCache): void {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(value));
+  } catch { /* best-effort */ }
+}
+
+/**
+ * The resolved GPU backend for this host, cached at <cacheDir>/gpu-capability.json so the
+ * probe is a once-per-host(-per-nlc-version) cost, never per recall. Re-probes only when the
+ * cache is missing/corrupt or the node-llama-cpp version changed (a new build could flip the
+ * verdict). All deps are injectable for tests so no test ever runs the real probe.
+ */
+export async function getGpuCapability(deps: CapabilityDeps = {}): Promise<GpuVerdict> {
+  const probe = deps.probe ?? probeGpuBackend;
+  const nlcVersion = deps.nlcVersion ?? nodeLlamaCppVersion();
+  const dir = deps.cacheDir ?? cacheDir();
+  const now = deps.now ?? (() => new Date().toISOString());
+  const file = pathJoin(dir, "gpu-capability.json");
+
+  const cached = readCapabilityCache(file);
+  if (cached && cached.nlcVersion === nlcVersion) return cached.gpu;
+
+  const gpu = await probe();
+  writeCapabilityCache(file, { gpu, nlcVersion, probedAt: now() });
+  return gpu;
 }
