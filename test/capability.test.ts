@@ -1,10 +1,13 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveExplicitMode, isCapableBackend, nodeLlamaCppVersion, getGpuCapability } from "../src/capability.js";
+import { resolveExplicitMode, isCapableBackend, nodeLlamaCppVersion, getGpuCapability, autoRecallMode, shouldAutoResolve } from "../src/capability.js";
 
 const E = (env: Record<string, string | undefined>) => env as NodeJS.ProcessEnv;
+
+function dirForAuto(): string { return mkdtempSync(join(tmpdir(), "qmemd-auto-")); }
 
 describe("resolveExplicitMode precedence", () => {
   test("--lex flag wins over everything", () => {
@@ -89,5 +92,28 @@ describe("getGpuCapability caching", () => {
     const probe = async () => { calls++; return "vulkan" as const; };
     expect(await getGpuCapability({ probe, nlcVersion: "1.0.0", cacheDir: dir })).toBe("vulkan");
     expect(calls).toBe(1);
+  });
+});
+
+describe("autoRecallMode", () => {
+  test("capable backend => hybrid", async () => {
+    expect(await autoRecallMode({ probe: async () => "cuda", nlcVersion: "1", cacheDir: dirForAuto() })).toBe("hybrid");
+  });
+  test("weak backend => lex", async () => {
+    expect(await autoRecallMode({ probe: async () => false, nlcVersion: "1", cacheDir: dirForAuto() })).toBe("lex");
+  });
+});
+
+describe("shouldAutoResolve", () => {
+  test("undefined lexOnly + cold server => resolve", () => {
+    expect(shouldAutoResolve(undefined, false)).toBe(true);
+    expect(shouldAutoResolve(undefined, undefined)).toBe(true);
+  });
+  test("explicit lexOnly => never resolve", () => {
+    expect(shouldAutoResolve(true, false)).toBe(false);
+    expect(shouldAutoResolve(false, false)).toBe(false);
+  });
+  test("warm daemon => never resolve", () => {
+    expect(shouldAutoResolve(undefined, true)).toBe(false);
   });
 });

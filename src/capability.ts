@@ -123,3 +123,14 @@ export async function getGpuCapability(deps: CapabilityDeps = {}): Promise<GpuVe
   writeCapabilityCache(file, { gpu, nlcVersion, probedAt: now() });
   return gpu;
 }
+
+/** The default recall mode for this host when nothing explicit decided (uses the cached probe). */
+export async function autoRecallMode(deps?: CapabilityDeps): Promise<RecallMode> {
+  return isCapableBackend(await getGpuCapability(deps)) ? "hybrid" : "lex";
+}
+
+/** Whether a recall handler should consult the auto resolver: only when the caller gave no
+ *  explicit lexOnly AND this is not the warm HTTP daemon (which never auto-downgrades). */
+export function shouldAutoResolve(lexOnly: boolean | undefined, warmServer: boolean | undefined): boolean {
+  return lexOnly === undefined && !warmServer;
+}
