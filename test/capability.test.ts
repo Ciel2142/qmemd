@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { resolveExplicitMode } from "../src/capability.js";
+import { resolveExplicitMode, isCapableBackend, nodeLlamaCppVersion } from "../src/capability.js";
 
 const E = (env: Record<string, string | undefined>) => env as NodeJS.ProcessEnv;
 
@@ -27,5 +27,23 @@ describe("resolveExplicitMode precedence", () => {
     expect(resolveExplicitMode({}, E({}))).toEqual({ mode: "auto", source: null });
     expect(resolveExplicitMode({}, E({ QMEMD_RECALL_MODE: "auto" }))).toEqual({ mode: "auto", source: null });
     expect(resolveExplicitMode({}, E({ QMEMD_RECALL_MODE: "garbage" }))).toEqual({ mode: "auto", source: null });
+  });
+});
+
+describe("isCapableBackend", () => {
+  test("a real GPU backend is capable", () => {
+    expect(isCapableBackend("metal")).toBe(true);
+    expect(isCapableBackend("cuda")).toBe(true);
+    expect(isCapableBackend("vulkan")).toBe(true);
+  });
+  test("false (CPU / no working backend) is not capable", () => {
+    expect(isCapableBackend(false)).toBe(false);
+  });
+});
+
+describe("nodeLlamaCppVersion", () => {
+  test("returns a non-empty string (a semver or 'unknown')", () => {
+    expect(typeof nodeLlamaCppVersion()).toBe("string");
+    expect(nodeLlamaCppVersion().length).toBeGreaterThan(0);
   });
 });
