@@ -920,3 +920,33 @@ describe("MCP stdio connect-first: lazy store (qmemd-faif.10)", () => {
     await rm(dbDir, { recursive: true, force: true });
   });
 });
+
+describe("MCP recall capability gate", () => {
+  test("stdio server auto-resolves an unspecified recall to lex on a weak host", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qmemd-mcpcap-"));
+    const dbDir = await mkdtemp(join(tmpdir(), "qmemd-mcpcapdb-"));
+    const store = await openQmd({ dbPath: join(dbDir, "i.sqlite"), config: { collections: { memory: { path: root, pattern: "**/*.md" } } } });
+
+    let resolverCalls = 0;
+    const server = buildMemoryServer(store, root, { resolveAutoMode: async () => { resolverCalls++; return "lex"; } });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    const client = new Client({ name: "t", version: "1.0.0" });
+    await client.connect(ct);
+
+    // Seed a fact via the remember tool (writes md + lex-reindex; no model).
+    await client.callTool({ name: "remember", arguments: { fact: "wabbit tracks here", type: "project" } });
+
+    // Recall WITHOUT lexOnly => the cold stdio server must consult the resolver and run lex.
+    const res = await client.callTool({ name: "recall", arguments: { query: "wabbit" } });
+    const text = (res.content as Array<{ type: string; text: string }>).map(c => c.text).join("\n");
+
+    expect(resolverCalls).toBe(1);
+    expect(text).toContain("wabbit tracks here");
+
+    await client.close();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  });
+});

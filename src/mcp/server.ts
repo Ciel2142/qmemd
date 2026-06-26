@@ -7,6 +7,7 @@ import { remember, recallQueryWithStatus, recallSession, forget as forgetFact, m
 import { memoryRoot } from "../paths.js";
 import { gitPullFfOnly, sessionSyncWarning, type GitDeps } from "../git.js";
 import { rootHash } from "../client.js";
+import { shouldAutoResolve, autoRecallMode, type RecallMode } from "../capability.js";
 import { basename } from "node:path";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -101,6 +102,12 @@ export interface MemoryServerOptions {
   sessionDefaultProject?: string;
   /** Injectable git runner for the session-start pull (tests); production uses real git. */
   gitDeps?: GitDeps;
+  /** True only for the warm HTTP daemon: it amortizes the model load by design and never
+   *  auto-downgrades. The per-session stdio server leaves this false, so on a CPU-only host
+   *  its default recall resolves to lex (the capability gate). */
+  warmServer?: boolean;
+  /** Injectable auto-mode resolver (tests). Production uses capability.autoRecallMode. */
+  resolveAutoMode?: () => Promise<RecallMode>;
 }
 
 /**
@@ -256,7 +263,14 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
       // Same resolution the session snapshot uses, so the `project` param means one thing.
       const currentProject = project ?? opts.sessionDefaultProject ?? basename(process.cwd());
       const store = await getStore();
-      const { hits, degraded, vectorsPending, moreMatches, belowFloor, saturated, crossProjectHidden } = await recallQueryWithStatus(store, root, query, { type, limit, lexOnly, minScore, skim, platform: allPlatforms ? "all" : platform, project: currentProject, crossProject: cross_project });
+      // Capability gate: when the caller gave no explicit lexOnly AND this is not the warm
+      // daemon, default the mode from the host's GPU capability (lex on a CPU-only box).
+      let effectiveLexOnly = lexOnly;
+      if (shouldAutoResolve(lexOnly, opts.warmServer)) {
+        const mode = await (opts.resolveAutoMode ?? autoRecallMode)();
+        effectiveLexOnly = mode === "lex";
+      }
+      const { hits, degraded, vectorsPending, moreMatches, belowFloor, saturated, crossProjectHidden } = await recallQueryWithStatus(store, root, query, { type, limit, lexOnly: effectiveLexOnly, minScore, skim, platform: allPlatforms ? "all" : platform, project: currentProject, crossProject: cross_project });
       let text = hits.length
         ? hits.map(h => {
             const foreign = !!cross_project && h.project !== currentProject && h.project !== "global";
@@ -509,7 +523,7 @@ export async function startMcpHttpServer(
   // tools, no IO/model); the store stays shared + warm. Daemon snapshot default 'global'
   // (qmemd-wdf): the daemon cwd is HOME, not a project.
   async function dispatchMcp(request: Request, parsedBody: unknown): Promise<Response> {
-    const server = buildMemoryServer(store, root, { sessionDefaultProject: "global" });
+    const server = buildMemoryServer(store, root, { sessionDefaultProject: "global", warmServer: true });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
