@@ -922,6 +922,19 @@ describe("MCP stdio connect-first: lazy store (qmemd-faif.10)", () => {
 });
 
 describe("MCP recall capability gate", () => {
+  const MODE_ENV = ["QMEMD_RECALL_MODE", "QMD_FORCE_CPU", "QMD_LLAMA_GPU"] as const;
+  let savedEnv: Record<string, string | undefined>;
+  beforeEach(() => {
+    savedEnv = {};
+    for (const k of MODE_ENV) { savedEnv[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of MODE_ENV) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
   test("stdio server auto-resolves an unspecified recall to lex on a weak host", async () => {
     const root = await mkdtemp(join(tmpdir(), "qmemd-mcpcap-"));
     const dbDir = await mkdtemp(join(tmpdir(), "qmemd-mcpcapdb-"));
@@ -943,6 +956,34 @@ describe("MCP recall capability gate", () => {
 
     expect(resolverCalls).toBe(1);
     expect(text).toContain("wabbit tracks here");
+
+    await client.close();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  });
+
+  test("stdio server honors QMD_FORCE_CPU=1 (env) — lex without consulting the probe", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qmemd-mcpenv-"));
+    const dbDir = await mkdtemp(join(tmpdir(), "qmemd-mcpenvdb-"));
+    const store = await openQmd({ dbPath: join(dbDir, "i.sqlite"), config: { collections: { memory: { path: root, pattern: "**/*.md" } } } });
+
+    process.env.QMD_FORCE_CPU = "1";
+    let resolverCalls = 0;
+    const server = buildMemoryServer(store, root, { resolveAutoMode: async () => { resolverCalls++; return "hybrid"; } });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    const client = new Client({ name: "t", version: "1.0.0" });
+    await client.connect(ct);
+
+    await client.callTool({ name: "remember", arguments: { fact: "elmer fudd lex fact", type: "project" } });
+    const res = await client.callTool({ name: "recall", arguments: { query: "elmer" } });
+    const text = (res.content as Array<{ type: string; text: string }>).map(c => c.text).join("\n");
+
+    // QMD_FORCE_CPU=1 ⇒ resolveExplicitMode returns lex ⇒ the probe/resolver is never consulted,
+    // and the recall runs lexical (model-free), still finding the fact.
+    expect(resolverCalls).toBe(0);
+    expect(text).toContain("elmer fudd lex fact");
 
     await client.close();
     await store.close();

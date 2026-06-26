@@ -7,7 +7,7 @@ import { remember, recallQueryWithStatus, recallSession, forget as forgetFact, m
 import { memoryRoot } from "../paths.js";
 import { gitPullFfOnly, sessionSyncWarning, type GitDeps } from "../git.js";
 import { rootHash } from "../client.js";
-import { shouldAutoResolve, autoRecallMode, type RecallMode } from "../capability.js";
+import { shouldAutoResolve, autoRecallMode, resolveExplicitMode, type RecallMode } from "../capability.js";
 import { basename } from "node:path";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -267,8 +267,13 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
       // daemon, default the mode from the host's GPU capability (lex on a CPU-only box).
       let effectiveLexOnly = lexOnly;
       if (shouldAutoResolve(lexOnly, opts.warmServer)) {
-        const mode = await (opts.resolveAutoMode ?? autoRecallMode)();
-        effectiveLexOnly = mode === "lex";
+        // No explicit lexOnly and not the warm daemon. Honor the same env-level overrides as the
+        // CLI (QMEMD_RECALL_MODE / QMD_FORCE_CPU / QMD_LLAMA_GPU) so both surfaces resolve
+        // uniformly (spec §4), then fall through to the cached GPU probe only when nothing
+        // explicit decided (mode "auto").
+        const { mode } = resolveExplicitMode({});
+        const resolved = mode === "auto" ? await (opts.resolveAutoMode ?? autoRecallMode)() : mode;
+        effectiveLexOnly = resolved === "lex";
       }
       const { hits, degraded, vectorsPending, moreMatches, belowFloor, saturated, crossProjectHidden } = await recallQueryWithStatus(store, root, query, { type, limit, lexOnly: effectiveLexOnly, minScore, skim, platform: allPlatforms ? "all" : platform, project: currentProject, crossProject: cross_project });
       let text = hits.length
