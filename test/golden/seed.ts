@@ -57,15 +57,18 @@ export async function loadGoldenSet(path: string): Promise<GoldenSet> {
   return validateGoldenSet(JSON.parse(await readFile(path, "utf-8")) as GoldenSet);
 }
 
-/** Seed the golden corpus into a fresh tmp store. With `embedModel` set the store is
- *  hybrid-capable (the bench); without it the store is lex-only and loads no model (the
- *  vitest guard). The tmp dir is not a git repo, so remember()'s git sync is a no-op.
- *  Throws if any fact deduped or wrote under an unexpected slug. */
-export async function seedGoldenStore(
-  goldenSetPath: string,
+export interface TmpMemoryStore {
+  store: QMDStore;
+  root: string;
+  cleanup: () => Promise<void>;
+}
+
+/** A fresh empty tmp store (no corpus seeded). Lex-only unless `embedModel` is set. The tmp
+ *  dir is not a git repo, so remember()'s git sync is a no-op. Shared by the behavioral eval
+ *  partitions (retirement/staleness) and by seedGoldenStore. */
+export async function createTmpMemoryStore(
   opts: { embedModel?: string } = {},
-): Promise<SeededStore> {
-  const golden = await loadGoldenSet(goldenSetPath);
+): Promise<TmpMemoryStore> {
   const parent = await mkdtemp(join(tmpdir(), "qmemd-golden-"));
   const root = join(parent, "mem");
   await mkdir(root, { recursive: true });
@@ -77,18 +80,30 @@ export async function seedGoldenStore(
       collections: { memory: { path: root, pattern: "**/*.md" } },
     },
   });
-  for (const entry of golden.corpus) {
-    const res = await remember(store, root, { fact: entry.fact, type: entry.type });
-    if (!res.wrote) throw new Error(`corpus fact '${entry.slug}' deduped against '${res.duplicateOf}'`);
-    if (res.slug !== entry.slug) throw new Error(`corpus fact wrote slug '${res.slug}', expected '${entry.slug}'`);
-  }
   return {
     store,
     root,
-    golden,
     cleanup: async () => {
       await store.close();
       await rm(parent, { recursive: true, force: true });
     },
   };
+}
+
+/** Seed the golden corpus into a fresh tmp store. With `embedModel` set the store is
+ *  hybrid-capable (the bench); without it the store is lex-only and loads no model (the
+ *  vitest guard). The tmp dir is not a git repo, so remember()'s git sync is a no-op.
+ *  Throws if any fact deduped or wrote under an unexpected slug. */
+export async function seedGoldenStore(
+  goldenSetPath: string,
+  opts: { embedModel?: string } = {},
+): Promise<SeededStore> {
+  const golden = await loadGoldenSet(goldenSetPath);
+  const tmp = await createTmpMemoryStore(opts);
+  for (const entry of golden.corpus) {
+    const res = await remember(tmp.store, tmp.root, { fact: entry.fact, type: entry.type });
+    if (!res.wrote) throw new Error(`corpus fact '${entry.slug}' deduped against '${res.duplicateOf}'`);
+    if (res.slug !== entry.slug) throw new Error(`corpus fact wrote slug '${res.slug}', expected '${entry.slug}'`);
+  }
+  return { store: tmp.store, root: tmp.root, golden, cleanup: tmp.cleanup };
 }
