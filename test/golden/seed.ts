@@ -19,6 +19,13 @@ export interface GoldenQuery {
 export interface GoldenSet {
   corpus: { type: MemoryType; fact: string; slug: string }[];
   queries: GoldenQuery[];
+  /** Lex-hard paraphrase/synonym queries that force the vector+rerank path (e16). Measured by
+   *  the bench (hybrid) only — EXCLUDED from the lex vitest guard so a no-lex-overlap query
+   *  cannot drop the committed lex floors. */
+  paraphrase_queries?: GoldenQuery[];
+  /** Negative queries that must return NOTHING above the hybrid rerank floor (e16). No relevant
+   *  set — the bench asserts the floor drops every hit. */
+  distractors?: string[];
   min_score: number;
 }
 
@@ -43,7 +50,7 @@ export function validateGoldenSet(golden: GoldenSet): GoldenSet {
     if (slugs.has(c.slug)) throw new Error(`golden set: duplicate corpus slug '${c.slug}'`);
     slugs.add(c.slug);
   }
-  for (const q of golden.queries) {
+  for (const q of [...golden.queries, ...(golden.paraphrase_queries ?? [])]) {
     if (!q.relevant?.length) throw new Error(`golden set: query '${q.query}' has no relevant slugs`);
     for (const s of [...q.relevant, ...(q.top ? [q.top] : [])]) {
       if (!slugs.has(s)) throw new Error(`golden set: query '${q.query}' references unknown slug '${s}'`);

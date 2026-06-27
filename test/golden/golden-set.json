@@ -53,5 +53,15 @@
     { "query": "vector database port",    "relevant": ["qdrant-vector-database-listens-on-port-6333", "postgres-with-pgvector-hosts-the-core-database"], "top": "qdrant-vector-database-listens-on-port-6333" },
     { "query": "recall session index",    "relevant": ["recall-session-runs-git-pull-before-snapshot", "reindex-rebuilds-lex-index-from-markdown-files"] }
   ],
+  "paraphrase_queries": [
+    { "query": "which TCP endpoint does the event streaming bus listen on", "relevant": ["redpanda-broker-listens-on-port-9092-with-sasl"] },
+    { "query": "embedding similarity store network address", "relevant": ["qdrant-vector-database-listens-on-port-6333"] },
+    { "query": "what gets injected at the start of a conversation", "relevant": ["recall-session-runs-git-pull-before-snapshot"] }
+  ],
+  "distractors": [
+    "react component lifecycle hooks",
+    "sourdough hydration ratio",
+    "nfl playoff seeding rules"
+  ],
   "min_score": 0.5
 }
