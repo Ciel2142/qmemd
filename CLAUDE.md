@@ -1,7 +1,5 @@
 # Project Instructions for AI Agents
 
-This file provides instructions and context for AI coding agents working on this project.
-
 ## Issue Tracker (beads_rust / br)
 
 This project uses **br** (beads_rust) for issue tracking. Run `br robot-docs guide` for the agent workflow, and `br --help` for the command list.
@@ -60,13 +58,11 @@ npm test                 # vitest run --reporter=verbose  (no model load — lex
 npm run qmemd -- <verb>  # run the CLI from source via tsx, e.g. npm run qmemd -- recall --session
 ```
 
-`bin/qmemd` execs `dist/cli/qmemd.js`, so a global/linked `qmemd` reflects `src/` only after `npm run build`.
-
 ## Architecture Overview
 
-qmemd is a durable **memory engine over markdown facts**, backed by the `@tobilu/qmd` search SDK. It is the *sole* memory engine — upstream `qmd` (≥2.5.3) no longer ships `remember/recall/forget`.
+qmemd is a durable **memory engine over markdown facts**, backed by the `@tobilu/qmd` search SDK (qmd ≥2.5.3 ships no `remember/recall/forget`).
 
-Each fact is a markdown file at `$QMD_MEMORY_DIR/<type>/<slug>.md` with YAML frontmatter (`name/description/type/tags/project/platforms/created/pinned/review_by/updated/supersedes/superseded_by/conflicts_with/source` — only the first seven plus `pinned` always present). On every write the file is git-committed (and `git push`ed when an upstream is set), lex-indexed into a dedicated SQLite DB at `$QMEMD_DB` (never qmd's own index), and later embedded with the small `embeddinggemma-300M` model. Session-snapshot paths (CLI `recall --session` and the MCP/REST `session:true` branches) first run `git pull --ff-only`. Writes are lex-only; vectors are built lazily on the first hybrid recall.
+Each fact is a markdown file at `$QMD_MEMORY_DIR/<type>/<slug>.md` with YAML frontmatter (`name/description/type/tags/project/platforms/created` + `pinned` always present; optional fields `supersedes`/`review_by`/`source` etc. in engine.ts). Every write is git-committed (pushed if upstream set), lex-indexed into `$QMEMD_DB` (never qmd's own index), then embedded lazily on the first hybrid recall. Session-snapshot paths (`recall --session`, `session:true`) git-pull --ff-only first.
 
 Layers (`src/`):
 - `paths.ts` — `memoryRoot()` (`$QMD_MEMORY_DIR`), `indexDbPath()` (`$QMEMD_DB`), cache/config dirs (`$XDG_CACHE_HOME`).
@@ -84,9 +80,9 @@ Memory types: `user | feedback | project | reference`.
 ## Conventions & Patterns
 
 - **Two lanes:** durable knowledge → qmemd memory; work/issue state → br (beads_rust) (above). Never duplicate across lanes.
-- **Recall scopes to {current project, global} by default** (qmemd-due): `recallQuery` gates hits to the caller's project + `global` whenever a `project` reaches the engine (CLI sends `basename(cwd)`; the MCP tool resolves `project ?? opts.sessionDefaultProject ?? basename(cwd)`; REST passes `body.project` **verbatim** — undefined ⇒ no gate ⇒ whole corpus, the pre-feature contract). `--cross-project` (CLI) / `cross_project:true` (MCP) / `crossProject` (REST body) widen to every project; foreign hits then carry `project` provenance and render fenced — `[<type> ⊥ <project>]` under a `— other projects —` divider (display-only; engine ranking/`limit` unchanged). A `N cross-project matches hidden (--cross-project to include)` footer (the `completenessFooter` idiom, alongside `moreMatches`/`belowFloor`) advertises what the default gate dropped, so narrowing is never silent. The gate mirrors `recallSession`'s `inProject` (already project-gated); `RecallHit.project`/`RecallResult.crossProjectHidden` are the new surfaces.
-- **Dedup is three-tier** (`remember`): Tier-1 exact-slug (file existence), Tier-2 FTS near-duplicate (BM25 score > `DEDUP_SCORE_FTS`; qmd ANDs all query terms, so unrelated facts don't false-dedup as the corpus grows), Tier-2.5 model-free token-set near-dup scan whose contradiction classifier (differing identifier / polarity / antonym) routes a likely update to a **surfaced conflict** (`disposition:"conflict"` + authority comparison) instead of a silent block or silent write. The engine never auto-resolves.
-- **Staleness is surface-only** (qmemd-9su / qmemd-s4w): a fact with no explicit `review_by` inherits a per-type default review window (`project` 90d, `reference` 180d, `user`/`feedback` durable; env-tunable via `QMEMD_TTL_<TYPE>`); `qmemd stale` and `qmemd doctor` list facts **due** (explicit or implicit date past) plus the **never-reviewed backlog** (decay-prone, not yet due) and never mutate. `review_by: never` marks a fact durable. `qmemd reviewed <slug>` forward-sets `review_by` (leaving `updated` honest) to reset the clock. Recall ignores `review_by`; nothing auto-expires.
+- **Recall scopes to {current project, global} by default** (qmemd-due): a project reaching the engine gates hits to that project + `global`; `--cross-project` / `cross_project` / `crossProject` widen to the whole corpus (foreign hits render fenced + a `N cross-project matches hidden` footer). CLI/MCP always resolve a concrete project (`basename(cwd)` / `project ?? sessionDefaultProject ?? cwd`); **REST passes `body.project` verbatim — undefined ⇒ no gate ⇒ whole corpus (the pre-feature contract; don't add a default)**. Glyph (`[<type> ⊥ <project>]`) + surfaces: `cli/qmemd.ts` + `mcp/server.ts` render, `engine.ts recallQuery` gate.
+- **Dedup is three-tier** (`remember`): exact-slug, FTS BM25 (> `DEDUP_SCORE_FTS`), then a model-free token-set near-dup pass whose contradiction classifier routes a likely update to a **surfaced conflict** (`disposition:"conflict"`) instead of a silent block or write — the engine never auto-resolves. Tier detail: README + dedup.ts.
+- **Staleness is surface-only** (qmemd-9su): facts without explicit `review_by` inherit a per-type window (`project` 90d, `reference` 180d, `user`/`feedback` durable; env `QMEMD_TTL_<TYPE>`); `qmemd stale`/`qmemd doctor` list **due** + the **never-reviewed backlog** and never mutate. `review_by: never` marks a fact durable. `qmemd reviewed <slug>` forward-sets `review_by` (leaving `updated` honest). Recall ignores `review_by`; nothing auto-expires.
 - **Indexing:** `remember`/`forget` reindex automatically. To adopt a dir written out-of-band, run `qmemd reindex` (builds the lex index) then `qmemd embed` (vectors). Hybrid `recall` self-heals pending embeds via a lazy barrier.
 - **Validate before filesystem/index use:** `assertSafeSlug` (traversal/newline), CLI `requireValidType` + MCP zod enums (closed `MemoryType`). The MCP layer allowlists `structuredContent` — never leak absolute fs paths to the model.
 - **Best-effort indexing:** a fact is written + git-committed *before* reindex; an index failure surfaces as `indexed:false` and self-heals on the next write — it never loses the fact.

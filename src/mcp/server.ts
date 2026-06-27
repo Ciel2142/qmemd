@@ -65,12 +65,12 @@ const HIT_DTO_Z = z.object({
 // `snapshot` field (mirroring REST /recall's session response) and every field is optional.
 const RECALL_OUTPUT_SCHEMA = {
   hits: z.array(HIT_DTO_Z).optional().describe("Ranked matches (query path)."),
-  degraded: z.boolean().optional().describe("Hybrid recall fell back toward lexical — semantic matches may be missing (qmemd-9t1)."),
+  degraded: z.boolean().optional().describe("Hybrid recall fell back toward lexical — semantic matches may be missing."),
   vectorsPending: z.number().int().optional().describe("Vectors still pending behind a degraded result; -1 = unknown."),
-  moreMatches: z.number().int().optional().describe("In-scope matches past `limit`; a lower bound when saturated (qmemd-40h)."),
-  belowFloor: z.number().int().optional().describe("Hits the minScore relevance floor hid (qmemd-40h)."),
-  saturated: z.boolean().optional().describe("Search pool came back full — moreMatches is a lower bound (qmemd-40h)."),
-  crossProjectHidden: z.number().int().optional().describe("Relevant matches from OTHER projects the default scope hid; pass cross_project:true to include them (qmemd-due)."),
+  moreMatches: z.number().int().optional().describe("In-scope matches past `limit`; a lower bound when saturated."),
+  belowFloor: z.number().int().optional().describe("Hits the minScore relevance floor hid."),
+  saturated: z.boolean().optional().describe("Search pool came back full — moreMatches is a lower bound."),
+  crossProjectHidden: z.number().int().optional().describe("Relevant matches from OTHER projects the default scope hid; pass cross_project:true to include them."),
   snapshot: z.string().optional().describe("The session snapshot text (session:true path)."),
 };
 
@@ -121,21 +121,21 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
 
   server.registerTool("remember", {
     title: "Remember",
-    description: "Store a durable fact in qmemd memory (user/feedback/project/reference). Remember only durable, non-obvious facts worth recalling later — when in doubt, don't (a noisy corpus degrades recall). Set `source` to where the fact came from for provenance. Returns the slug; reports a near-duplicate instead of writing unless replace/force is set.",
+    description: "Store a durable, non-obvious fact in qmemd memory — when in doubt, don't (a noisy corpus degrades recall). Returns the slug; reports a near-duplicate instead of writing unless replace/force is set.",
     annotations: { readOnlyHint: false, openWorldHint: false },
     inputSchema: {
       fact: z.string().describe("The fact to remember, as a self-contained sentence."),
-      type: MEMORY_TYPES_Z.optional().describe("user | feedback | project | reference (default: reference)"),
-      tags: z.array(z.string()).optional().describe("Optional tags to categorize the fact."),
+      type: MEMORY_TYPES_Z.optional().describe("Default: reference."),
+      tags: z.array(z.string()).optional(),
       project: z.string().optional().describe("Project name, or 'global' (default)."),
       pin: z.boolean().optional().describe("Pin to always surface at session start."),
-      source: z.string().optional().describe("Where this fact came from (URL, 'user, <date>', or the producing tool). Fill it for provenance — surfaced verbatim, with the fact's type and date, when a write conflicts with an existing fact so you can judge which wins. qmemd never auto-resolves."),
+      source: z.string().optional().describe("Where this fact came from (URL, 'user, <date>', or the producing tool). Fill it for provenance — it's shown when a write conflicts with an existing fact so you can judge which wins."),
       as: z.string().optional().describe("Explicit slug."),
       replace: z.string().optional().describe("Slug to overwrite in place."),
-      supersedes: z.string().optional().describe("Slug of a fact this one RETIRES: the old fact gets superseded_by stamped, disappears from recall (still on disk + git), both files land in one commit. Use to resolve a surfaced conflict by replacing the old truth under a new slug. Mutually exclusive with replace (replace rewrites the same slug in place; supersedes retires an old slug and writes this fact under a new one)."),
+      supersedes: z.string().optional().describe("Slug of a fact this one RETIRES: the old fact disappears from recall (kept on disk + git). Use to resolve a surfaced conflict by replacing the old truth under a new slug. Mutually exclusive with replace (replace rewrites the same slug in place; supersedes retires the old slug and writes this under a new one)."),
       force: z.boolean().optional().describe("Write even if a near-duplicate exists."),
-      platforms: z.array(PLATFORMS_Z).optional().describe("OS families this fact applies to: linux | macos | windows. Omit for cross-platform (applies on every workstation)."),
-      ttl: z.string().optional().describe("Shelf life for a fact that ages (versions, ports, temp states, rotating creds): <N>d|w|m|y (e.g. 90d) sets review_by = today + N, and `qmemd stale` surfaces the fact for re-verification once due. Never hides or deletes — review only. Omit for timeless facts. Mutually exclusive with reviewBy."),
+      platforms: z.array(PLATFORMS_Z).optional().describe("OS families this fact applies to. Omit for cross-platform."),
+      ttl: z.string().optional().describe("Shelf life for a fact that ages (versions, ports, temp states, rotating creds): <N>d|w|m|y (e.g. 90d) sets review_by = today + N; surfaces for re-verification once due — never hides or deletes. Omit for timeless facts. Mutually exclusive with reviewBy."),
       reviewBy: z.string().optional().describe("Explicit re-verify date YYYY-MM-DD (alternative to ttl). On replace: omit to keep the existing date, pass \"\" to clear it."),
     },
   }, async ({ fact, type, tags, project, pin, source, as: asSlug, replace, supersedes, force, platforms, ttl, reviewBy }) => {
@@ -228,10 +228,10 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
       lexOnly: z.boolean().optional().describe("Skip vector/rerank — fast, model-free lexical (BM25) search. Default false (hybrid)."),
       minScore: z.number().min(0).optional().describe(`Hybrid-recall relevance floor: drop hits the reranker scores below this (reranker score is ~0.5 for neutral/irrelevant, ~0.7+ for relevant; default ${DEFAULT_MIN_SCORE}). Pass 0 to disable. Ignored when lexOnly:true.`),
       skim: z.boolean().optional().describe("Headline-only: return ranked hits without bodies, to cheaply scan what's relevant before fetching full facts with `get`."),
-      project: z.string().optional().describe("Current project scope (default: server cwd basename). Scopes both the session snapshot and query recall to this project + 'global'. Use cross_project:true to search every project."),
-      allPlatforms: z.boolean().optional().describe("Search across all platforms (disable the host-OS filter). Default false — recall is scoped to the server's OS so off-platform facts stay hidden."),
-      platform: PLATFORMS_Z.optional().describe("Scope to one OS family's facts (linux | macos | windows) instead of the host's — e.g. ask for only the macos facts from a linux host (qmemd-5gx, CLI --platform parity). Mutually exclusive with allPlatforms."),
-      cross_project: z.boolean().optional().describe("Search ALL projects, not just the current one + global. Foreign hits are labelled with their project (structuredContent.hits[].project) so they can't be mistaken for this project's facts. Default false — scoped to {project, global} (qmemd-due)."),
+      project: z.string().optional().describe("Current project scope (default: server cwd basename). Scopes the snapshot and recall to this project + 'global'."),
+      allPlatforms: z.boolean().optional().describe("Search across all platforms (disable the host-OS filter). Default false (scoped to the host OS)."),
+      platform: PLATFORMS_Z.optional().describe("Scope to one OS family's facts instead of the host's — e.g. only macos facts from a linux host. Mutually exclusive with allPlatforms."),
+      cross_project: z.boolean().optional().describe("Search ALL projects, not just current + global. Foreign hits are labelled with their project so they can't be mistaken for this project's facts. Default false."),
     },
     outputSchema: RECALL_OUTPUT_SCHEMA,
   }, async ({ query, session, type, limit, lexOnly, minScore, skim, project, allPlatforms, platform, cross_project }) => {
@@ -308,7 +308,7 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
     title: "Forget",
     description: "Delete a remembered fact by slug.",
     annotations: { readOnlyHint: false, openWorldHint: false },
-    inputSchema: { slug: z.string().describe("Slug of the memory to delete.") },
+    inputSchema: { slug: z.string() },
   }, async ({ slug }) => {
     try {
       const store = await getStore();
@@ -323,7 +323,7 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
 
   server.registerTool("reviewed", {
     title: "Reviewed",
-    description: "Mark a fact re-verified — reset its staleness clock. Forward-sets review_by (default: today + the type's review window; or pass ttl/reviewBy) and deliberately leaves `updated` untouched so content-age stays honest. Bare on a durable type (user/feedback) marks review_by:never. Never edits the body — use remember(replace:) if the fact itself changed. Errors if no fact has that slug.",
+    description: "Mark a fact re-verified — reset its staleness clock. Forward-sets review_by (default: today + the type's review window; or pass ttl/reviewBy). Bare on a durable type (user/feedback) marks review_by:never. Never edits the body — use remember(replace:) if the fact itself changed.",
     annotations: { readOnlyHint: false, openWorldHint: false },
     inputSchema: {
       slug: z.string().describe("Slug of the fact you re-verified (as returned by recall/list)."),
@@ -376,13 +376,13 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
 
   server.registerTool("list", {
     title: "List",
-    description: "Browse remembered facts by type/tag/project without searching — model-free. Returns slug, type, description, tags, created, pinned for each. An empty corpus is a successful empty result, not an error.",
+    description: "Browse remembered facts by type/tag/project without searching — model-free. An empty corpus is a successful empty result, not an error.",
     annotations: { readOnlyHint: true, openWorldHint: false },
     inputSchema: {
-      type: MEMORY_TYPES_Z.optional().describe("Scope to one type: user | feedback | project | reference."),
-      tag: z.string().optional().describe("Only facts carrying this tag."),
+      type: MEMORY_TYPES_Z.optional().describe("Scope to one type."),
+      tag: z.string().optional(),
       project: z.string().optional().describe("Only facts for this project (plus 'global'); pass 'global' for global-only."),
-      platform: PLATFORMS_Z.optional().describe("Only facts valid on this OS family (linux | macos | windows)."),
+      platform: PLATFORMS_Z.optional().describe("Only facts valid on this OS family."),
     },
   }, async ({ type, tag, project, platform }) => {
     try {
