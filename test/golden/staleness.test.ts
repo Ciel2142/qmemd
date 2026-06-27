@@ -44,7 +44,7 @@ describe("e15 staleness — filesystem fixtures (no store)", () => {
     const implicitOverdue = writeFact(root, { type: "project", created: "2020-01-01", name: "implicit-overdue" }); // >90d, no review_by
     const backlog    = writeFact(root, { type: "reference", created: "2026-06-01", name: "ref-backlog" });         // <180d, never reviewed
     const userExempt = writeFact(root, { type: "user", created: "2010-01-01", name: "user-exempt" });             // durable type
-    const malformed  = writeFact(root, { type: "project", created: "2020-01-01", reviewBy: "soon", name: "malformed-faulopen" }); // fails open → window
+    const malformed  = writeFact(root, { type: "project", created: "2020-01-01", reviewBy: "soon", name: "malformed-failopen" }); // fails open → window
 
     const r = staleFacts(root, { today: TODAY });
     const dueSlugs = r.due.map((e) => e.slug);
@@ -54,6 +54,7 @@ describe("e15 staleness — filesystem fixtures (no store)", () => {
     expect(dueSlugs).toContain(implicitOverdue);   // implicit overdue (>90d project)
     expect(dueSlugs).toContain(malformed);         // malformed fails open to the window
     expect(unreviewedSlugs).toContain(backlog);    // reference within window, never reviewed
+    expect(dueSlugs).not.toContain(backlog);       // backlog is unreviewed, NOT due (partition)
     for (const exempt of [future, durable, userExempt]) {
       expect(dueSlugs).not.toContain(exempt);
       expect(unreviewedSlugs).not.toContain(exempt);
@@ -87,6 +88,7 @@ describe("e15 staleness — recall ignores review_by (store-backed, lex-only)", 
     try {
       const f = await remember(store, root, { fact: "kafka topic retention policy is 7 days", type: "project", project: "p1" });
       const updatedBefore = (() => { const m = /^updated: (.*)$/m.exec(readFileSync(f.path, "utf-8")); return m?.[1]; })();
+      expect(updatedBefore).toBeDefined();                                // else the equality below is vacuous
 
       await markReviewed(store, root, f.slug, { reviewBy: "2020-01-01" }); // force it past-due
       const content = readFileSync(f.path, "utf-8");
