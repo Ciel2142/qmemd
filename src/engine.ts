@@ -1394,6 +1394,11 @@ export async function remember(
     if (!supersedeTarget) throw new Error(`no fact named '${input.supersedes}' to supersede`);
   }
 
+  // NON-PORT (mem0 add(infer=True)): qmemd never LLM-distills a fact from a transcript on
+  // the write path. The write loads NO model (I1) and needs NO API key (I5) — the fact text
+  // is stored verbatim (writeFileSync below); only this model-free dedup/classify walk runs.
+  // Distillation is the agent's job, never the engine's. A future shared classifyCandidate()
+  // (e11) extracted from this walk inherits the same rule: keep it model-free.
   // Dedup check — skipped when --replace, --force, or --supersedes is set (a successor
   // legitimately near-dups the fact it retires).
   if (!input.replace && !input.force && !input.supersedes) {
