@@ -40,6 +40,7 @@ describe("e15 supersession-retirement", () => {
     try {
       const a = await remember(store, root, { fact: "gamma cache eviction is LRU", type: "project", project: "p1", pinned: true });
       const b = await remember(store, root, { fact: "gamma cache eviction is LFU now", type: "project", project: "p1", supersedes: a.slug });
+      expect(b.supersededSlug).toBe(a.slug);  // supersession was acted on
       const snap = await recallSession(root, { project: "p1" });
       expect(snap).not.toContain("LRU");      // retired fact's content absent
       expect(snap).toContain("LFU");          // successor present (in-scope project slice)
