@@ -59,7 +59,7 @@
     { "query": "what gets injected at the start of a conversation", "relevant": ["recall-session-runs-git-pull-before-snapshot"] }
   ],
   "distractors": [
-    "react component lifecycle hooks",
+    "react component rerender scheduling",
     "sourdough hydration ratio",
     "nfl playoff seeding rules"
   ],
