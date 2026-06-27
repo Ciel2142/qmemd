@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { scoreQuery, aggregate, type QueryScore } from "./metrics.js";
+import { scoreQuery, aggregate, medianAggregate, type QueryScore } from "./metrics.js";
 
 describe("scoreQuery", () => {
   const rel = new Set(["a", "b"]);
@@ -53,5 +53,25 @@ describe("aggregate", () => {
   test("no queries → zeros, no NaN", () => {
     const agg = aggregate([], 5);
     expect(agg).toEqual({ pAt1: 0, pAtK: 0, rAtK: 0, mrr: 0, k: 5, n: 0 });
+  });
+});
+
+describe("medianAggregate", () => {
+  test("takes the per-field median across runs", () => {
+    const mk = (p: number, m: number) => ({ pAt1: p, pAtK: p, rAtK: p, mrr: m, k: 5, n: 10 });
+    const out = medianAggregate([mk(0.6, 0.7), mk(0.8, 0.9), mk(0.7, 0.8)]);
+    expect(out.pAt1).toBe(0.7); // median of 0.6,0.8,0.7
+    expect(out.mrr).toBe(0.8);  // median of 0.7,0.9,0.8
+    expect(out.k).toBe(5);
+    expect(out.n).toBe(10);
+  });
+
+  test("averages the two middle values for an even run count", () => {
+    const mk = (p: number) => ({ pAt1: p, pAtK: p, rAtK: p, mrr: p, k: 5, n: 10 });
+    expect(medianAggregate([mk(0.4), mk(0.6)]).pAt1).toBeCloseTo(0.5, 10);
+  });
+
+  test("throws on zero runs", () => {
+    expect(() => medianAggregate([])).toThrow();
   });
 });

@@ -48,3 +48,23 @@ export function aggregate(scores: QueryScore[], k: number): AggregateScore {
     n,
   };
 }
+
+/** Per-field median across N aggregate runs (e16): absorbs rerankScore non-determinism so a
+ *  committed baseline diff does not flap on jitter. k/n are taken from the first run (constant
+ *  across runs over the same set). Throws on an empty run list. */
+export function medianAggregate(runs: AggregateScore[]): AggregateScore {
+  if (runs.length === 0) throw new Error("medianAggregate: no runs to aggregate");
+  const median = (sel: (a: AggregateScore) => number): number => {
+    const xs = runs.map(sel).sort((a, b) => a - b);
+    const mid = Math.floor(xs.length / 2);
+    return xs.length % 2 === 1 ? xs[mid]! : (xs[mid - 1]! + xs[mid]!) / 2;
+  };
+  return {
+    pAt1: median((a) => a.pAt1),
+    pAtK: median((a) => a.pAtK),
+    rAtK: median((a) => a.rAtK),
+    mrr: median((a) => a.mrr),
+    k: runs[0]!.k,
+    n: runs[0]!.n,
+  };
+}
