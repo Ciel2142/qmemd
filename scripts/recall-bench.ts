@@ -63,7 +63,9 @@ async function main(): Promise<void> {
   const CHECK = argv.includes("--check");
   const UPDATE = argv.includes("--update-baseline");
   const runsArg = argv.find((a) => a.startsWith("--runs="));
-  const RUNS = runsArg ? Math.max(1, parseInt(runsArg.split("=")[1] ?? "1", 10)) : (CHECK || UPDATE ? 5 : 1);
+  const defaultRuns = CHECK || UPDATE ? 5 : 1;
+  const parsedRuns = runsArg ? parseInt(runsArg.split("=")[1] ?? "", 10) : NaN;
+  const RUNS = Number.isFinite(parsedRuns) ? Math.max(1, parsedRuns) : defaultRuns; // NaN (--runs=abc) falls back to the default
 
   const seeded = await seedGoldenStore(GOLDEN, { embedModel: memoryEmbedModel() });
   try {
@@ -102,6 +104,10 @@ async function main(): Promise<void> {
     }
 
     if (CHECK) {
+      if (hybridDegraded > 0) {
+        console.error("✗ refusing to --check against a DEGRADED run (embed model did not load); scores are lex-equivalent and untrustworthy.");
+        process.exit(1);
+      }
       const base = JSON.parse(readFileSync(BASELINE, "utf-8")) as Baseline;
       const regressions: string[] = [];
       const guard = (name: string, cur: number, prev: number): void => {
