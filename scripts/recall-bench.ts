@@ -71,7 +71,12 @@ async function main(): Promise<void> {
     // First hybrid call triggers the lazy embed barrier; run lex once for the comparison row.
     const lex = await runMode(seeded, hq, true);
     const hybridRuns: AggregateScore[] = [];
-    for (let i = 0; i < RUNS; i++) hybridRuns.push((await runMode(seeded, hq, false)).agg);
+    let hybridDegraded = 0;
+    for (let i = 0; i < RUNS; i++) {
+      const r = await runMode(seeded, hq, false);
+      hybridRuns.push(r.agg);
+      hybridDegraded += r.degradedCount;
+    }
     const hybridMedian = medianAggregate(hybridRuns);
     const floorPrec = await distractorFloorPrecision(seeded);
 
@@ -81,7 +86,15 @@ async function main(): Promise<void> {
     console.log(`distractor floor-precision: ${floorPrec.toFixed(3)} (${seeded.golden.distractors?.length ?? 0} distractors must stay below ${DEFAULT_MIN_SCORE})`);
     console.log(`\nΔ hybrid−lex:  P@1 ${signed(hybridMedian.pAt1 - lex.agg.pAt1)}  MRR ${signed(hybridMedian.mrr - lex.agg.mrr)}\n`);
 
+    if (hybridDegraded > 0) {
+      console.warn(`\n⚠ hybrid DEGRADED on ${hybridDegraded} query-runs — the embed model did not load; scores are lex-equivalent and NOT trustworthy.`);
+    }
+
     if (UPDATE) {
+      if (hybridDegraded > 0) {
+        console.error("✗ refusing to write a DEGRADED baseline (embed model did not load). Fix the model setup and re-run.");
+        process.exit(1);
+      }
       const baseline: Baseline = { k: K, lex: lex.agg, hybrid: hybridMedian, distractorFloorPrecision: floorPrec };
       writeFileSync(BASELINE, JSON.stringify(baseline, null, 2) + "\n");
       console.log(`✔ wrote baseline → ${BASELINE}`);
