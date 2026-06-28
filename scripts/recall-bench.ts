@@ -6,20 +6,39 @@
 //   npm run bench:recall -- --update-baseline # author/refresh test/golden/recall-baseline.json
 //   npm run bench:recall -- --check           # gate: median-vs-baseline, exit 1 on regression
 
+// PROHIBITED CLAIMS (methodology §3.7) — any output contradicting these is a bug in the reporting:
+// 1. No bare proportion without a Wilson 95% CI.
+// 2. No "hybrid improves recall ~5.6%" or similar unqualified improvement claim.
+// 3. No LoCoMo-comparable accuracy claims — this corpus is ~20 hand-authored facts, not a benchmark.
+// 4. No "0.575 is optimal" — the min-score floor is a noise guard, not a calibrated optimum.
+// 5. No cross-machine comparison without matching provenance (model version, corpus hash).
+// 6. No "relevance improved" below the ~0.30 MDE — deltas below this are not detectable on n≈20.
+// 7. No P@K without its success@k twin — P@K is structurally capped on single-relevant queries.
+
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { readFileSync, writeFileSync } from "node:fs";
 import { recallQueryWithStatus, DEFAULT_MIN_SCORE } from "../src/engine.js";
 import { memoryEmbedModel } from "../src/store.js";
 import { seedGoldenStore, type SeededStore, type GoldenQuery } from "../test/golden/seed.js";
-import { scoreQuery, aggregate, medianAggregate, type QueryScore, type AggregateScore } from "../test/golden/metrics.js";
+import {
+  scoreQuery, aggregate, medianAggregate, wilson, mcnemar,
+  type QueryScore, type AggregateScore,
+} from "../test/golden/metrics.js";
 
 const GOLDEN = fileURLToPath(new URL("../test/golden/golden-set.json", import.meta.url));
 const BASELINE = fileURLToPath(new URL("../test/golden/recall-baseline.json", import.meta.url));
 const K = 5;
 const TOLERANCE = 0.07; // > the ~0.05 hand-authored-set noise floor (judge dissent) so CI doesn't flap
 
-interface ModeResult { agg: AggregateScore; avgMs: number; degradedCount: number }
+interface ModeResult {
+  agg: AggregateScore;
+  avgMs: number;
+  degradedCount: number;
+  perQueryHit1: boolean[]; // true if pAt1===1 for each query (index-aligned with queries)
+  queryLabels: string[];   // truncated query text for per-query table
+  perQueryRr: number[];    // per-query reciprocal rank (0 if no relevant hit found)
+}
 interface Baseline { k: number; lex: AggregateScore; hybrid: AggregateScore; distractorFloorPrecision: number }
 
 /** The hybrid query set = relevance queries + lex-hard paraphrases (e16). */
@@ -29,6 +48,7 @@ function hybridQueries(seeded: SeededStore): GoldenQuery[] {
 
 async function runMode(seeded: SeededStore, queries: GoldenQuery[], lexOnly: boolean): Promise<ModeResult> {
   const scores: QueryScore[] = [];
+  const queryLabels: string[] = [];
   let totalMs = 0;
   let degradedCount = 0;
   for (const q of queries) {
@@ -37,8 +57,16 @@ async function runMode(seeded: SeededStore, queries: GoldenQuery[], lexOnly: boo
     totalMs += performance.now() - t0;
     if (res.degraded) degradedCount++;
     scores.push(scoreQuery(res.hits.map((h) => h.slug), new Set(q.relevant), K));
+    queryLabels.push(q.query.length > 40 ? q.query.slice(0, 37) + "…" : q.query);
   }
-  return { agg: aggregate(scores, K), avgMs: totalMs / Math.max(queries.length, 1), degradedCount };
+  return {
+    agg: aggregate(scores, K),
+    avgMs: totalMs / Math.max(queries.length, 1),
+    degradedCount,
+    perQueryHit1: scores.map((s) => s.pAt1 === 1),
+    queryLabels,
+    perQueryRr: scores.map((s) => s.rr),
+  };
 }
 
 /** Fraction of distractor queries that return NOTHING above the hybrid floor (e16 task b). */
@@ -53,9 +81,15 @@ async function distractorFloorPrecision(seeded: SeededStore): Promise<number> {
   return clean / distractors.length;
 }
 
-function signed(n: number): string { return (n >= 0 ? "+" : "") + n.toFixed(3); }
+/** Proportion with Wilson 95% CI: "p.ppp [lo.lo,hi.hi]". */
+function pc(p: number, n: number): string {
+  const { lo, hi } = wilson(Math.round(p * n), n);
+  return `${p.toFixed(3)} [${lo.toFixed(2)},${hi.toFixed(2)}]`;
+}
+
 function rowOf(label: string, m: ModeResult): string {
-  return `${label.padEnd(8)} P@1=${m.agg.pAt1.toFixed(3)}  P@${K}=${m.agg.pAtK.toFixed(3)}  R@${K}=${m.agg.rAtK.toFixed(3)}  MRR=${m.agg.mrr.toFixed(3)}  S@${K}=${m.agg.successAtK.toFixed(3)}  avg=${m.avgMs.toFixed(0)}ms`;
+  const { agg } = m;
+  return `${label.padEnd(8)} P@1=${pc(agg.pAt1, agg.n)}  P@${K}=${agg.pAtK.toFixed(3)}  S@${K}=${pc(agg.successAtK, agg.n)}  R@${K}=${agg.rAtK.toFixed(3)}  MRR=${agg.mrr.toFixed(3)}  avg=${m.avgMs.toFixed(0)}ms`;
 }
 
 async function main(): Promise<void> {
@@ -70,23 +104,50 @@ async function main(): Promise<void> {
   const seeded = await seedGoldenStore(GOLDEN, { embedModel: memoryEmbedModel() });
   try {
     const hq = hybridQueries(seeded);
+
+    console.log(`\n⚠ n=${hq.length} → MDE ≈ 0.30 at 80% power. Deltas below ~0.30 are NOT detectable on this corpus; report them as "no measurable difference," never as a win (methodology §3.3).`);
+
     // First hybrid call triggers the lazy embed barrier; run lex once for the comparison row.
     const lex = await runMode(seeded, hq, true);
     const hybridRuns: AggregateScore[] = [];
     let hybridDegraded = 0;
+    let lastHybrid: ModeResult | null = null;
     for (let i = 0; i < RUNS; i++) {
       const r = await runMode(seeded, hq, false);
       hybridRuns.push(r.agg);
       hybridDegraded += r.degradedCount;
+      lastHybrid = r;
     }
     const hybridMedian = medianAggregate(hybridRuns);
     const floorPrec = await distractorFloorPrecision(seeded);
 
     console.log(`\nRecall-quality bench — ${hq.length} queries (${seeded.golden.queries.length} relevance + ${(seeded.golden.paraphrase_queries ?? []).length} paraphrase), ${seeded.golden.corpus.length} facts, k=${K}, runs=${RUNS}\n`);
     console.log(rowOf("lex", lex));
-    console.log(`hybrid   P@1=${hybridMedian.pAt1.toFixed(3)}  P@${K}=${hybridMedian.pAtK.toFixed(3)}  R@${K}=${hybridMedian.rAtK.toFixed(3)}  MRR=${hybridMedian.mrr.toFixed(3)}  S@${K}=${hybridMedian.successAtK.toFixed(3)}  (median of ${RUNS})`);
+    console.log(`hybrid   P@1=${pc(hybridMedian.pAt1, hybridMedian.n)}  P@${K}=${hybridMedian.pAtK.toFixed(3)}  S@${K}=${pc(hybridMedian.successAtK, hybridMedian.n)}  R@${K}=${hybridMedian.rAtK.toFixed(3)}  MRR=${hybridMedian.mrr.toFixed(3)}  (median of ${RUNS})`);
+    console.log(`  * Wilson 95% CI shown for P@1 and S@K (binomial). R@k and MRR are means of per-query ratios — no CI.`);
     console.log(`distractor floor-precision: ${floorPrec.toFixed(3)} (${seeded.golden.distractors?.length ?? 0} distractors must stay below ${DEFAULT_MIN_SCORE})`);
-    console.log(`\nΔ hybrid−lex:  P@1 ${signed(hybridMedian.pAt1 - lex.agg.pAt1)}  MRR ${signed(hybridMedian.mrr - lex.agg.mrr)}\n`);
+
+    // Paired McNemar test (lex vs hybrid @1) — replaces the bare Δ row.
+    const lexHits1 = lex.perQueryHit1;
+    const hybridHits1 = lastHybrid!.perQueryHit1;
+    const mc = mcnemar(lexHits1.map((l, i) => ({ lex: l, hybrid: hybridHits1[i]! })));
+    console.log(`\nPaired hybrid−lex: net ${mc.c - mc.b} queries (b=${mc.b} lex-only, c=${mc.c} hybrid-only), McNemar χ²=${mc.statistic.toFixed(2)}, p≈${mc.pApprox.toFixed(2)} ${mc.pApprox < 0.05 ? "(significant)" : "(NOT significant)"}\n`);
+
+    // Per-query disaggregation table — lex@1, hybrid@1, hybrid rank (from last run).
+    const hybridRrArr = lastHybrid!.perQueryRr;
+    const labels = lex.queryLabels;
+    console.log("Per-query breakdown:");
+    console.log(`${"Query".padEnd(42)}  lex@1  hybrid@1  hybridRank`);
+    console.log("-".repeat(68));
+    for (let i = 0; i < hq.length; i++) {
+      const label = (labels[i] ?? "").padEnd(42);
+      const l1 = lexHits1[i] ? "✓" : "✗";
+      const h1 = hybridHits1[i] ? "✓" : "✗";
+      const rr = hybridRrArr[i] ?? 0;
+      const rank = rr > 0 ? String(Math.round(1 / rr)) : "—";
+      console.log(`${label}  ${l1.padEnd(5)}  ${h1.padEnd(9)} ${rank}`);
+    }
+    console.log();
 
     if (hybridDegraded > 0) {
       console.warn(`\n⚠ hybrid DEGRADED on ${hybridDegraded} query-runs — the embed model did not load; scores are lex-equivalent and NOT trustworthy.`);
