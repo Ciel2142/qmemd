@@ -15,6 +15,7 @@
 // 6. No "relevance improved" below the ~0.30 MDE — deltas below this are not detectable on n≈20.
 // 7. No P@K without its success@k twin — P@K is structurally capped on single-relevant queries.
 
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -40,7 +41,24 @@ interface ModeResult {
   perQueryRr: number[];    // per-query reciprocal rank (0 if no relevant hit found)
   perQueryBytes: number[]; // total payload bytes per query (description + body of all hits)
 }
-interface Baseline { k: number; lex: AggregateScore; hybrid: AggregateScore; distractorFloorPrecision: number }
+interface Baseline {
+  k: number;
+  lex: AggregateScore;
+  hybrid: AggregateScore;
+  distractorFloorPrecision: number;
+  provenance?: {
+    embedModel: string;
+    qmdVersion: string;
+    runs: number;
+    k: number;
+    tolerance: number;
+    node: string;
+    platform: string;
+    arch: string;
+    gitSha: string;
+    date: string;
+  };
+}
 
 /** The hybrid query set = relevance queries + lex-hard paraphrases (e16). */
 function hybridQueries(seeded: SeededStore): GoldenQuery[] {
@@ -116,6 +134,13 @@ function payloadRow(label: string, bytes: number[]): string {
   return `  ${label.padEnd(8)} mean=${Math.round(mean)}B  median=${median}B  p95=${p95}B  → ${tokEst(p95)} @p95`;
 }
 
+function gitSha(): string {
+  try { return execSync("git rev-parse --short HEAD").toString().trim(); } catch { return "unknown"; }
+}
+function qmdVersion(): string {
+  try { return JSON.parse(readFileSync(new URL("../node_modules/@tobilu/qmd/package.json", import.meta.url), "utf-8")).version as string; } catch { return "unknown"; }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const CHECK = argv.includes("--check");
@@ -124,6 +149,35 @@ async function main(): Promise<void> {
   const defaultRuns = CHECK || UPDATE ? 5 : 1;
   const parsedRuns = runsArg ? parseInt(runsArg.split("=")[1] ?? "", 10) : NaN;
   const RUNS = Number.isFinite(parsedRuns) ? Math.max(1, parsedRuns) : defaultRuns; // NaN (--runs=abc) falls back to the default
+
+  // Early model-pin guard (before expensive recall runs — see methodology §3.6).
+  // memoryEmbedModel() returns a config string and does NOT load the model, so this is cheap.
+  if (CHECK) {
+    const earlyBase = JSON.parse(readFileSync(BASELINE, "utf-8")) as Baseline;
+    if (!earlyBase.provenance) {
+      console.warn("⚠ baseline predates provenance (written before MF-5). Skipping embed-model pin check — re-run --update-baseline to capture provenance.");
+    } else if (earlyBase.provenance.embedModel !== memoryEmbedModel()) {
+      console.error(
+        `✗ embed-model mismatch: baseline recorded with "${earlyBase.provenance.embedModel}" but current model is "${memoryEmbedModel()}". ` +
+        `A model swap recalibrates DEFAULT_MIN_SCORE and compares incompatible score distributions (methodology §3.6). ` +
+        `Re-run --update-baseline with the current model to refresh the baseline.`,
+      );
+      process.exit(1);
+    }
+  }
+
+  const provenance = {
+    embedModel: memoryEmbedModel(),
+    qmdVersion: qmdVersion(),
+    runs: RUNS,
+    k: K,
+    tolerance: TOLERANCE,
+    node: process.version,
+    platform: process.platform as string,
+    arch: process.arch,
+    gitSha: gitSha(),
+    date: new Date().toISOString(),
+  };
 
   const seeded = await seedGoldenStore(GOLDEN, { embedModel: memoryEmbedModel() });
   try {
@@ -188,7 +242,7 @@ async function main(): Promise<void> {
         console.error("✗ refusing to write a DEGRADED baseline (embed model did not load). Fix the model setup and re-run.");
         process.exit(1);
       }
-      const baseline: Baseline = { k: K, lex: lex.agg, hybrid: hybridMedian, distractorFloorPrecision: floorPrec };
+      const baseline: Baseline = { k: K, lex: lex.agg, hybrid: hybridMedian, distractorFloorPrecision: floorPrec, provenance };
       writeFileSync(BASELINE, JSON.stringify(baseline, null, 2) + "\n");
       console.log(`✔ wrote baseline → ${BASELINE}`);
       return;
