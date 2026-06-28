@@ -71,6 +71,20 @@ describe("medianAggregate", () => {
     expect(medianAggregate([mk(0.4), mk(0.6)]).pAt1).toBeCloseTo(0.5, 10);
   });
 
+  test("successAtK median is computed from successAtK, not pAt1", () => {
+    // successAtK values (0.4, 0.8, 0.6) differ from pAt1 values (0.3, 0.7, 0.5) so a
+    // wrong-field bug (e.g. median((a) => a.pAt1) instead of a.successAtK) causes the
+    // assertion to fail: pAt1 median would be 0.5, not 0.6.
+    const runs = [
+      { pAt1: 0.3, pAtK: 0.3, rAtK: 0.3, mrr: 0.3, successAtK: 0.4, k: 5, n: 10 },
+      { pAt1: 0.7, pAtK: 0.7, rAtK: 0.7, mrr: 0.7, successAtK: 0.8, k: 5, n: 10 },
+      { pAt1: 0.5, pAtK: 0.5, rAtK: 0.5, mrr: 0.5, successAtK: 0.6, k: 5, n: 10 },
+    ];
+    const out = medianAggregate(runs);
+    expect(out.successAtK).toBeCloseTo(0.6, 6); // sorted: 0.4,0.6,0.8 → median 0.6
+    expect(out.pAt1).toBeCloseTo(0.5, 6);       // sorted: 0.3,0.5,0.7 → median 0.5; must differ
+  });
+
   test("throws on zero runs", () => {
     expect(() => medianAggregate([])).toThrow();
   });

@@ -123,7 +123,8 @@ function payloadStats(vals: number[]): { mean: number; median: number; p95: numb
   if (vals.length === 0) return { mean: 0, median: 0, p95: 0 };
   const sorted = [...vals].sort((a, b) => a - b);
   const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
-  const median = sorted[Math.floor(sorted.length / 2)]!;
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
   const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1)]!;
   return { mean, median, p95 };
 }
@@ -202,7 +203,7 @@ async function main(): Promise<void> {
     console.log(`\nRecall-quality bench — ${hq.length} queries (${seeded.golden.queries.length} relevance + ${(seeded.golden.paraphrase_queries ?? []).length} paraphrase), ${seeded.golden.corpus.length} facts, k=${K}, runs=${RUNS}\n`);
     console.log(rowOf("lex", lex));
     console.log(`hybrid   P@1=${pc(hybridMedian.pAt1, hybridMedian.n)}  P@${K}=${hybridMedian.pAtK.toFixed(3)}  S@${K}=${pc(hybridMedian.successAtK, hybridMedian.n)}  R@${K}=${hybridMedian.rAtK.toFixed(3)}  MRR=${hybridMedian.mrr.toFixed(3)}  (median of ${RUNS})`);
-    console.log(`  * Wilson 95% CI shown for P@1 and S@K (binomial). R@k and MRR are means of per-query ratios — no CI.`);
+    console.log(`  * Wilson 95% CI shown for P@1 and S@K (binomial). P@K, R@k and MRR are means of per-query ratios — no CI (P@K is report-only / structurally capped — see S@K).`);
     console.log(`distractor floor-precision: ${floorPrec.toFixed(3)} (${seeded.golden.distractors?.length ?? 0} distractors must stay below ${DEFAULT_MIN_SCORE})`);
 
     // Paired McNemar test (lex vs hybrid @1) — replaces the bare Δ row.
