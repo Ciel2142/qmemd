@@ -112,3 +112,105 @@ export function mcnemar(pairs: { lex: boolean; hybrid: boolean }[]): {
   const pApprox = statistic <= 0 ? 1 : erfc(Math.sqrt(statistic / 2));
   return { b, c, statistic, pApprox };
 }
+
+// --- bench-wiring pure helpers (qp-bench-wiring-untested-helpers-4iu) -------
+// scripts/recall-bench.ts loads the embed model, so its own logic can never run under
+// `npm test`. These pure, model-free decision/stat functions ARE the bench's testable
+// core — extracting them here is what brings the bench wiring under the suite (the
+// adversarial-review root finding: the bench had zero automated coverage).
+
+/** Exact binomial success count behind a proportion, or `null` when `p·n` is not (within
+ *  1e-9 of) an integer — e.g. an even-run median that landed BETWEEN two integer counts
+ *  (`(13/18 + 14/18)/2 = 13.5/18`). A Wilson CI is defined only for an integer k of n;
+ *  pairing one with a between-counts median is the false precision methodology §3.7 forbids,
+ *  so callers must SUPPRESS the CI (never fabricate a rounded one) when this returns null. */
+export function successCount(p: number, n: number): number | null {
+  const x = p * n;
+  const k = Math.round(x);
+  return Math.abs(x - k) < 1e-9 ? k : null;
+}
+
+/** The provenance fields a `--check` model-pin compares (the rest are reproducibility metadata). */
+export interface BaselineProvenance {
+  embedModel: string;
+  qmdVersion: string;
+}
+export type ProvenanceAction = "ok" | "warn" | "fail";
+export interface ProvenanceCheck {
+  action: ProvenanceAction;
+  message?: string;
+}
+
+/** Model-pin decision for `--check` (methodology §3.6). A committed baseline is comparable only
+ *  when measured with the SAME embed model AND the same `@tobilu/qmd` version — qmd ships the
+ *  reranker that keys hybrid scores, so a bump can swap the reranker. A swap of either
+ *  recalibrates `DEFAULT_MIN_SCORE` and compares incompatible score distributions. No provenance
+ *  → `warn` (a pre-MF-5 baseline; back-compat per spec §5.2); any mismatch → `fail` (caller exits
+ *  1). Pure: the current model + qmd version arrive as args, so no I/O and no model load. */
+export function checkProvenance(
+  baseline: { provenance?: BaselineProvenance },
+  currentEmbed: string,
+  currentQmd: string,
+): ProvenanceCheck {
+  const p = baseline.provenance;
+  if (!p) {
+    return {
+      action: "warn",
+      message:
+        "baseline predates provenance (written before MF-5). Skipping the embed/qmd model-pin check — re-run --update-baseline to capture provenance.",
+    };
+  }
+  if (p.embedModel !== currentEmbed) {
+    return {
+      action: "fail",
+      message:
+        `embed-model mismatch: baseline recorded with "${p.embedModel}" but current model is "${currentEmbed}". ` +
+        "A model swap recalibrates DEFAULT_MIN_SCORE and compares incompatible score distributions (methodology §3.6). " +
+        "Re-run --update-baseline with the current model to refresh the baseline.",
+    };
+  }
+  if (p.qmdVersion !== currentQmd) {
+    return {
+      action: "fail",
+      message:
+        `qmd-version mismatch: baseline recorded with @tobilu/qmd "${p.qmdVersion}" but current is "${currentQmd}". ` +
+        "qmd ships the reranker that keys hybrid scores, so a version change can swap the reranker and recalibrate the floor (methodology §3.6). " +
+        "Re-run --update-baseline on the current qmd to refresh the baseline.",
+    };
+  }
+  return { action: "ok" };
+}
+
+/** Provenance fields that resolved to the non-reproducible `"unknown"` sentinel (gitSha and
+ *  qmdVersion fall back to `"unknown"` when `git` or the package.json read fails). A baseline
+ *  carrying any `"unknown"` cannot be reproduced or pin-checked later — `--update-baseline`
+ *  warns on a non-empty result (G5). */
+export function unknownProvenanceFields(provenance: Record<string, unknown>): string[] {
+  return Object.entries(provenance).filter(([, v]) => v === "unknown").map(([k]) => k);
+}
+
+/** Mean / median / p95 of a numeric sample. Median averages the two middle values for even n.
+ *  p95 is NEAREST-RANK (`ceil(0.95·n)−1`): for n≤19 that index is the last element, i.e. the
+ *  MAX — a defensible small-sample upper estimate, NOT an interpolated percentile (the label
+ *  reads "p95" but is effectively a max at this corpus size). Empty input → zeros (no NaN). */
+export function payloadStats(vals: number[]): { mean: number; median: number; p95: number } {
+  if (vals.length === 0) return { mean: 0, median: 0, p95: 0 };
+  const sorted = [...vals].sort((a, b) => a - b);
+  const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1)]!;
+  return { mean, median, p95 };
+}
+
+/** The bench's MDE banner states ≈0.30 (absolute difference detectable at 80% power, α=.05),
+ *  a figure HAND-DERIVED for n≈18 paired queries — it is not recomputed from n. This returns a
+ *  drift warning when the live query count leaves a ±20% band around the calibrated n, so the
+ *  banner cannot silently go stale as paraphrase queries are added (G6). A real recompute is
+ *  tracked separately (qp-mrr-rk-bootstrap-ci-eqn). Returns null inside the band. */
+export function mdeBannerDrift(n: number, calibratedN = 18): string | null {
+  if (Math.abs(n - calibratedN) > 0.2 * calibratedN) {
+    return `query count n=${n} has drifted from the n≈${calibratedN} the MDE≈0.30 figure was calibrated for — recompute the MDE before trusting it (qp-mrr-rk-bootstrap-ci-eqn).`;
+  }
+  return null;
+}

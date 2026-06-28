@@ -24,6 +24,7 @@ import { memoryEmbedModel } from "../src/store.js";
 import { seedGoldenStore, type SeededStore, type GoldenQuery } from "../test/golden/seed.js";
 import {
   scoreQuery, aggregate, medianAggregate, wilson, mcnemar,
+  successCount, checkProvenance, unknownProvenanceFields, payloadStats, mdeBannerDrift,
   type QueryScore, type AggregateScore,
 } from "../test/golden/metrics.js";
 
@@ -107,26 +108,20 @@ async function distractorFloorPrecision(seeded: SeededStore): Promise<number> {
   return clean / distractors.length;
 }
 
-/** Proportion with Wilson 95% CI: "p.ppp [lo.lo,hi.hi]". */
+/** Proportion with Wilson 95% CI: "p.ppp [lo.lo,hi.hi]". The CI needs the EXACT integer success
+ *  count — `successCount` returns null when `p·n` is non-integer (an even-run median that fell
+ *  between two counts), and we suppress the CI rather than fabricate one from a rounded count
+ *  (false precision, methodology §3.7). The odd-run default (5) always yields an integer. */
 function pc(p: number, n: number): string {
-  const { lo, hi } = wilson(Math.round(p * n), n);
+  const k = successCount(p, n);
+  if (k === null) return `${p.toFixed(3)} [no CI: even-run median between integer counts — re-run with odd --runs]`;
+  const { lo, hi } = wilson(k, n);
   return `${p.toFixed(3)} [${lo.toFixed(2)},${hi.toFixed(2)}]`;
 }
 
 function rowOf(label: string, m: ModeResult): string {
   const { agg } = m;
   return `${label.padEnd(8)} P@1=${pc(agg.pAt1, agg.n)}  P@${K}=${agg.pAtK.toFixed(3)}  S@${K}=${pc(agg.successAtK, agg.n)}  R@${K}=${agg.rAtK.toFixed(3)}  MRR=${agg.mrr.toFixed(3)}  avg=${m.avgMs.toFixed(0)}ms`;
-}
-
-/** Compute mean / median / p95 of a numeric array. Returns zeros for empty input. */
-function payloadStats(vals: number[]): { mean: number; median: number; p95: number } {
-  if (vals.length === 0) return { mean: 0, median: 0, p95: 0 };
-  const sorted = [...vals].sort((a, b) => a - b);
-  const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
-  const mid = Math.floor(sorted.length / 2);
-  const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
-  const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1)]!;
-  return { mean, median, p95 };
 }
 
 function payloadRow(label: string, bytes: number[]): string {
@@ -151,20 +146,28 @@ async function main(): Promise<void> {
   const parsedRuns = runsArg ? parseInt(runsArg.split("=")[1] ?? "", 10) : NaN;
   const RUNS = Number.isFinite(parsedRuns) ? Math.max(1, parsedRuns) : defaultRuns; // NaN (--runs=abc) falls back to the default
 
-  // Early model-pin guard (before expensive recall runs — see methodology §3.6).
-  // memoryEmbedModel() returns a config string and does NOT load the model, so this is cheap.
+  if (CHECK && UPDATE) {
+    console.error("✗ pass only one of --check / --update-baseline — they conflict (--check gates against the baseline; --update-baseline rewrites it). Aborting.");
+    process.exit(1);
+  }
+
+  // Early model-pin guard (before expensive recall runs — see methodology §3.6). checkProvenance()
+  // and memoryEmbedModel()/qmdVersion() are pure config reads — no model load, so this is cheap.
+  // The baseline read here is reused by the regression compare below (no second read under --check).
+  let checkBaseline: Baseline | null = null;
   if (CHECK) {
-    const earlyBase = JSON.parse(readFileSync(BASELINE, "utf-8")) as Baseline;
-    if (!earlyBase.provenance) {
-      console.warn("⚠ baseline predates provenance (written before MF-5). Skipping embed-model pin check — re-run --update-baseline to capture provenance.");
-    } else if (earlyBase.provenance.embedModel !== memoryEmbedModel()) {
-      console.error(
-        `✗ embed-model mismatch: baseline recorded with "${earlyBase.provenance.embedModel}" but current model is "${memoryEmbedModel()}". ` +
-        `A model swap recalibrates DEFAULT_MIN_SCORE and compares incompatible score distributions (methodology §3.6). ` +
-        `Re-run --update-baseline with the current model to refresh the baseline.`,
-      );
-      process.exit(1);
+    try {
+      checkBaseline = JSON.parse(readFileSync(BASELINE, "utf-8")) as Baseline;
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
+        console.error(`✗ no baseline at ${BASELINE} to --check against. Run \`npm run bench:recall -- --update-baseline\` first.`);
+        process.exit(1);
+      }
+      throw e;
     }
+    const pin = checkProvenance(checkBaseline, memoryEmbedModel(), qmdVersion());
+    if (pin.action === "warn") console.warn(`⚠ ${pin.message}`);
+    else if (pin.action === "fail") { console.error(`✗ ${pin.message}`); process.exit(1); }
   }
 
   const provenance = {
@@ -185,6 +188,8 @@ async function main(): Promise<void> {
     const hq = hybridQueries(seeded);
 
     console.log(`\n⚠ n=${hq.length} → MDE ≈ 0.30 at 80% power. Deltas below ~0.30 are NOT detectable on this corpus; report them as "no measurable difference," never as a win (methodology §3.3).`);
+    const mdeDrift = mdeBannerDrift(hq.length);
+    if (mdeDrift) console.warn(`⚠ ${mdeDrift}`);
 
     // First hybrid call triggers the lazy embed barrier; run lex once for the comparison row.
     const lex = await runMode(seeded, hq, true);
@@ -243,6 +248,10 @@ async function main(): Promise<void> {
         console.error("✗ refusing to write a DEGRADED baseline (embed model did not load). Fix the model setup and re-run.");
         process.exit(1);
       }
+      const unknowns = unknownProvenanceFields(provenance);
+      if (unknowns.length > 0) {
+        console.warn(`⚠ provenance fields resolved to "unknown" (non-reproducible): ${unknowns.join(", ")}. The baseline is written but cannot be pin-checked on these fields — fix git / the @tobilu/qmd install and re-run to restore reproducibility.`);
+      }
       const baseline: Baseline = { k: K, lex: lex.agg, hybrid: hybridMedian, distractorFloorPrecision: floorPrec, provenance };
       writeFileSync(BASELINE, JSON.stringify(baseline, null, 2) + "\n");
       console.log(`✔ wrote baseline → ${BASELINE}`);
@@ -254,7 +263,7 @@ async function main(): Promise<void> {
         console.error("✗ refusing to --check against a DEGRADED run (embed model did not load); scores are lex-equivalent and untrustworthy.");
         process.exit(1);
       }
-      const base = JSON.parse(readFileSync(BASELINE, "utf-8")) as Baseline;
+      const base = checkBaseline!; // read once in the early model-pin guard above
       const regressions: string[] = [];
       const guard = (name: string, cur: number, prev: number): void => {
         if (cur < prev - TOLERANCE) regressions.push(`${name}: ${cur.toFixed(3)} < baseline ${prev.toFixed(3)} − tol ${TOLERANCE}`);
