@@ -42,7 +42,7 @@ describe("lex recall golden set (3u8)", () => {
     }
     const agg = aggregate(scores, K);
     // eslint-disable-next-line no-console
-    console.log(`\n[golden lex] n=${agg.n} P@1=${agg.pAt1.toFixed(3)} P@${K}=${agg.pAtK.toFixed(3)} R@${K}=${agg.rAtK.toFixed(3)} MRR=${agg.mrr.toFixed(3)}`);
+    console.log(`\n[golden lex] n=${agg.n} P@1=${agg.pAt1.toFixed(3)} P@${K}=${agg.pAtK.toFixed(3)} R@${K}=${agg.rAtK.toFixed(3)} MRR=${agg.mrr.toFixed(3)} S@${K}=${agg.successAtK.toFixed(3)}`);
     expect(agg.pAt1).toBeGreaterThanOrEqual(LEX_P_AT_1_FLOOR);
     expect(agg.mrr).toBeGreaterThanOrEqual(LEX_MRR_FLOOR);
   });

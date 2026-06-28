@@ -55,7 +55,7 @@ async function distractorFloorPrecision(seeded: SeededStore): Promise<number> {
 
 function signed(n: number): string { return (n >= 0 ? "+" : "") + n.toFixed(3); }
 function rowOf(label: string, m: ModeResult): string {
-  return `${label.padEnd(8)} P@1=${m.agg.pAt1.toFixed(3)}  P@${K}=${m.agg.pAtK.toFixed(3)}  R@${K}=${m.agg.rAtK.toFixed(3)}  MRR=${m.agg.mrr.toFixed(3)}  avg=${m.avgMs.toFixed(0)}ms`;
+  return `${label.padEnd(8)} P@1=${m.agg.pAt1.toFixed(3)}  P@${K}=${m.agg.pAtK.toFixed(3)}  R@${K}=${m.agg.rAtK.toFixed(3)}  MRR=${m.agg.mrr.toFixed(3)}  S@${K}=${m.agg.successAtK.toFixed(3)}  avg=${m.avgMs.toFixed(0)}ms`;
 }
 
 async function main(): Promise<void> {
@@ -84,7 +84,7 @@ async function main(): Promise<void> {
 
     console.log(`\nRecall-quality bench — ${hq.length} queries (${seeded.golden.queries.length} relevance + ${(seeded.golden.paraphrase_queries ?? []).length} paraphrase), ${seeded.golden.corpus.length} facts, k=${K}, runs=${RUNS}\n`);
     console.log(rowOf("lex", lex));
-    console.log(`hybrid   P@1=${hybridMedian.pAt1.toFixed(3)}  P@${K}=${hybridMedian.pAtK.toFixed(3)}  R@${K}=${hybridMedian.rAtK.toFixed(3)}  MRR=${hybridMedian.mrr.toFixed(3)}  (median of ${RUNS})`);
+    console.log(`hybrid   P@1=${hybridMedian.pAt1.toFixed(3)}  P@${K}=${hybridMedian.pAtK.toFixed(3)}  R@${K}=${hybridMedian.rAtK.toFixed(3)}  MRR=${hybridMedian.mrr.toFixed(3)}  S@${K}=${hybridMedian.successAtK.toFixed(3)}  (median of ${RUNS})`);
     console.log(`distractor floor-precision: ${floorPrec.toFixed(3)} (${seeded.golden.distractors?.length ?? 0} distractors must stay below ${DEFAULT_MIN_SCORE})`);
     console.log(`\nΔ hybrid−lex:  P@1 ${signed(hybridMedian.pAt1 - lex.agg.pAt1)}  MRR ${signed(hybridMedian.mrr - lex.agg.mrr)}\n`);
 

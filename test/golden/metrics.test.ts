@@ -18,7 +18,7 @@ describe("scoreQuery", () => {
 
   test("no relevant hit → all zero", () => {
     const s = scoreQuery(["x", "y", "z"], rel, 5);
-    expect(s).toEqual({ pAt1: 0, pAtK: 0, rAtK: 0, rr: 0 });
+    expect(s).toEqual({ pAt1: 0, pAtK: 0, rAtK: 0, rr: 0, successAtK: 0 });
   });
 
   test("pAtK uses k in the denominator; rAtK uses |relevant|", () => {
@@ -52,13 +52,13 @@ describe("aggregate", () => {
 
   test("no queries → zeros, no NaN", () => {
     const agg = aggregate([], 5);
-    expect(agg).toEqual({ pAt1: 0, pAtK: 0, rAtK: 0, mrr: 0, k: 5, n: 0 });
+    expect(agg).toEqual({ pAt1: 0, pAtK: 0, rAtK: 0, mrr: 0, successAtK: 0, k: 5, n: 0 });
   });
 });
 
 describe("medianAggregate", () => {
   test("takes the per-field median across runs", () => {
-    const mk = (p: number, m: number) => ({ pAt1: p, pAtK: p, rAtK: p, mrr: m, k: 5, n: 10 });
+    const mk = (p: number, m: number) => ({ pAt1: p, pAtK: p, rAtK: p, mrr: m, successAtK: p, k: 5, n: 10 });
     const out = medianAggregate([mk(0.6, 0.7), mk(0.8, 0.9), mk(0.7, 0.8)]);
     expect(out.pAt1).toBe(0.7); // median of 0.6,0.8,0.7
     expect(out.mrr).toBe(0.8);  // median of 0.7,0.9,0.8
@@ -67,7 +67,7 @@ describe("medianAggregate", () => {
   });
 
   test("averages the two middle values for an even run count", () => {
-    const mk = (p: number) => ({ pAt1: p, pAtK: p, rAtK: p, mrr: p, k: 5, n: 10 });
+    const mk = (p: number) => ({ pAt1: p, pAtK: p, rAtK: p, mrr: p, successAtK: p, k: 5, n: 10 });
     expect(medianAggregate([mk(0.4), mk(0.6)]).pAt1).toBeCloseTo(0.5, 10);
   });
 
@@ -93,6 +93,18 @@ describe("wilson 95% score interval", () => {
   test("known value: 14/18 ≈ 0.778, CI width ~±0.19", () => {
     const { lo, hi } = wilson(14, 18);
     expect(lo).toBeCloseTo(0.549, 2); expect(hi).toBeCloseTo(0.906, 2);
+  });
+});
+
+describe("successAtK", () => {
+  test("successAtK is 1 when any relevant hit lands in top-k (vs the structurally-capped pAtK)", () => {
+    const s = scoreQuery(["x", "target", "y"], new Set(["target"]), 5);
+    expect(s.successAtK).toBe(1);
+    expect(s.pAtK).toBeCloseTo(1 / 5, 6); // pAtK is capped by single-relevant authoring — report-only
+  });
+  test("successAtK aggregates and medians", () => {
+    const a = aggregate([scoreQuery(["target"], new Set(["target"]), 5), scoreQuery(["z"], new Set(["target"]), 5)], 5);
+    expect(a.successAtK).toBeCloseTo(0.5, 6);
   });
 });
 
