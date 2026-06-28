@@ -38,6 +38,7 @@ interface ModeResult {
   perQueryHit1: boolean[]; // true if pAt1===1 for each query (index-aligned with queries)
   queryLabels: string[];   // truncated query text for per-query table
   perQueryRr: number[];    // per-query reciprocal rank (0 if no relevant hit found)
+  perQueryBytes: number[]; // total payload bytes per query (description + body of all hits)
 }
 interface Baseline { k: number; lex: AggregateScore; hybrid: AggregateScore; distractorFloorPrecision: number }
 
@@ -49,6 +50,7 @@ function hybridQueries(seeded: SeededStore): GoldenQuery[] {
 async function runMode(seeded: SeededStore, queries: GoldenQuery[], lexOnly: boolean): Promise<ModeResult> {
   const scores: QueryScore[] = [];
   const queryLabels: string[] = [];
+  const perQueryBytes: number[] = [];
   let totalMs = 0;
   let degradedCount = 0;
   for (const q of queries) {
@@ -58,6 +60,11 @@ async function runMode(seeded: SeededStore, queries: GoldenQuery[], lexOnly: boo
     if (res.degraded) degradedCount++;
     scores.push(scoreQuery(res.hits.map((h) => h.slug), new Set(q.relevant), K));
     queryLabels.push(q.query.length > 40 ? q.query.slice(0, 37) + "…" : q.query);
+    const bytes = res.hits.reduce(
+      (sum, h) => sum + Buffer.byteLength(h.body ?? "", "utf-8") + Buffer.byteLength(h.description ?? "", "utf-8"),
+      0,
+    );
+    perQueryBytes.push(bytes);
   }
   return {
     agg: aggregate(scores, K),
@@ -66,6 +73,7 @@ async function runMode(seeded: SeededStore, queries: GoldenQuery[], lexOnly: boo
     perQueryHit1: scores.map((s) => s.pAt1 === 1),
     queryLabels,
     perQueryRr: scores.map((s) => s.rr),
+    perQueryBytes,
   };
 }
 
@@ -90,6 +98,22 @@ function pc(p: number, n: number): string {
 function rowOf(label: string, m: ModeResult): string {
   const { agg } = m;
   return `${label.padEnd(8)} P@1=${pc(agg.pAt1, agg.n)}  P@${K}=${agg.pAtK.toFixed(3)}  S@${K}=${pc(agg.successAtK, agg.n)}  R@${K}=${agg.rAtK.toFixed(3)}  MRR=${agg.mrr.toFixed(3)}  avg=${m.avgMs.toFixed(0)}ms`;
+}
+
+/** Compute mean / median / p95 of a numeric array. Returns zeros for empty input. */
+function payloadStats(vals: number[]): { mean: number; median: number; p95: number } {
+  if (vals.length === 0) return { mean: 0, median: 0, p95: 0 };
+  const sorted = [...vals].sort((a, b) => a - b);
+  const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
+  const median = sorted[Math.floor(sorted.length / 2)]!;
+  const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1)]!;
+  return { mean, median, p95 };
+}
+
+function payloadRow(label: string, bytes: number[]): string {
+  const { mean, median, p95 } = payloadStats(bytes);
+  const tokEst = (b: number) => `~${Math.round(b / 4)} tok (est, ±20%)`;
+  return `  ${label.padEnd(8)} mean=${Math.round(mean)}B  median=${median}B  p95=${p95}B  → ${tokEst(p95)} @p95`;
 }
 
 async function main(): Promise<void> {
@@ -147,6 +171,12 @@ async function main(): Promise<void> {
       const rank = rr > 0 ? String(Math.round(1 / rr)) : "—";
       console.log(`${label}  ${l1.padEnd(5)}  ${h1.padEnd(9)} ${rank}`);
     }
+    console.log();
+
+    // Byte-economy block (RECALL_BODY_CAP=500 bounds each hit's body — payloads are bounded).
+    console.log("Payload-byte economy (per-query, RECALL_BODY_CAP=500 bounds each hit body):");
+    console.log(payloadRow("lex", lex.perQueryBytes));
+    console.log(payloadRow("hybrid", lastHybrid!.perQueryBytes));
     console.log();
 
     if (hybridDegraded > 0) {
