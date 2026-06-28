@@ -68,3 +68,42 @@ export function medianAggregate(runs: AggregateScore[]): AggregateScore {
     n: runs[0]!.n,
   };
 }
+
+/** Wilson score 95% interval for a binomial proportion (z=1.96). Correct at small n and near
+ *  0/1 where the normal approximation breaks. Methodology §3.1: a bare proportion is not a
+ *  permitted output — every reported proportion ships with this CI. n=0 → full [0,1]. */
+export function wilson(successes: number, n: number, z = 1.96): { lo: number; hi: number } {
+  if (n <= 0) return { lo: 0, hi: 1 };
+  const p = successes / n;
+  const z2 = z * z;
+  const denom = 1 + z2 / n;
+  const center = (p + z2 / (2 * n)) / denom;
+  const half = (z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / denom;
+  return { lo: Math.max(0, center - half), hi: Math.min(1, center + half) };
+}
+
+/** erfc via Abramowitz & Stegun 7.1.26 (pure; ~1e-7 abs error) — for the McNemar p-value. */
+function erfc(x: number): number {
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+  const erf = 1 - y * Math.exp(-x * x);
+  return 1 - (x >= 0 ? erf : -erf);
+}
+
+/** McNemar test for a PAIRED lex-vs-hybrid comparison (methodology §3.2 — two separate CIs are
+ *  wrong here). `b` = lex-hit/hybrid-miss, `c` = lex-miss/hybrid-hit (the discordant pairs);
+ *  concordant pairs carry no information. Continuity-corrected χ² (1 df); `pApprox` is the
+ *  two-sided p-value via the χ²₁ survival function (= erfc(√(statistic/2))). b+c=0 → statistic 0,
+ *  p=1 (no evidence of a difference). */
+export function mcnemar(pairs: { lex: boolean; hybrid: boolean }[]): {
+  b: number; c: number; statistic: number; pApprox: number;
+} {
+  let b = 0, c = 0;
+  for (const { lex, hybrid } of pairs) {
+    if (lex && !hybrid) b++;
+    else if (!lex && hybrid) c++;
+  }
+  const statistic = b + c === 0 ? 0 : Math.pow(Math.abs(b - c) - 1, 2) / (b + c);
+  const pApprox = statistic <= 0 ? 1 : erfc(Math.sqrt(statistic / 2));
+  return { b, c, statistic, pApprox };
+}

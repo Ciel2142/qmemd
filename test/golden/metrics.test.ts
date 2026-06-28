@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { scoreQuery, aggregate, medianAggregate, type QueryScore } from "./metrics.js";
+import { scoreQuery, aggregate, medianAggregate, wilson, mcnemar, type QueryScore } from "./metrics.js";
 
 describe("scoreQuery", () => {
   const rel = new Set(["a", "b"]);
@@ -73,5 +73,40 @@ describe("medianAggregate", () => {
 
   test("throws on zero runs", () => {
     expect(() => medianAggregate([])).toThrow();
+  });
+});
+
+describe("wilson 95% score interval", () => {
+  test("symmetric about 0.5 at p=0.5", () => {
+    const { lo, hi } = wilson(9, 18);
+    expect((lo + hi) / 2).toBeCloseTo(0.5, 6);
+    expect(lo).toBeGreaterThan(0); expect(hi).toBeLessThan(1);
+  });
+  test("clamps at the boundaries", () => {
+    expect(wilson(18, 18).hi).toBe(1);          // all-success upper bound clamps to 1
+    expect(wilson(18, 18).lo).toBeLessThan(1);  // but lower bound is < 1 (Wilson, not 1.0)
+    expect(wilson(0, 18).lo).toBe(0);
+  });
+  test("n=0 yields the full [0,1] interval (no NaN)", () => {
+    expect(wilson(0, 0)).toEqual({ lo: 0, hi: 1 });
+  });
+  test("known value: 14/18 ≈ 0.778, CI width ~±0.19", () => {
+    const { lo, hi } = wilson(14, 18);
+    expect(lo).toBeCloseTo(0.549, 2); expect(hi).toBeCloseTo(0.906, 2);
+  });
+});
+
+describe("mcnemar paired test", () => {
+  test("all concordant → b=c=0, statistic 0, p≈1", () => {
+    const r = mcnemar([{ lex: true, hybrid: true }, { lex: false, hybrid: false }]);
+    expect(r.b).toBe(0); expect(r.c).toBe(0); expect(r.statistic).toBe(0);
+    expect(r.pApprox).toBeCloseTo(1, 6);
+  });
+  test("net one discordant query is not significant", () => {
+    // 17 concordant + 1 (lex miss, hybrid hit) — the real lex-vs-hybrid shape
+    const pairs = [{ lex: false, hybrid: true }, ...Array(17).fill({ lex: true, hybrid: true })];
+    const r = mcnemar(pairs);
+    expect(r.b).toBe(0); expect(r.c).toBe(1);   // c = lex-miss/hybrid-hit
+    expect(r.pApprox).toBeGreaterThan(0.3);      // non-significant (continuity-corrected ≈ 1.0)
   });
 });
