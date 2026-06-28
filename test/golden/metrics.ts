@@ -214,3 +214,45 @@ export function mdeBannerDrift(n: number, calibratedN = 18): string | null {
   }
   return null;
 }
+
+/** Small deterministic PRNG (mulberry32). Seedable so the bootstrap CI below is reproducible and
+ *  unit-testable, and so the bench prints stable bounds run-to-run. NOT cryptographic. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Nonparametric percentile bootstrap 95% CI for the MEAN of a sample (qp-mrr-rk-bootstrap-ci-eqn).
+ *  MRR (mean reciprocal rank) and graded R@k are means of per-query RATIOS, not binomial
+ *  proportions — a Wilson CI on them is the false precision methodology §3.7 bans, so they print
+ *  bare with a footnote. This gives them an honest dispersion interval instead (methodology §3.1):
+ *  resample `values` with replacement `iterations` times and take the [α/2, 1−α/2] percentiles of
+ *  the resample means. Deterministic given `seed`. Pure — no I/O, no model. Edge cases: n=0 →
+ *  {0,0}; n=1 → {v,v}; a zero-variance sample → {mean,mean}. The percentile interval is bounded by
+ *  the sample's own [min,max], so it never reports a value outside the metric's support. */
+export function bootstrapMeanCI(
+  values: number[],
+  opts: { iterations?: number; seed?: number; alpha?: number } = {},
+): { lo: number; hi: number } {
+  const n = values.length;
+  if (n === 0) return { lo: 0, hi: 0 };
+  if (n === 1) return { lo: values[0]!, hi: values[0]! };
+  const iterations = opts.iterations ?? 10000;
+  const alpha = opts.alpha ?? 0.05;
+  const rand = mulberry32(opts.seed ?? 0xc0ffee);
+  const means = new Array<number>(iterations);
+  for (let b = 0; b < iterations; b++) {
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += values[Math.floor(rand() * n)]!;
+    means[b] = sum / n;
+  }
+  means.sort((x, y) => x - y);
+  const pct = (p: number): number =>
+    means[Math.min(iterations - 1, Math.max(0, Math.round(p * (iterations - 1))))]!;
+  return { lo: pct(alpha / 2), hi: pct(1 - alpha / 2) };
+}

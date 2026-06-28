@@ -25,6 +25,7 @@ import { seedGoldenStore, type SeededStore, type GoldenQuery } from "../test/gol
 import {
   scoreQuery, aggregate, medianAggregate, wilson, mcnemar,
   successCount, checkProvenance, unknownProvenanceFields, payloadStats, mdeBannerDrift,
+  bootstrapMeanCI,
   type QueryScore, type AggregateScore,
 } from "../test/golden/metrics.js";
 
@@ -39,8 +40,9 @@ interface ModeResult {
   degradedCount: number;
   perQueryHit1: boolean[]; // true if pAt1===1 for each query (index-aligned with queries)
   queryLabels: string[];   // truncated query text for per-query table
-  perQueryRr: number[];    // per-query reciprocal rank (0 if no relevant hit found)
-  perQueryBytes: number[]; // total payload bytes per query (description + body of all hits)
+  perQueryRr: number[];     // per-query reciprocal rank (0 if no relevant hit found) — MRR bootstrap sample
+  perQueryRecall: number[]; // per-query R@k (relevant-in-topk / |relevant|) — R@k bootstrap sample
+  perQueryBytes: number[];  // total payload bytes per query (description + body of all hits)
 }
 interface Baseline {
   k: number;
@@ -92,6 +94,7 @@ async function runMode(seeded: SeededStore, queries: GoldenQuery[], lexOnly: boo
     perQueryHit1: scores.map((s) => s.pAt1 === 1),
     queryLabels,
     perQueryRr: scores.map((s) => s.rr),
+    perQueryRecall: scores.map((s) => s.rAtK),
     perQueryBytes,
   };
 }
@@ -119,9 +122,20 @@ function pc(p: number, n: number): string {
   return `${p.toFixed(3)} [${lo.toFixed(2)},${hi.toFixed(2)}]`;
 }
 
+// Fixed bootstrap seed → stable bench output run-to-run. The CI is a dispersion estimate, not a
+// gate (it never touches the baseline or --check), so a constant seed is honest + reproducible.
+const BOOTSTRAP_SEED = 0xc0ffee;
+
+/** Mean of per-query ratios with a percentile bootstrap 95% CI: "v.vvv [lo.lo,hi.hi]". For MRR/R@k,
+ *  which are NOT binomial proportions — a Wilson CI would be false precision (§3.7). */
+function bc(value: number, perQuery: number[]): string {
+  const { lo, hi } = bootstrapMeanCI(perQuery, { seed: BOOTSTRAP_SEED });
+  return `${value.toFixed(3)} [${lo.toFixed(2)},${hi.toFixed(2)}]`;
+}
+
 function rowOf(label: string, m: ModeResult): string {
   const { agg } = m;
-  return `${label.padEnd(8)} P@1=${pc(agg.pAt1, agg.n)}  P@${K}=${agg.pAtK.toFixed(3)}  S@${K}=${pc(agg.successAtK, agg.n)}  R@${K}=${agg.rAtK.toFixed(3)}  MRR=${agg.mrr.toFixed(3)}  avg=${m.avgMs.toFixed(0)}ms`;
+  return `${label.padEnd(8)} P@1=${pc(agg.pAt1, agg.n)}  P@${K}=${agg.pAtK.toFixed(3)}  S@${K}=${pc(agg.successAtK, agg.n)}  R@${K}=${bc(agg.rAtK, m.perQueryRecall)}  MRR=${bc(agg.mrr, m.perQueryRr)}  avg=${m.avgMs.toFixed(0)}ms`;
 }
 
 function payloadRow(label: string, bytes: number[]): string {
@@ -207,8 +221,14 @@ async function main(): Promise<void> {
 
     console.log(`\nRecall-quality bench — ${hq.length} queries (${seeded.golden.queries.length} relevance + ${(seeded.golden.paraphrase_queries ?? []).length} paraphrase), ${seeded.golden.corpus.length} facts, k=${K}, runs=${RUNS}\n`);
     console.log(rowOf("lex", lex));
-    console.log(`hybrid   P@1=${pc(hybridMedian.pAt1, hybridMedian.n)}  P@${K}=${hybridMedian.pAtK.toFixed(3)}  S@${K}=${pc(hybridMedian.successAtK, hybridMedian.n)}  R@${K}=${hybridMedian.rAtK.toFixed(3)}  MRR=${hybridMedian.mrr.toFixed(3)}  (median of ${RUNS})`);
-    console.log(`  * Wilson 95% CI shown for P@1 and S@K (binomial). P@K, R@k and MRR are means of per-query ratios — no CI (P@K is report-only / structurally capped — see S@K).`);
+    // Headline R@k/MRR are the across-runs median (jitter-robust; the value --check gates on). Their
+    // bootstrap CI is built from ONE run's per-query values, so it shows the DOMINANT n≈18
+    // query-sampling dispersion — NOT run-to-run rerank jitter, a smaller separate source the median
+    // smooths (bounded by the --check tolerance). Point and interval thus come from related but not
+    // identical data and coincide only to within that jitter; if paraphrase queries near rank/floor
+    // boundaries ever push the median outside its interval, sample the run whose mean is the median.
+    console.log(`hybrid   P@1=${pc(hybridMedian.pAt1, hybridMedian.n)}  P@${K}=${hybridMedian.pAtK.toFixed(3)}  S@${K}=${pc(hybridMedian.successAtK, hybridMedian.n)}  R@${K}=${bc(hybridMedian.rAtK, lastHybrid!.perQueryRecall)}  MRR=${bc(hybridMedian.mrr, lastHybrid!.perQueryRr)}  (median of ${RUNS})`);
+    console.log(`  * P@1, S@K: Wilson 95% CI (binomial). R@k, MRR: percentile bootstrap 95% CI (means of per-query ratios — a Wilson CI would be false precision, §3.7). P@K: report-only, no CI (structurally capped by single-relevant authoring — see S@K).`);
     console.log(`distractor floor-precision: ${floorPrec.toFixed(3)} (${seeded.golden.distractors?.length ?? 0} distractors must stay below ${DEFAULT_MIN_SCORE})`);
 
     // Paired McNemar test (lex vs hybrid @1) — replaces the bare Δ row.

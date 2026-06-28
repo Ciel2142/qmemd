@@ -2,6 +2,7 @@ import { describe, test, expect } from "vitest";
 import {
   scoreQuery, aggregate, medianAggregate, wilson, mcnemar,
   successCount, checkProvenance, unknownProvenanceFields, payloadStats, mdeBannerDrift,
+  bootstrapMeanCI,
   type QueryScore,
 } from "./metrics.js";
 
@@ -223,5 +224,49 @@ describe("mdeBannerDrift (G6)", () => {
   });
   test("n well outside the band → drift warning", () => {
     expect(mdeBannerDrift(30)).toMatch(/drifted/);
+  });
+});
+
+describe("bootstrapMeanCI — dispersion CI for non-binomial means (qp-mrr-rk-bootstrap-ci-eqn)", () => {
+  const mean = (xs: number[]) => xs.reduce((s, v) => s + v, 0) / xs.length;
+
+  test("deterministic given a seed (reproducible run-to-run)", () => {
+    const xs = [1, 0.5, 0.333, 1, 0, 1, 0.25, 1];
+    expect(bootstrapMeanCI(xs, { seed: 7 })).toEqual(bootstrapMeanCI(xs, { seed: 7 }));
+  });
+
+  test("zero-variance sample → degenerate point interval (no spurious width)", () => {
+    expect(bootstrapMeanCI([0.5, 0.5, 0.5, 0.5], { seed: 1 })).toEqual({ lo: 0.5, hi: 0.5 });
+  });
+
+  test("interval brackets the mean and sits STRICTLY inside the raw [min,max] (real resampling, not a range stub)", () => {
+    const xs = [1, 1, 1, 0.5, 0.333, 0, 1, 0.2, 1, 1];
+    const { lo, hi } = bootstrapMeanCI(xs, { seed: 42 });
+    expect(lo).toBeLessThanOrEqual(mean(xs));
+    expect(hi).toBeGreaterThanOrEqual(mean(xs));
+    // STRICT interior: averaging shrinks variance, so a mean-bootstrap CI is narrower than the raw
+    // value range — this is what distinguishes it from a degenerate {min,max} stub (real impl at
+    // seed 42 → lo≈0.453, hi≈0.920). Not asserted on the skewed sample below, where hi==max is legit.
+    expect(lo).toBeGreaterThan(Math.min(...xs));
+    expect(hi).toBeLessThan(Math.max(...xs));
+  });
+
+  test("skewed mostly-1 sample → hi pinned near the max (1), lo strictly below it", () => {
+    const xs = [1, 1, 1, 1, 1, 1, 1, 1, 1, 0]; // one miss among nine perfect ranks
+    const { lo, hi } = bootstrapMeanCI(xs, { seed: 3 });
+    expect(hi).toBe(1);
+    expect(lo).toBeLessThan(1);
+    expect(lo).toBeGreaterThanOrEqual(0);
+  });
+
+  test("higher-variance sample → wider interval than a tight one (non-vacuous dispersion)", () => {
+    const wide = bootstrapMeanCI([0, 0, 1, 1, 0, 1, 0, 1], { seed: 9 });
+    const tight = bootstrapMeanCI([0.45, 0.5, 0.5, 0.55, 0.5, 0.5, 0.45, 0.55], { seed: 9 });
+    expect(wide.hi - wide.lo).toBeGreaterThan(tight.hi - tight.lo);
+  });
+
+  test("edge: empty → {0,0}; single value → {v,v}", () => {
+    expect(bootstrapMeanCI([], { seed: 1 })).toEqual({ lo: 0, hi: 0 });
+    expect(bootstrapMeanCI([0.7], { seed: 1 })).toEqual({ lo: 0.7, hi: 0.7 });
   });
 });
