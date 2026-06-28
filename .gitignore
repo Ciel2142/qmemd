@@ -19,3 +19,6 @@ package-lock.json
 
 # superpowers subagent-driven-development scratch (briefs, review packages, ledger)
 .superpowers/
+
+# superpowers planning artifacts (plans, research, specs) — internal, not for public repo
+docs/superpowers/
