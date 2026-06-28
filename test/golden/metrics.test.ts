@@ -1,5 +1,9 @@
 import { describe, test, expect } from "vitest";
-import { scoreQuery, aggregate, medianAggregate, wilson, mcnemar, type QueryScore } from "./metrics.js";
+import {
+  scoreQuery, aggregate, medianAggregate, wilson, mcnemar,
+  successCount, checkProvenance, unknownProvenanceFields, payloadStats, mdeBannerDrift,
+  type QueryScore,
+} from "./metrics.js";
 
 describe("scoreQuery", () => {
   const rel = new Set(["a", "b"]);
@@ -134,5 +138,90 @@ describe("mcnemar paired test", () => {
     const r = mcnemar(pairs);
     expect(r.b).toBe(0); expect(r.c).toBe(1);   // c = lex-miss/hybrid-hit
     expect(r.pApprox).toBeGreaterThan(0.3);      // non-significant (continuity-corrected ≈ 1.0)
+  });
+});
+
+// --- bench-wiring pure helpers (qp-bench-wiring-untested-helpers-4iu) -------
+
+describe("successCount — CI guard (G2)", () => {
+  test("integer proportion → its exact success count", () => {
+    expect(successCount(14 / 18, 18)).toBe(14);
+    expect(successCount(0, 18)).toBe(0);
+    expect(successCount(1, 18)).toBe(18);
+  });
+  test("an integer count carrying genuine sub-1e-9 fp residue still resolves (the tolerance branch)", () => {
+    // (13/23)*23 === 12.999999999999998 (residue −1.78e-15) — round → 13 only BECAUSE of the
+    // Math.abs(x−k) < 1e-9 tolerance; strict `=== 0` / Number.isInteger would return null and
+    // wrongly SUPPRESS a Wilson CI that spec §3.1 mandates. This pins that branch distinct from
+    // the exact-integer case above and the even-run null case below.
+    expect(successCount(13 / 23, 23)).toBe(13);
+  });
+  test("even-run median BETWEEN two counts → null (no fabricated CI)", () => {
+    // (13/18 + 14/18)/2 = 13.5/18 — 13.5 is not an integer count, so no Wilson CI is defined
+    expect(successCount((13 / 18 + 14 / 18) / 2, 18)).toBeNull();
+  });
+});
+
+describe("checkProvenance — model-pin decision (G1/G4)", () => {
+  const E = "embed-A", Q = "2.5.3";
+  test("no provenance → warn (pre-MF-5 baseline, back-compat per spec §5.2)", () => {
+    expect(checkProvenance({}, E, Q).action).toBe("warn");
+  });
+  test("matching embed + qmd → ok", () => {
+    expect(checkProvenance({ provenance: { embedModel: E, qmdVersion: Q } }, E, Q).action).toBe("ok");
+  });
+  test("embed-model mismatch → fail (exit 1)", () => {
+    const r = checkProvenance({ provenance: { embedModel: "embed-B", qmdVersion: Q } }, E, Q);
+    expect(r.action).toBe("fail");
+    expect(r.message).toMatch(/embed-model mismatch/);
+  });
+  test("qmd-version mismatch → fail — the reranker-swap branch G4 added", () => {
+    const r = checkProvenance({ provenance: { embedModel: E, qmdVersion: "2.5.2" } }, E, Q);
+    expect(r.action).toBe("fail");
+    expect(r.message).toMatch(/qmd-version mismatch/);
+  });
+  test("embed mismatch takes precedence over a simultaneous qmd mismatch", () => {
+    const r = checkProvenance({ provenance: { embedModel: "x", qmdVersion: "y" } }, E, Q);
+    expect(r.message).toMatch(/embed-model/);
+  });
+});
+
+describe("unknownProvenanceFields (G5)", () => {
+  test("flags every field equal to the 'unknown' sentinel", () => {
+    expect(unknownProvenanceFields({ gitSha: "unknown", qmdVersion: "unknown", runs: 5 }))
+      .toEqual(["gitSha", "qmdVersion"]);
+  });
+  test("clean provenance → empty list", () => {
+    expect(unknownProvenanceFields({ gitSha: "abc1234", qmdVersion: "2.5.3", runs: 5 })).toEqual([]);
+  });
+});
+
+describe("payloadStats — extracted from the bench", () => {
+  test("odd n → middle median, mean", () => {
+    const s = payloadStats([30, 10, 20]);
+    expect(s.median).toBe(20);
+    expect(s.mean).toBeCloseTo(20, 10);
+  });
+  test("even n → average of the two middle values", () => {
+    expect(payloadStats([10, 20, 30, 40]).median).toBe(25);
+  });
+  test("p95 is nearest-rank (== MAX for small n≤20)", () => {
+    expect(payloadStats([1, 2, 3, 4, 5]).p95).toBe(5);
+  });
+  test("empty → zeros, no NaN", () => {
+    expect(payloadStats([])).toEqual({ mean: 0, median: 0, p95: 0 });
+  });
+});
+
+describe("mdeBannerDrift (G6)", () => {
+  test("n at the calibrated point → no drift", () => {
+    expect(mdeBannerDrift(18)).toBeNull();
+  });
+  test("n inside the ±20% band → no drift", () => {
+    expect(mdeBannerDrift(20)).toBeNull();
+    expect(mdeBannerDrift(15)).toBeNull();
+  });
+  test("n well outside the band → drift warning", () => {
+    expect(mdeBannerDrift(30)).toMatch(/drifted/);
   });
 });
