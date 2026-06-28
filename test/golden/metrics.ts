@@ -4,19 +4,21 @@
 // (scripts/recall-bench.ts).
 
 export interface QueryScore {
-  pAt1: number; // 1 if the top hit is relevant, else 0
-  pAtK: number; // relevant hits in top-k / k
-  rAtK: number; // relevant hits in top-k / |relevant|
-  rr: number;   // reciprocal rank of the first relevant hit (0 if none ranked)
+  pAt1: number;      // 1 if the top hit is relevant, else 0
+  pAtK: number;      // report-only — never gate (structurally capped by single-relevant authoring; see success@k)
+  rAtK: number;      // relevant hits in top-k / |relevant|
+  rr: number;        // reciprocal rank of the first relevant hit (0 if none ranked)
+  successAtK: number; // 1 if any relevant hit lands in top-k, else 0 (the honest top-line metric)
 }
 
 export interface AggregateScore {
-  pAt1: number; // macro-average over queries
-  pAtK: number;
+  pAt1: number;       // macro-average over queries
+  pAtK: number;       // report-only — never gate (structurally capped by single-relevant authoring; see success@k)
   rAtK: number;
-  mrr: number;  // mean reciprocal rank
+  mrr: number;        // mean reciprocal rank
+  successAtK: number; // fraction of queries with at least one relevant hit in top-k
   k: number;
-  n: number;    // query count
+  n: number;          // query count
 }
 
 /** Score one query's ranked result against its relevant set. `k` is the cutoff (and the
@@ -31,6 +33,7 @@ export function scoreQuery(rankedSlugs: string[], relevant: Set<string>, k: numb
     pAtK: k > 0 ? hitsInK / k : 0,
     rAtK: relevant.size > 0 ? hitsInK / relevant.size : 0,
     rr: firstRelevantIdx >= 0 ? 1 / (firstRelevantIdx + 1) : 0,
+    successAtK: hitsInK > 0 ? 1 : 0,
   };
 }
 
@@ -44,6 +47,7 @@ export function aggregate(scores: QueryScore[], k: number): AggregateScore {
     pAtK: mean((s) => s.pAtK),
     rAtK: mean((s) => s.rAtK),
     mrr: mean((s) => s.rr),
+    successAtK: mean((s) => s.successAtK),
     k,
     n,
   };
@@ -64,6 +68,7 @@ export function medianAggregate(runs: AggregateScore[]): AggregateScore {
     pAtK: median((a) => a.pAtK),
     rAtK: median((a) => a.rAtK),
     mrr: median((a) => a.mrr),
+    successAtK: median((a) => a.successAtK),
     k: runs[0]!.k,
     n: runs[0]!.n,
   };
