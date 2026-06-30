@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";
 import type { QMDStore } from "@tobilu/qmd";
-import { distinctiveOverlap, isRescueEligible, recallQueryWithStatus, rescueDelta, DEFAULT_RESCUE_DELTA, type RecallHit } from "../src/engine.js";
+import { distinctiveOverlap, isRescueEligible, recallQueryWithStatus, rescueDelta, DEFAULT_RESCUE_DELTA, poolDocFreq, RECALL_POOL_DF_MAX, type RecallHit } from "../src/engine.js";
 import { toHitDTO } from "../src/mcp/server.js";
 
 // A fake hybrid store: each entry becomes a search hit carrying explain.rerankScore. Files do
@@ -49,6 +49,50 @@ describe("distinctiveOverlap (qp-dnx)", () => {
 
   test("returns 0 for an empty query", () => {
     expect(distinctiveOverlap("", { slug: "kafka-dlq-per-pair-naming" })).toBe(0);
+  });
+});
+
+describe("poolDocFreq (qp-mgm pool-DF)", () => {
+  test("counts each distinctive token once per fact, summed across the in-hand pool", () => {
+    const df = poolDocFreq([
+      { slug: "k3s-runs-as-a-systemd-service-on-labhost" },
+      { slug: "grafana-dashboards-live-on-the-k3s-sandbox" },
+    ]);
+    expect(df.get("k3s")).toBe(2);     // shared by both candidates → pool-common
+    expect(df.get("systemd")).toBe(1); // unique to the first
+    expect(df.get("grafana")).toBe(1); // unique to the second
+  });
+
+  test("a token repeated within a single fact's signal counts once for that fact (DF, not TF)", () => {
+    const df = poolDocFreq([{ slug: "port-port-port", project: "port", tags: ["port"] }]);
+    expect(df.get("port")).toBe(1);
+  });
+});
+
+describe("distinctiveOverlap pool-DF gate (qp-mgm)", () => {
+  test("drops a query-overlap token that is pool-common (df > max) — the measured grafana false promotion", () => {
+    // 'k3s' overlaps the query but appears in ≥2 pool candidates → non-distinctive; the grafana
+    // fact carries no other query token, so its distinctive overlap collapses to 0.
+    expect(distinctiveOverlap("k3s systemd labhost", { slug: "grafana-dashboards-live-on-the-k3s-sandbox" }, new Map([["k3s", 2]]))).toBe(0);
+  });
+
+  test("counts the pool-unique tokens and drops the pool-common one (the relevant fact survives)", () => {
+    const df = new Map([["k3s", 2], ["systemd", 1], ["labhost", 1]]);
+    expect(distinctiveOverlap("k3s systemd labhost", { slug: "k3s-runs-as-a-systemd-service-on-labhost" }, df)).toBe(2);
+  });
+
+  test("a token at exactly the df max counts; one above it is dropped (boundary)", () => {
+    expect(distinctiveOverlap("kafka", { slug: "kafka-dlq" }, new Map([["kafka", RECALL_POOL_DF_MAX]]))).toBe(1);
+    expect(distinctiveOverlap("kafka", { slug: "kafka-dlq" }, new Map([["kafka", RECALL_POOL_DF_MAX + 1]]))).toBe(0);
+  });
+
+  test("the static stoplist still applies under the pool-DF gate", () => {
+    // 'build' is stoplisted even though it is pool-unique (df 1) here.
+    expect(distinctiveOverlap("build pipeline", { slug: "edmbpmn-k3s-image-build" }, new Map([["build", 1]]))).toBe(0);
+  });
+
+  test("omitting the pool map preserves legacy behaviour (counts any non-stoplist overlap)", () => {
+    expect(distinctiveOverlap("k3s systemd", { slug: "grafana-dashboards-live-on-the-k3s-sandbox" })).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -150,12 +194,15 @@ describe("recall below-floor rescue wiring (fake store) (qp-dnx)", () => {
   });
 
   test("caps the rescue tail at RECALL_RESCUE_CAP (2)", async () => {
+    // Each below-floor fact shares a DISTINCT pool-unique token with the query, so all three are
+    // rescue-eligible under pool-DF (qp-mgm) — a token shared across them would be dropped as
+    // pool-common, so this exercises the cap itself, not the pool-DF gate.
     const store = hybridStore([
-      { slug: "kafka-one-topic-naming", rerank: 0.56 },
-      { slug: "kafka-two-dlq-naming", rerank: 0.55 },
-      { slug: "kafka-three-retry-naming", rerank: 0.54 },
+      { slug: "kafka-dlq-per-pair-naming", rerank: 0.56 },
+      { slug: "qdrant-vector-database-port", rerank: 0.55 },
+      { slug: "redis-acl-disables-default-user", rerank: 0.54 },
     ]);
-    const res = await recallQueryWithStatus(store, root, "kafka naming");
+    const res = await recallQueryWithStatus(store, root, "kafka qdrant redis");
     expect(res.hits.filter(h => h.rescued).length).toBe(2); // 3 eligible, capped at 2
     expect(res.belowFloor).toBe(1);
   });
@@ -171,6 +218,33 @@ describe("recall below-floor rescue wiring (fake store) (qp-dnx)", () => {
     ]);
     const res = await recallQueryWithStatus(store, root, "kafka");
     expect(res.hits.map(h => h.slug)[0]).toBe("kafka-dlq-per-pair-naming");
+  });
+});
+
+describe("pool-DF suppresses non-distinctive rescue + tie-break (qp-mgm regression)", () => {
+  const root = "/tmp/qmemd-fake-pooldf";
+
+  test("does NOT rescue a below-floor fact whose only query-overlap token is pool-common", async () => {
+    // The measured false promotion: 'k3s systemd labhost' surfaced a grafana fact sharing ONLY
+    // 'k3s', which is pool-common (both candidates carry it) → pool-DF drops it → no rescue.
+    const store = hybridStore([
+      { slug: "k3s-runs-as-a-systemd-service-on-labhost", rerank: 0.73 },   // above floor (k3s+systemd+labhost)
+      { slug: "grafana-dashboards-live-on-the-k3s-sandbox", rerank: 0.53 }, // below floor, only shares 'k3s' (df 2)
+    ]);
+    const res = await recallQueryWithStatus(store, root, "k3s systemd labhost");
+    expect(res.hits.some(h => h.slug === "grafana-dashboards-live-on-the-k3s-sandbox"), "grafana must not be rescued").toBe(false);
+    expect(res.hits.some(h => h.rescued)).toBe(false);
+    expect(res.belowFloor).toBe(1); // grafana stays a hidden below-floor match
+  });
+
+  test("still rescues a below-floor fact whose overlap token is unique in the pool (the win is preserved)", async () => {
+    // 'inbucket'/'smtp' are unique to one candidate → distinctive → rescue survives pool-DF.
+    const store = hybridStore([
+      { slug: "k3s-runs-as-a-systemd-service-on-labhost", rerank: 0.73 },     // above floor, no overlap with the query
+      { slug: "inbucket-mail-sink-smtp-listens-on-port-1026", rerank: 0.55 }, // below floor, 'inbucket'+'smtp' unique
+    ]);
+    const res = await recallQueryWithStatus(store, root, "inbucket smtp");
+    expect(res.hits.find(h => h.slug === "inbucket-mail-sink-smtp-listens-on-port-1026")?.rescued, "unique-token near-miss is still rescued").toBe(true);
   });
 });
 

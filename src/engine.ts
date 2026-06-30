@@ -1655,18 +1655,47 @@ export const RECALL_BOOST_STOPLIST: ReadonlySet<string> = new Set([
   "test", "build", "git", "repo", "spring", "boot", "gotcha", "qmemd", "service", "app", "fix",
 ]);
 
+/** Max in-hand-pool document-frequency for a query-overlap token to still count as distinctive
+ *  (qp-mgm): a token shared by MORE than this many of the retrieved candidates is pool-common
+ *  topic noise (e.g. "port" across six port facts, "k3s" across two k3s facts) and is dropped, so
+ *  it can no longer drive the tie-break or rescue a near-miss. 1 ⇒ the token must be UNIQUE to a
+ *  single candidate in the pool. This is pool-DF over the ≤40 IN-HAND candidates, NOT corpus-DF —
+ *  it adapts to the query's own pool yet stays deterministic + test-stable (the static stoplist
+ *  remains the universal floor; pool-DF is the corpus-adaptive layer the chair adjudicated). */
+export const RECALL_POOL_DF_MAX = 1;
+
+/** Per-token document-frequency over the in-hand candidate pool (qp-mgm): the number of candidates
+ *  whose {slug ∪ project ∪ tags} signal contains each token (counted once per fact — DF, not TF).
+ *  Fed to distinctiveOverlap's pool-DF gate so a token common across the retrieved pool stops
+ *  counting as distinctive. The pool is the gated above- + below-floor candidates already in hand,
+ *  so this adds no search round-trip and no corpus scan. */
+export function poolDocFreq(facts: Array<{ slug: string; project?: string; tags?: string[] }>): Map<string, number> {
+  const df = new Map<string, number>();
+  for (const f of facts) {
+    const signal = [f.slug, f.project ?? "", ...(f.tags ?? [])].join(" ");
+    for (const t of new Set(tokenizeForDedup(signal))) df.set(t, (df.get(t) ?? 0) + 1);
+  }
+  return df;
+}
+
 /** Distinctive-token overlap between a query and a fact's {slug ∪ project ∪ tags} (qp-dnx): the
  *  count of shared tokens after dropping the static stoplist. The recall ordering tie-break and
  *  the below-floor rescue both key on this — a model-free, deterministic relevance signal the
  *  position-dominated reranker under-weights for project-named facts. Reuses tokenizeForDedup so
- *  it shares the engine's tokenization (semver-aware, stopword-filtered). */
-export function distinctiveOverlap(query: string, fact: { slug: string; project?: string; tags?: string[] }): number {
+ *  it shares the engine's tokenization (semver-aware, stopword-filtered). When `poolDf` is supplied
+ *  (qp-mgm), a query-overlap token whose pool document-frequency exceeds RECALL_POOL_DF_MAX is
+ *  dropped as pool-common — this is what stops a topically-adjacent below-floor fact (the measured
+ *  k3s→grafana false promotion) from being rescued on a shared term. Omitting `poolDf` keeps the
+ *  legacy stoplist-only behaviour (back-compat for callers without a pool in hand). */
+export function distinctiveOverlap(query: string, fact: { slug: string; project?: string; tags?: string[] }, poolDf?: ReadonlyMap<string, number>): number {
   const q = new Set(tokenizeForDedup(query));
   if (q.size === 0) return 0;
   const signal = [fact.slug, fact.project ?? "", ...(fact.tags ?? [])].join(" ");
   let n = 0;
   for (const t of new Set(tokenizeForDedup(signal))) {
-    if (q.has(t) && !RECALL_BOOST_STOPLIST.has(t)) n++;
+    if (!q.has(t) || RECALL_BOOST_STOPLIST.has(t)) continue;
+    if (poolDf && (poolDf.get(t) ?? 0) > RECALL_POOL_DF_MAX) continue; // pool-common ⇒ non-distinctive
+    n++;
   }
   return n;
 }
@@ -2060,12 +2089,23 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   // delta=0 is bit-exact pre-feature. Raw hit.score is never mutated — overlap is a derived key.
   const delta = rescueDelta();
   const boostOn = !opts.lexOnly && delta > 0;
+  // Gate the below-floor candidates NOW (not just for the rescue below) so the pool-DF map can
+  // span the WHOLE in-hand pool — above- AND below-floor — that the tie-break + rescue draw from
+  // (qp-mgm). gate() reuses parseOnce's cache, so this is bounded reads, no extra search.
+  const belowFloorGated = gate(floorDropped).kept;
+  // Pool-DF over the in-hand candidates (qp-mgm): a query-overlap token common across the pool is
+  // non-distinctive topic noise (e.g. "port" across six port facts, "k3s" across two k3s facts) and
+  // must not drive the tie-break or rescue a near-miss. Built once, only when the boost is on, and
+  // shared by both keys below — pool-DF (NOT corpus-DF) keeps it deterministic + test-stable.
+  const poolDf = boostOn
+    ? poolDocFreq([...gated, ...belowFloorGated].map(({ h, fm }) => ({ slug: h.slug, project: fm?.frontmatter.project, tags: fm?.frontmatter.tags })))
+    : undefined;
   const overlapCache = new Map<string, number>();
   const overlapOf = (e: { h: RecallHit; fm: ParsedMemory | null }): number => {
     if (!boostOn) return 0;
     let v = overlapCache.get(e.h.path); // memoize: the comparator below queries each entry O(log n) times
     if (v === undefined) {
-      v = distinctiveOverlap(query, { slug: e.h.slug, project: e.fm?.frontmatter.project, tags: e.fm?.frontmatter.tags });
+      v = distinctiveOverlap(query, { slug: e.h.slug, project: e.fm?.frontmatter.project, tags: e.fm?.frontmatter.tags }, poolDf);
       overlapCache.set(e.h.path, v);
     }
     return v;
@@ -2078,11 +2118,10 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   // Enforce the user-visible limit after the gates (the over-fetch pulled a wider pool;
   // a non-widened recall already fetched exactly `limit`, so this slice is a no-op there).
   const limited = gated.slice(0, limit);
-  // Completeness counters (40h). Both respect the type/platform gates so they only count
-  // facts the caller could actually surface by raising limit / lowering the floor. Gating
-  // floorDropped reuses parseOnce's cache — bounded extra reads, no extra search round-trip.
+  // Completeness counter (40h): respects the type/platform gates so it only counts facts the
+  // caller could surface by raising limit. (belowFloorGated — the below-floor counter input — is
+  // gated once above, before the tie-break, so the pool-DF map can span the full in-hand pool.)
   const moreMatches = gated.length - limited.length;
-  const belowFloorGated = gate(floorDropped).kept;
 
   // Below-floor rescue (qp-dnx): BACKFILL the empty slots (never evict a real hit) with near-miss
   // on-target facts — a raw rerankScore just under the floor AND distinctive query overlap on
@@ -2096,7 +2135,7 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     ? belowFloorGated
         .filter(({ h, fm }) => isRescueEligible(
           h.score ?? -1,
-          distinctiveOverlap(query, { slug: h.slug, project: fm?.frontmatter.project, tags: fm?.frontmatter.tags }),
+          distinctiveOverlap(query, { slug: h.slug, project: fm?.frontmatter.project, tags: fm?.frontmatter.tags }, poolDf),
           minRerank, delta))
         .sort((a, b) => (b.h.score ?? -1) - (a.h.score ?? -1)) // best near-miss first
         .slice(0, Math.min(RECALL_RESCUE_CAP, rescueRoom))
