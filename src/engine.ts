@@ -1686,12 +1686,14 @@ export function isRescueEligible(rawScore: number, overlap: number, effectiveMin
 export const DEFAULT_RESCUE_DELTA = 0.05;
 
 /** The rescue band, read at CALL time from QMEMD_RESCUE_DELTA (the embedTimeoutMs precedent) so
- *  tests/daemons can retune it. 0 (or a negative/garbage value clamped via the >= 0 guard, with
- *  explicit 0) disables BOTH the rescue and the overlap tie-break → bit-exact pre-feature recall:
- *  the master kill switch. Default DEFAULT_RESCUE_DELTA. */
+ *  tests/daemons can retune it. Unset / empty / whitespace / non-numeric / negative all fall back
+ *  to DEFAULT_RESCUE_DELTA — only an EXPLICIT `0` disables BOTH the rescue and the overlap tie-break
+ *  → bit-exact pre-feature recall (the master kill switch). The empty-string guard matters: an
+ *  `export QMEMD_RESCUE_DELTA=` (a common "clear the var" idiom) is Number("") === 0, which would
+ *  otherwise silently disable the feature instead of meaning "unset" (M1). */
 export function rescueDelta(): number {
   const raw = process.env.QMEMD_RESCUE_DELTA;
-  if (raw === undefined) return DEFAULT_RESCUE_DELTA;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_RESCUE_DELTA;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : DEFAULT_RESCUE_DELTA;
 }

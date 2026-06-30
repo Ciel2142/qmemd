@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";
 import type { QMDStore } from "@tobilu/qmd";
-import { distinctiveOverlap, isRescueEligible, recallQueryWithStatus, type RecallHit } from "../src/engine.js";
+import { distinctiveOverlap, isRescueEligible, recallQueryWithStatus, rescueDelta, DEFAULT_RESCUE_DELTA, type RecallHit } from "../src/engine.js";
 import { toHitDTO } from "../src/mcp/server.js";
 
 // A fake hybrid store: each entry becomes a search hit carrying explain.rerankScore. Files do
@@ -79,6 +79,23 @@ describe("isRescueEligible (qp-dnx)", () => {
   });
 });
 
+describe("rescueDelta env parsing (qp-dnx, M1 regression)", () => {
+  const KEY = "QMEMD_RESCUE_DELTA";
+  const withEnv = (v: string | undefined, fn: () => void): void => {
+    const prev = process.env[KEY];
+    if (v === undefined) delete process.env[KEY]; else process.env[KEY] = v;
+    try { fn(); } finally { if (prev === undefined) delete process.env[KEY]; else process.env[KEY] = prev; }
+  };
+  test("undefined → default", () => withEnv(undefined, () => expect(rescueDelta()).toBe(DEFAULT_RESCUE_DELTA)));
+  // M1: an empty `export QMEMD_RESCUE_DELTA=` must NOT silently disable (Number("") === 0).
+  test("empty string → default, not a silent disable", () => withEnv("", () => expect(rescueDelta()).toBe(DEFAULT_RESCUE_DELTA)));
+  test("whitespace-only → default", () => withEnv("  ", () => expect(rescueDelta()).toBe(DEFAULT_RESCUE_DELTA)));
+  test("garbage → default", () => withEnv("xyz", () => expect(rescueDelta()).toBe(DEFAULT_RESCUE_DELTA)));
+  test("negative → default", () => withEnv("-0.5", () => expect(rescueDelta()).toBe(DEFAULT_RESCUE_DELTA)));
+  test("explicit 0 → 0 (the documented kill switch)", () => withEnv("0", () => expect(rescueDelta()).toBe(0)));
+  test("a valid positive value parses through", () => withEnv("0.1", () => expect(rescueDelta()).toBe(0.1)));
+});
+
 describe("recall below-floor rescue wiring (fake store) (qp-dnx)", () => {
   const root = "/tmp/qmemd-fake-rescue";
 
@@ -144,8 +161,10 @@ describe("recall below-floor rescue wiring (fake store) (qp-dnx)", () => {
   });
 
   test("orders an overlapping fact above an equally-bucketed non-overlapping one (tie-break boost)", async () => {
-    // Both above the floor and in the SAME 0.02 score bucket; the kafka-overlapping fact must
-    // rank first even though the other has a hair-higher raw score within the bucket.
+    // Both above the floor and in the SAME 0.02 score bucket — round(0.70/0.02)=35.0 and
+    // round(0.705/0.02)=round(35.25)=35 → bucket 35 for both, so the overlap tie-break (not the
+    // raw score) decides order. If RECENCY_TIE_BUCKET changes these could split buckets and the
+    // test would silently change meaning; keep the two scores within one bucket width apart.
     const store = hybridStore([
       { slug: "redis-acl-generic-note", rerank: 0.705 },    // higher raw, no overlap
       { slug: "kafka-dlq-per-pair-naming", rerank: 0.70 },  // lower raw, overlaps "kafka"
