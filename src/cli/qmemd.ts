@@ -131,7 +131,10 @@ function printRecallResult(res: RecallResult, json: boolean, minScore: number | 
     !!scope.crossProject && scope.project !== undefined && h.project !== scope.project && h.project !== "global";
   const line = (h: RecallHit, tag: string): void => {
     const plat = h.platforms?.length ? ` ${d}{${h.platforms.join(",")}}${r}` : "";
-    console.log(`${cy}[${h.type}${tag}]${r} ${h.description} ${d}(${h.slug})${r}${plat}`);
+    // Rescued hits (qp-dnx) carry no other score on the line — mark them so a sub-floor fact is
+    // never read as a vetted top hit. Shows the raw (sub-floor) rerankScore as the provenance.
+    const resc = h.rescued ? ` ${y}↓below-floor${h.score !== undefined ? ` ${h.score.toFixed(2)}` : ""}${r}` : "";
+    console.log(`${cy}[${h.type}${tag}]${r} ${h.description} ${d}(${h.slug})${r}${plat}${resc}`);
     if (h.body) console.log(`  ${h.body.replace(/\n/g, "\n  ")}`); // indented, mirrors recallSession withBody
   };
   for (const h of hits.filter(x => !isForeign(x))) line(h, "");

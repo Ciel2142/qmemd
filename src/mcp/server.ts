@@ -24,12 +24,14 @@ const VERSION: string = (createRequire(import.meta.url)("../../package.json") as
 // tools (structuredContent) and the REST handlers build their JSON through these,
 // so the fs-path allowlist (qmemd-81n) can never drift between the two surfaces.
 // None of them carry an absolute filesystem path.
-export type HitDTO = { slug: string; type: string; description: string; score?: number; body?: string; platforms: string[]; project: string };
+export type HitDTO = { slug: string; type: string; description: string; score?: number; body?: string; platforms: string[]; project: string; rescued?: boolean };
 // All four supersession fields are slugs/ISO instants — path-free, qmemd-81n safe (bri integration review).
 export type FactDTO = { slug: string; type: string; description: string; tags: string[]; pinned: boolean; created: string; body: string; platforms: string[]; updated?: string; supersedes?: string; supersededBy?: string; conflictsWith?: string; reviewBy?: string };
 export type ListEntryDTO = { slug: string; type: string; description: string; tags: string[]; created: string; pinned: boolean; platforms: string[]; supersededBy?: string };
 export function toHitDTO(h: RecallHit): HitDTO {
-  return { slug: h.slug, type: h.type, description: h.description, score: h.score, body: h.body, platforms: h.platforms ?? [], project: h.project };
+  // rescued: only present (true) on a below-floor rescue (qp-dnx) — the model's provenance that
+  // this hit sits under the relevance floor and its score is sub-floor. Omitted on normal hits.
+  return { slug: h.slug, type: h.type, description: h.description, score: h.score, body: h.body, platforms: h.platforms ?? [], project: h.project, ...(h.rescued && { rescued: true }) };
 }
 export function toFactDTO(fact: FullFact): FactDTO {
   const fm = fact.frontmatter;
@@ -59,6 +61,7 @@ const HIT_DTO_Z = z.object({
   slug: z.string(), type: z.string(), description: z.string(),
   score: z.number().optional(), body: z.string().optional(),
   platforms: z.array(z.string()), project: z.string(),
+  rescued: z.boolean().optional().describe("This hit was rescued from below the relevance floor (qp-dnx); its score is sub-floor — treat as lower-confidence."),
 }) satisfies z.ZodType<HitDTO>;
 // One schema serves both result shapes — the SDK requires structuredContent on every
 // non-error result once a schema is declared, so the session path is covered by the
