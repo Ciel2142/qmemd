@@ -1620,6 +1620,10 @@ export interface RecallHit {
   /** The fact's project scope from frontmatter (qmemd-due): a project name or "global". Always
    *  populated by recall; surfaced so a caller can tell a current-project hit from a foreign one. */
   project: string;
+  /** True when this hit was readmitted by the below-floor rescue (qp-dnx): its raw rerankScore is
+   *  just under the relevance floor but it carries distinctive query overlap. The displayed `score`
+   *  stays RAW (sub-floor) so a caller can mark it low-confidence. Absent on normal hits. */
+  rescued?: boolean;
 }
 
 /**
@@ -1642,6 +1646,59 @@ export const DEFAULT_MIN_SCORE = 0.575;
  *  a transitive comparator, unlike a raw |Δ|<ε check — and the raw score is never
  *  mutated, so the minScore floor and the exposed hit.score stay calibrated. */
 export const RECENCY_TIE_BUCKET = 0.02;
+
+/** Static stoplist for the recall overlap boost (qp-dnx): high-frequency tokens that carry no
+ *  project signal, so a shared occurrence must NOT promote or rescue a fact. Kept STATIC (not
+ *  corpus document-frequency) so the boost stays deterministic and test-stable as the corpus
+ *  grows — slug∪project tokens are inherently high-IDF, this only guards the generic tail. */
+export const RECALL_BOOST_STOPLIST: ReadonlySet<string> = new Set([
+  "test", "build", "git", "repo", "spring", "boot", "gotcha", "qmemd", "service", "app", "fix",
+]);
+
+/** Distinctive-token overlap between a query and a fact's {slug ∪ project ∪ tags} (qp-dnx): the
+ *  count of shared tokens after dropping the static stoplist. The recall ordering tie-break and
+ *  the below-floor rescue both key on this — a model-free, deterministic relevance signal the
+ *  position-dominated reranker under-weights for project-named facts. Reuses tokenizeForDedup so
+ *  it shares the engine's tokenization (semver-aware, stopword-filtered). */
+export function distinctiveOverlap(query: string, fact: { slug: string; project?: string; tags?: string[] }): number {
+  const q = new Set(tokenizeForDedup(query));
+  if (q.size === 0) return 0;
+  const signal = [fact.slug, fact.project ?? "", ...(fact.tags ?? [])].join(" ");
+  let n = 0;
+  for (const t of new Set(tokenizeForDedup(signal))) {
+    if (q.has(t) && !RECALL_BOOST_STOPLIST.has(t)) n++;
+  }
+  return n;
+}
+
+/** Below-floor rescue eligibility (qp-dnx): a candidate the relevance floor dropped is eligible
+ *  for tail backfill ONLY when its RAW rerankScore sits within `delta` just below the effective
+ *  floor AND it carries ≥1 distinctive query-overlap token. The floor decision itself stays on the
+ *  raw score (the calibration invariant, engine.ts:1643) — rescue is a narrow, evidence-gated
+ *  readmission of near-miss on-target facts, never a floor move. `delta` 0 disables it. */
+export function isRescueEligible(rawScore: number, overlap: number, effectiveMinScore: number, delta: number): boolean {
+  return overlap >= 1 && rawScore < effectiveMinScore && rawScore >= effectiveMinScore - delta;
+}
+
+/** Below-floor rescue band width (qp-dnx): a dropped candidate within this much of the floor is
+ *  rescue-eligible when it carries distinctive overlap. Default 0.05 covers measured near-misses
+ *  (~0.52–0.57) while excluding the ~0.50 noise band. */
+export const DEFAULT_RESCUE_DELTA = 0.05;
+
+/** The rescue band, read at CALL time from QMEMD_RESCUE_DELTA (the embedTimeoutMs precedent) so
+ *  tests/daemons can retune it. 0 (or a negative/garbage value clamped via the >= 0 guard, with
+ *  explicit 0) disables BOTH the rescue and the overlap tie-break → bit-exact pre-feature recall:
+ *  the master kill switch. Default DEFAULT_RESCUE_DELTA. */
+export function rescueDelta(): number {
+  const raw = process.env.QMEMD_RESCUE_DELTA;
+  if (raw === undefined) return DEFAULT_RESCUE_DELTA;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_RESCUE_DELTA;
+}
+
+/** Max below-floor facts rescued per recall (qp-dnx): caps the low-confidence tail so a rescue
+ *  can never flood the result (risk-lens cap K). */
+export const RECALL_RESCUE_CAP = 2;
 
 export interface RecallOptions {
   type?: MemoryType;  // scope to one folder
@@ -1993,8 +2050,28 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     fm ? (fm.frontmatter.updated ?? fm.frontmatter.created) : "";
   const scoreKey = (s: number | undefined): number =>
     opts.lexOnly ? (s ?? -1) : Math.round((s ?? -1) / RECENCY_TIE_BUCKET);
+  // Overlap tie-break (qp-dnx): WITHIN an equal score bucket, a fact whose {slug∪project∪tags}
+  // shares distinctive tokens with the query orders ahead of an equally-relevant one that does
+  // not — fixing the reranker's under-weighting of project-named facts. Pure tie-break: ranked
+  // BELOW the score key, so it can never leapfrog a higher-scored hit (the calibration invariant
+  // holds). Hybrid only, gated by the same QMEMD_RESCUE_DELTA>0 master switch as the rescue, so
+  // delta=0 is bit-exact pre-feature. Raw hit.score is never mutated — overlap is a derived key.
+  const delta = rescueDelta();
+  const boostOn = !opts.lexOnly && delta > 0;
+  const overlapCache = new Map<string, number>();
+  const overlapOf = (e: { h: RecallHit; fm: ParsedMemory | null }): number => {
+    if (!boostOn) return 0;
+    let v = overlapCache.get(e.h.path); // memoize: the comparator below queries each entry O(log n) times
+    if (v === undefined) {
+      v = distinctiveOverlap(query, { slug: e.h.slug, project: e.fm?.frontmatter.project, tags: e.fm?.frontmatter.tags });
+      overlapCache.set(e.h.path, v);
+    }
+    return v;
+  };
   gated.sort((a, b) =>
-    (scoreKey(b.h.score) - scoreKey(a.h.score)) || recencyOf(b.fm).localeCompare(recencyOf(a.fm)));
+    (scoreKey(b.h.score) - scoreKey(a.h.score))
+    || (overlapOf(b) - overlapOf(a))
+    || recencyOf(b.fm).localeCompare(recencyOf(a.fm)));
 
   // Enforce the user-visible limit after the gates (the over-fetch pulled a wider pool;
   // a non-widened recall already fetched exactly `limit`, so this slice is a no-op there).
@@ -2003,13 +2080,34 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   // facts the caller could actually surface by raising limit / lowering the floor. Gating
   // floorDropped reuses parseOnce's cache — bounded extra reads, no extra search round-trip.
   const moreMatches = gated.length - limited.length;
-  const belowFloor = gate(floorDropped).kept.length;
+  const belowFloorGated = gate(floorDropped).kept;
+
+  // Below-floor rescue (qp-dnx): BACKFILL the empty slots (never evict a real hit) with near-miss
+  // on-target facts — a raw rerankScore just under the floor AND distinctive query overlap on
+  // {slug∪project∪tags}. Hybrid only (the lex path floors nothing, so floorDropped is empty).
+  // QMEMD_RESCUE_DELTA=0 disables it → bit-exact pre-feature recall. The floor decision above is
+  // NOT touched — picks are readmitted to the tail, the calibrated 0.575 floor never moved (the
+  // calibration invariant, engine.ts:1643). Capped at RECALL_RESCUE_CAP so a rescue can't flood.
+  // `delta` (the master switch) was resolved once above for the overlap tie-break — reuse it.
+  const rescueRoom = Math.max(0, limit - limited.length);
+  const rescuePicks = delta > 0 && rescueRoom > 0 && !opts.lexOnly
+    ? belowFloorGated
+        .filter(({ h, fm }) => isRescueEligible(
+          h.score ?? -1,
+          distinctiveOverlap(query, { slug: h.slug, project: fm?.frontmatter.project, tags: fm?.frontmatter.tags }),
+          minRerank, delta))
+        .sort((a, b) => (b.h.score ?? -1) - (a.h.score ?? -1)) // best near-miss first
+        .slice(0, Math.min(RECALL_RESCUE_CAP, rescueRoom))
+    : [];
+  // A rescued fact is no longer a hidden below-floor match — it was surfaced. Decrement the
+  // completeness counter explicitly; the floor partition above is intentionally left intact.
+  const belowFloor = belowFloorGated.length - rescuePicks.length;
 
   // Build display hits from the already-parsed frontmatter — no second read. Backfills
   // description + canonical type + body so an agent with no filesystem access can read the
   // fact (bgf). Capped to RECALL_BODY_CAP unless opts.fullBody; opts.skim attaches no body
-  // and wins over fullBody (r0u).
-  const backfilled: RecallHit[] = limited.map(({ h, fm }) => {
+  // and wins over fullBody (r0u). Rescue picks are appended to the tail, flagged below.
+  const backfilled: RecallHit[] = [...limited, ...rescuePicks].map(({ h, fm }) => {
     // Fail-open hit: keep the search-derived fields unchanged (matching the old
     // `catch { return h; }`), with platforms defaulted to [] (its placeholder value).
     if (!fm) return { ...h, platforms: [] };
@@ -2029,6 +2127,10 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     const body = capped.length < full.length ? capped + "…" : capped;
     return { ...headline, body };
   });
+  // Flag the appended rescue picks (the final rescuePicks.length entries) without touching the
+  // backfill body's multiple return points. Their displayed `score` stays RAW (sub-floor) so a
+  // caller can render them low-confidence.
+  for (let i = limited.length; i < backfilled.length; i++) backfilled[i] = { ...backfilled[i]!, rescued: true };
 
   return { hits: backfilled, degraded, vectorsPending, moreMatches, belowFloor, saturated, crossProjectHidden };
 }
