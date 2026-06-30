@@ -697,7 +697,12 @@ describe("MCP recall surfaces the embed-degraded signal (9t1)", () => {
   });
 
   test("a degraded hybrid recall reports degraded:true + vectorsPending and warns in the text", async () => {
-    const res = await client.callTool({ name: "recall", arguments: { query: "foo" } });
+    // Force the hybrid path explicitly. With no lexOnly, the capability gate auto-resolves the
+    // mode (mcp/server.ts shouldAutoResolve) and a CPU-only host — CI, and any GPU-less box —
+    // resolves to `lex`, which skips the very embed barrier this test exercises (the result is
+    // then a correct, non-degraded lex recall). Requesting hybrid is what makes the degraded
+    // signal observable regardless of host GPU (capability-gating regression, qp-7hb).
+    const res = await client.callTool({ name: "recall", arguments: { query: "foo", lexOnly: false } });
     const sc = res.structuredContent as { degraded: boolean; vectorsPending: number; hits: unknown[] };
     expect(sc.degraded).toBe(true);
     expect(sc.vectorsPending).toBe(4);
