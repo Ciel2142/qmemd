@@ -145,11 +145,47 @@ export function gitPush(root: string, deps: GitDeps = {}): GitPushResult {
     if (up === "absent") return { ok: true, pushed: false, reason: "no-upstream" };
     const status = run(["push"], root);
     if (status === 0) return { ok: true, pushed: true };
-    return { ok: false, pushed: false, reason: `push-failed (status ${status})` };
+    // A `null` here is git-unavailable / timed-out (NOT a rejection): reconciling would just
+    // burn a second GIT_TIMEOUT_MS on a dead git, so report it exactly as before (qmemd-bwr's
+    // ≤5s bound). A real nonzero exit is a rejection — most often non-fast-forward because
+    // another machine pushed first (qp-remember-push-no-pull-reconcile-usx) — so attempt one
+    // reconcile rather than letting the local backlog grow unbounded and silently.
+    if (status === null) return { ok: false, pushed: false, reason: "push-failed (status null)" };
+    return reconcileAndRepush(root, run, status);
   } catch {
     // best-effort
     return { ok: false, pushed: false, reason: "exception" };
   }
+}
+
+/**
+ * One-shot reconcile after a rejected push (qp-remember-push-no-pull-reconcile-usx): the qmemd
+ * write paths only ever pushed, never pulled, so the first time another machine pushed first,
+ * every subsequent push rejected non-fast-forward and the local commits piled up unseen. We
+ * can't read the rejection reason (stdio:"ignore" gives only the exit code), so we treat any
+ * nonzero push as a candidate divergence and try `pull --rebase` + re-push.
+ *
+ * Clean divergence — distinct facts from distinct machines, the common case — rebases without
+ * conflict and the re-push lands, auto-healing the backlog. A genuine conflict (or an
+ * auth/offline failure, where the pull simply re-fails) makes us abort any in-progress rebase
+ * and report the ORIGINAL push failure, so a machine that couldn't heal ends up exactly where
+ * today's code leaves it — no regression, no half-applied rebase stranded in the work tree.
+ *
+ * Reindex note: a clean rebase lands the pulled foreign facts in the work tree BEFORE the
+ * caller's own post-push `reindexMemory` runs, so those facts are adopted into the lex index
+ * for free — no extra reindex needed in the write paths.
+ */
+function reconcileAndRepush(root: string, run: GitRun, origPushStatus: number): GitPushResult {
+  const pulled = run(["pull", "--rebase"], root);
+  if (pulled !== 0) {
+    // Conflict, or the pull itself failed (auth/offline). Abort any rebase left mid-apply —
+    // best-effort: when nothing is in progress this exits nonzero harmlessly, so ignore it.
+    run(["rebase", "--abort"], root);
+    return { ok: false, pushed: false, reason: `push-failed (status ${origPushStatus})` };
+  }
+  const status = run(["push"], root);
+  if (status === 0) return { ok: true, pushed: true, reason: "reconciled" };
+  return { ok: false, pushed: false, reason: `push-failed (status ${status}, after reconcile)` };
 }
 
 /**

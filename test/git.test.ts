@@ -179,6 +179,68 @@ describe("git helpers (unit, fake runner)", () => {
   });
 });
 
+describe("gitPush auto-reconciles a rejected (diverged) push (qp-remember-push-no-pull-reconcile-usx)", () => {
+  // The bug: a `remember` push is rejected non-fast-forward the moment another machine has
+  // pushed first, and nothing ever pulls — so the local backlog grows unbounded and silently.
+  // gitPush must attempt ONE reconcile (pull --rebase + re-push) on a rejected push.
+  // stdio:"ignore" means we only see the exit status, so any nonzero push triggers the
+  // reconcile; an auth/offline failure simply re-fails the pull and degrades to today's result.
+
+  // Scripted runner: `push` consumes statuses in call order (first push fails, second is the
+  // re-push); `pull`/`rebase` get fixed statuses. Repo + upstream probes always succeed.
+  function makeReconcileRun(opts: { pushStatuses: (number | null)[]; pullRebaseStatus: number | null; abortStatus?: number }) {
+    const calls: string[][] = [];
+    const pushQueue = [...opts.pushStatuses];
+    const run: GitRun = (args) => {
+      calls.push(args);
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return 0;
+      if (args[0] === "rev-parse") return 0; // upstream present
+      if (args[0] === "push") return pushQueue.length > 0 ? pushQueue.shift()! : 0; // a scripted null must stay null (≠ empty-queue default 0)
+      if (args[0] === "pull") return opts.pullRebaseStatus;
+      if (args[0] === "rebase") return opts.abortStatus ?? 0;
+      return 0;
+    };
+    return { calls, run };
+  }
+
+  test("push rejected, then pull --rebase + re-push succeeds ⇒ reconciled (the backlog auto-heals)", () => {
+    const { calls, run } = makeReconcileRun({ pushStatuses: [1, 0], pullRebaseStatus: 0 });
+    expect(gitPush("/repo", { run })).toEqual({ ok: true, pushed: true, reason: "reconciled" });
+    expect(calls.map(c => c.join(" "))).toEqual([
+      "rev-parse --is-inside-work-tree",
+      "rev-parse --abbrev-ref --symbolic-full-name @{u}",
+      "push",
+      "pull --rebase",
+      "push",
+    ]);
+  });
+
+  test("rebase conflict (pull --rebase fails) ⇒ abort + report the ORIGINAL push failure (no regression)", () => {
+    const { calls, run } = makeReconcileRun({ pushStatuses: [1], pullRebaseStatus: 1 });
+    expect(gitPush("/repo", { run })).toEqual({ ok: false, pushed: false, reason: "push-failed (status 1)" });
+    expect(calls).toContainEqual(["rebase", "--abort"]); // in-progress rebase cleaned up
+    expect(calls.filter(c => c[0] === "push").length).toBe(1); // never re-pushed
+  });
+
+  test("pull --rebase succeeds but the re-push still fails ⇒ ok:false, reason flags after-reconcile", () => {
+    const { calls, run } = makeReconcileRun({ pushStatuses: [1, 1], pullRebaseStatus: 0 });
+    expect(gitPush("/repo", { run })).toEqual({ ok: false, pushed: false, reason: "push-failed (status 1, after reconcile)" });
+    expect(calls.filter(c => c[0] === "push").length).toBe(2);
+  });
+
+  test("a null push (git died / timed out mid-push) does NOT reconcile — avoids a second 5s timeout", () => {
+    const { calls, run } = makeReconcileRun({ pushStatuses: [null], pullRebaseStatus: 0 });
+    expect(gitPush("/repo", { run })).toEqual({ ok: false, pushed: false, reason: "push-failed (status null)" });
+    expect(calls.some(c => c[0] === "pull")).toBe(false); // never attempted a pull
+  });
+
+  test("a successful first push never triggers a reconcile (no pull/rebase)", () => {
+    const { calls, run } = makeReconcileRun({ pushStatuses: [0], pullRebaseStatus: 0 });
+    expect(gitPush("/repo", { run })).toEqual({ ok: true, pushed: true });
+    expect(calls.some(c => c[0] === "pull")).toBe(false);
+  });
+});
+
 describe("git availability vs no-upstream distinction (qmemd-bwr)", () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "qmemd-bwr-")); mkdirSync(join(dir, ".git")); });
@@ -326,5 +388,54 @@ describe.runIf(gitAvailable)("git helpers (integration, real git)", () => {
     expect(log).toContain("forget: gone");
     const ls = spawnSync("git", ["-C", work, "ls-files", "user/gone.md"], { encoding: "utf-8" }).stdout;
     expect(ls.trim()).toBe(""); // deletion really landed
+  });
+
+  // --- auto-reconcile a diverged remote (qp-remember-push-no-pull-reconcile-usx) ---
+
+  test("gitPush auto-reconciles a non-fast-forward rejection: pulls the other machine's commit, rebases, re-pushes", () => {
+    // Two machines share the bare remote. `clone` (the "other machine") pushes first, so
+    // `work`'s next push is rejected non-fast-forward — the exact diverged state this issue is
+    // about. The facts are DISTINCT files (clean divergence), so the rebase is conflict-free
+    // and gitPush heals without manual intervention.
+    spawnSync("git", ["clone", "-q", bare, clone]);
+    spawnSync("git", ["-C", clone, "config", "user.email", "o@o"]);
+    spawnSync("git", ["-C", clone, "config", "user.name", "o"]);
+    writeFileSync(join(clone, "from-other.md"), "other\n");
+    spawnSync("git", ["-C", clone, "add", "-A"]);
+    spawnSync("git", ["-C", clone, "commit", "-qm", "remember: from-other"]);
+    spawnSync("git", ["-C", clone, "push", "-q"]);
+
+    writeFileSync(join(work, "from-work.md"), "work\n");
+    gitCommit(work, "remember: from-work", "from-work.md");
+    expect(gitPush(work)).toEqual({ ok: true, pushed: true, reason: "reconciled" });
+
+    const log = spawnSync("git", ["-C", bare, "log", "--oneline"], { encoding: "utf-8" }).stdout;
+    expect(log).toContain("remember: from-work");
+    expect(log).toContain("remember: from-other"); // remote keeps BOTH machines' commits
+    // The other machine's fact is now on disk in this work tree, so the post-push reindex in
+    // every write path adopts it ("reindex after reconcile" — no extra engine code needed).
+    expect(existsSync(join(work, "from-other.md"))).toBe(true);
+  });
+
+  test("gitPush aborts the rebase and leaves the work tree clean when reconcile hits a real conflict", () => {
+    // Both machines add the SAME path with different content ⇒ add/add rebase conflict.
+    // gitPush must abort the half-applied rebase and report the original failure, never
+    // stranding the work tree mid-rebase.
+    spawnSync("git", ["clone", "-q", bare, clone]);
+    spawnSync("git", ["-C", clone, "config", "user.email", "o@o"]);
+    spawnSync("git", ["-C", clone, "config", "user.name", "o"]);
+    writeFileSync(join(clone, "shared.md"), "other-version\n");
+    spawnSync("git", ["-C", clone, "add", "-A"]);
+    spawnSync("git", ["-C", clone, "commit", "-qm", "other edits shared"]);
+    spawnSync("git", ["-C", clone, "push", "-q"]);
+
+    writeFileSync(join(work, "shared.md"), "work-version\n");
+    gitCommit(work, "work edits shared", "shared.md");
+    expect(gitPush(work).ok).toBe(false); // a real conflict can't auto-heal
+
+    const status = spawnSync("git", ["-C", work, "status"], { encoding: "utf-8" }).stdout;
+    expect(status).not.toMatch(/rebase in progress/i); // no half-applied rebase left behind
+    const log = spawnSync("git", ["-C", work, "log", "--oneline"], { encoding: "utf-8" }).stdout;
+    expect(log).toContain("work edits shared"); // local commit left as-is
   });
 });
