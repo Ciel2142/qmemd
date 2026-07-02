@@ -1226,6 +1226,34 @@ describe("remember (SDK-backed)", () => {
     expect(res.reportWarning).toBeUndefined();
   });
 
+  test("strips leaked markup, writes the clean fact, and surfaces sanitizedWarning (qp-ey3)", async () => {
+    const { remember } = await import("../src/engine.js");
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const raw = "Keystore alias is the cert CN.\n</fact>\n<parameter name=\"type\">project";
+    const res = await remember(store, root, { fact: raw, type: "reference" });
+    expect(res.wrote).toBe(true);
+    expect(res.sanitizedWarning).toBeTruthy();
+    const onDisk = readFileSync(res.path, "utf-8");
+    expect(onDisk).not.toContain("</fact>");
+    expect(onDisk).not.toContain("<parameter");
+    expect(onDisk).toContain("Keystore alias is the cert CN.");
+    expect(spy.mock.calls.some(c => String(c[0]).includes("pre-strip raw"))).toBe(true);
+    spy.mockRestore();
+  });
+
+  test("a clean fact carries no sanitizedWarning (qp-ey3)", async () => {
+    const { remember } = await import("../src/engine.js");
+    const res = await remember(store, root, { fact: "Postgres listens on 5432", type: "project" });
+    expect(res.wrote).toBe(true);
+    expect(res.sanitizedWarning).toBeUndefined();
+  });
+
+  test("a fact that is ENTIRELY leaked markup is refused (qp-ey3)", async () => {
+    const { remember } = await import("../src/engine.js");
+    await expect(remember(store, root, { fact: "</fact>\n<parameter name=\"type\">project", type: "reference" }))
+      .rejects.toThrow(/entirely leaked tool-call markup/);
+  });
+
   test("--force writes despite duplicate", async () => {
     const { remember } = await import("../src/engine.js");
     await remember(store, root, { fact: "Use Bun not Node", type: "user" });

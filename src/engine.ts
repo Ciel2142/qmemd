@@ -882,6 +882,13 @@ export interface RememberResult {
    * no-write path (nothing was stored there to mis-route). A generic guidance string, no fs path.
    */
   reportWarning?: string;
+  /**
+   * Non-blocking (qp-ey3): set when leaked tool-call/template markup was stripped from the fact
+   * body before storing (the cleaned fact IS written). A generic guidance string built from the
+   * fixed token labels — no fs path, no captured content. Omitted for clean input and on every
+   * no-write path. The pre-strip raw fact is additionally logged to stderr for recovery.
+   */
+  sanitizedWarning?: string;
   /** Echo of input.supersedes on a successful supersede write (qmemd-bri). */
   supersededSlug?: string;
   /** Set when --force wrote past a detected contradiction (qmemd-cr4): the slug of the
@@ -1388,11 +1395,36 @@ export async function remember(
   // runs (and stays 0 on the --replace/--force path, which skips dedup entirely).
   let dedupSkipped = 0;
 
+  // Prevention (qp-ey3): strip leaked tool-call/template markup BEFORE it derives the slug /
+  // dedup keys / description / stored body. Rebind input.fact ONCE (not thread a separate var
+  // through the ~9 read sites) so a missed site can't silently re-open the leak. Model-free
+  // (no model, no key — I1/I5).
+  const originalFact = input.fact;
+  const leakedTokens = leakedMarkupTokens(originalFact);
+  if (leakedTokens.length > 0) {
+    const cleaned = stripLeakedMarkup(originalFact);
+    if (cleaned.trim() === "") {
+      // Body was ENTIRELY leaked framing — no salvageable content. Reject path-free like
+      // assertSafeSlug (MCP verbatim / HTTP 400); a hollow fact is worse than a retry.
+      throw new Error("fact text was entirely leaked tool-call markup — nothing durable to store");
+    }
+    input = { ...input, fact: cleaned };
+  }
+
   const slugSource = input.as ?? input.fact;
   const slug = input.replace ?? (slugify(slugSource) || fallbackSlug(slugSource));
   // Guard the finalized slug before it becomes a path segment / commit message.
   // slugify()/fallbackSlug() output always passes; a verbatim `replace` may not (qmemd-fd8).
   assertSafeSlug(slug);
+  // Recoverability (qp-ey3): only the CLEANED fact is committed below — the raw input reaches
+  // neither disk nor git, and unlike doctor there is no .bak. Log the pre-strip raw to stderr
+  // (best-effort, mirroring the sync/supersede/dedup warnings) so a false-positive strip is
+  // always recoverable; ride a short path-free warning back on the result.
+  let sanitizedWarning: string | undefined;
+  if (leakedTokens.length > 0) {
+    console.error(`[qmemd] remember '${slug}': stripped leaked tool-call markup (${leakedTokens.join(", ")}) from the fact body before storing — pre-strip raw fact follows for recovery:\n${originalFact}`);
+    sanitizedWarning = `stripped leaked tool-call/template markup (${leakedTokens.join(", ")}) from the fact body before storing`;
+  }
   if (input.supersedes !== undefined) {
     assertSafeSlug(input.supersedes); // LLM/CLI-controlled, becomes a path segment (qmemd-fd8)
     if (input.replace !== undefined) {
@@ -1455,7 +1487,9 @@ export async function remember(
 
   // NON-PORT (mem0 add(infer=True)): qmemd never LLM-distills a fact from a transcript on
   // the write path. The write loads NO model (I1) and needs NO API key (I5) — the fact text
-  // is stored verbatim (writeFileSync below); only this model-free dedup/classify walk runs.
+  // is stored verbatim (writeFileSync below) EXCEPT a deterministic, model-free removal of a
+  // closed set of known harness framing tokens (stripLeakedMarkup, qp-ey3) — a normalization
+  // joining body.trimEnd(), NOT distillation/paraphrase; only this model-free dedup/classify walk runs.
   // Distillation is the agent's job, never the engine's. A future shared classifyCandidate()
   // (e11) extracted from this walk inherits the same rule: keep it model-free.
   // Dedup check — skipped when --replace, --force, or --supersedes is set (a successor
@@ -1607,6 +1641,11 @@ export async function remember(
   const dir = join(root, type);
   mkdirSync(dir, { recursive: true });
   const path = memoryFilePath(root, type, slug);
+  // Post-condition (qp-ey3): stripLeakedMarkup is a fixed point, so the stored body MUST be
+  // token-free. A survivor means a stripper bug — fail loudly rather than persist corruption.
+  if (leakedTokens.length > 0 && leakedMarkupTokens(input.fact).length > 0) {
+    throw new Error("internal: leaked markup survived sanitization");
+  }
   writeFileSync(path, serializeMemory(fm, input.fact));
 
   // Supersede double-write (bri): stamp superseded_by onto the OLD fact via a surgical
@@ -1655,7 +1694,7 @@ export async function remember(
     console.error(`[qmemd] reindex after remember failed (fact saved + committed): ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { wrote: true, slug, path, type, indexed, synced, syncWarning, dedupSkipped, reportWarning,
+  return { wrote: true, slug, path, type, indexed, synced, syncWarning, dedupSkipped, reportWarning, sanitizedWarning,
     supersededSlug: input.supersedes, conflictsWith: conflictRecord, supersedeWarning };
 }
 
