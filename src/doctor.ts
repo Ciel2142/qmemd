@@ -19,7 +19,7 @@
 
 import { join } from "node:path";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { MEMORY_TYPES, parseMemory, yamlScalar, PLATFORMS, splitFlowSeq, setFrontmatterKey, isValidReviewBy } from "./engine.js";
+import { MEMORY_TYPES, parseMemory, yamlScalar, PLATFORMS, splitFlowSeq, setFrontmatterKey, isValidReviewBy, leakedMarkupTokens, stripLeakedMarkup } from "./engine.js";
 
 const NUL = String.fromCharCode(0); // the NUL byte, built via charcode (a literal NUL can't be embedded in source)
 
@@ -37,13 +37,15 @@ export type IssueCode =
   | "LINK_DANGLING_SUPERSEDED_BY" // hidden by a fact that no longer exists — --fix clears it (un-supersede)
   | "LINK_ONE_SIDED"              // A.supersedes=B but B lacks superseded_by — partial double-write; --fix completes the stamp (reported on B)
   | "LINK_CYCLE"                  // A and B superseded_by each other — both hidden, needs a human
-  | "REVIEW_BY_MALFORMED";        // review_by is not a real YYYY-MM-DD — staleFacts fails it open into the unreviewed lane (9su); the intended schedule is lost, manual
+  | "REVIEW_BY_MALFORMED"         // review_by is not a real YYYY-MM-DD — staleFacts fails it open into the unreviewed lane (9su); the intended schedule is lost, manual
+  | "BODY_TEMPLATE_LEAK";         // leaked tool-call/template markup in the BODY (qp-ey3) — --fix strips it (body-only; frontmatter untouched)
 
 /** The mechanically-repairable subset. The rest (broken fences, empty/garbage
  *  frontmatter) need a human — doctor cannot guess the intended structure. */
 const FIXABLE: ReadonlySet<IssueCode> = new Set<IssueCode>([
   "NULL_BYTES", "TYPE_MISMATCH", "NAME_MISMATCH",
   "LINK_DANGLING_SUPERSEDED_BY", "LINK_ONE_SIDED",
+  "BODY_TEMPLATE_LEAK",
 ]);
 
 export interface FactIssue {
@@ -146,6 +148,12 @@ export function auditFact(content: string, folderType: string, slug: string): Fa
   const issues: FactIssue[] = [];
   if (content.includes(NUL)) issues.push(mk("NULL_BYTES"));
 
+  // Body template-leak (qp-ey3): scan the BODY parseMemory would serve (the whole file when the
+  // fence is broken), so a leak fires even on a fence-broken file. Frontmatter is never scanned —
+  // a token in description/source is out of scope (that lane is remember's, not body corruption).
+  const leaked = leakedMarkupTokens(parseMemory(content).body);
+  if (leaked.length > 0) issues.push(mk("BODY_TEMPLATE_LEAK", `leaked tool-call/template markup in body: ${leaked.join(", ")}`));
+
   const fm = inspect(content);
   if (!fm.hasOpen) { issues.push(mk("MISSING_OPEN")); return issues; }
   if (!fm.hasClose) { issues.push(mk("MISSING_CLOSE")); return issues; }
@@ -212,10 +220,35 @@ export function auditFact(content: string, folderType: string, slug: string): Fa
 // -----------------------------------------------------------------------------
 
 /**
+ * Strip leaked markup from the BODY only (lines after the closing `---` fence), preserving
+ * frontmatter bytes exactly. Returns the repaired content, or null when a well-formed fence
+ * pair can't be located (a fence-broken file is left for human repair, mirroring the type/name
+ * surgery guard) or when nothing changed.
+ */
+function stripBodyLeak(content: string): string | null {
+  const lines = content.split("\n");
+  let open = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const noBom = lines[i]!.charCodeAt(0) === 0xFEFF ? lines[i]!.slice(1) : lines[i]!;
+    if (noBom.startsWith("---")) { open = i; break; }
+  }
+  if (open < 0) return null;
+  let close = -1;
+  for (let i = open + 1; i < lines.length; i++) {
+    if (lines[i]!.startsWith("---")) { close = i; break; }
+  }
+  if (close < 0) return null;
+  const head = lines.slice(0, close + 1).join("\n");
+  const body = lines.slice(close + 1).join("\n");
+  const cleaned = stripLeakedMarkup(body);
+  return cleaned === body ? null : `${head}\n${cleaned}`;
+}
+
+/**
  * Repair the mechanical subset of `content`'s issues (NULL_BYTES, TYPE_MISMATCH,
- * NAME_MISMATCH). Pure — returns the repaired content + the codes fixed, or null when
- * there is nothing mechanical to do. Null-byte stripping is always safe; type/name
- * surgery runs only when the block is well-formed (open+close fence, ≥1 key) so a
+ * NAME_MISMATCH, BODY_TEMPLATE_LEAK). Pure — returns the repaired content + the codes fixed,
+ * or null when there is nothing mechanical to do. Null-byte stripping is always safe; type/name
+ * surgery and body-leak strip run only when the block is well-formed (open+close fence) so a
  * fence-broken file is left untouched rather than corrupted further.
  */
 export function fixContent(content: string, folderType: string, slug: string): FixOutcome | null {
@@ -240,6 +273,11 @@ export function fixContent(content: string, folderType: string, slug: string): F
       // serializer would write it — keeps a doctor-fixed file byte-identical to a remembered one.
       if (needName) { out = setFrontmatterKey(out, "name", yamlScalar(slug)); fixed.push("NAME_MISMATCH"); }
     }
+  }
+
+  if (fixable.some(i => i.code === "BODY_TEMPLATE_LEAK")) {
+    const stripped = stripBodyLeak(out);
+    if (stripped !== null) { out = stripped; fixed.push("BODY_TEMPLATE_LEAK"); }
   }
 
   return fixed.length > 0 ? { content: out, fixed } : null;

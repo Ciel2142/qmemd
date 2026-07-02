@@ -83,6 +83,17 @@ describe("auditFact (pure)", () => {
     expect(fixable("---\n---\nb", "project", "slug")).toEqual({ EMPTY_FRONTMATTER: false });
     expect(fixable("no-fence", "project", "slug")).toEqual({ MISSING_OPEN: false });
   });
+
+  test("flags BODY_TEMPLATE_LEAK when the body carries leaked markup (qp-ey3)", () => {
+    const content = validFact({ name: "slug", type: "project" },
+      "Keystore alias is the cert CN.\n</fact>\n<parameter name=\"type\">project");
+    expect(codes(auditFact(content, "project", "slug"))).toContain("BODY_TEMPLATE_LEAK");
+  });
+
+  test("does NOT flag BODY_TEMPLATE_LEAK for a token in a frontmatter value (body-only, qp-ey3)", () => {
+    const content = validFact({ name: "slug", type: "project", description: "note </fact>" }, "clean body");
+    expect(codes(auditFact(content, "project", "slug"))).not.toContain("BODY_TEMPLATE_LEAK");
+  });
 });
 
 describe("fixContent (pure, surgical)", () => {
@@ -142,6 +153,19 @@ describe("fixContent (pure, surgical)", () => {
   test("does NOT attempt field surgery on a fence-broken file (returns null)", () => {
     // name drifts, but the missing close fence is unfixable → leave the file untouched.
     expect(fixContent("---\nname: drifted\n", "project", "real")).toBeNull();
+  });
+
+  test("strips a body leak but leaves frontmatter bytes untouched (qp-ey3)", () => {
+    const content = validFact({ name: "slug", type: "project" },
+      "Keystore alias is the cert CN.\n</fact>\n<parameter name=\"type\">project");
+    const out = fixContent(content, "project", "slug");
+    expect(out).not.toBeNull();
+    expect(out!.fixed).toContain("BODY_TEMPLATE_LEAK");
+    expect(parseMemory(out!.content).body).toContain("Keystore alias is the cert CN.");
+    expect(out!.content).not.toContain("</fact>");
+    expect(out!.content).not.toContain("<parameter");
+    expect(out!.content).toContain("name: slug");
+    expect(out!.content).toContain("type: project");
   });
 });
 
