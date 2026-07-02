@@ -282,6 +282,7 @@ async function main() {
           if (res.syncWarning) console.error(`${y}warning:${r} ${res.syncWarning}`);
           if (res.dedupSkipped > 0) console.error(`${y}warning:${r} ${res.dedupSkipped} candidate fact(s) unreadable during the near-dup scan — a duplicate may have been missed; run: qmemd doctor`);
           if (res.reportWarning) console.error(`${y}warning:${r} ${res.reportWarning}`);
+          if (res.sanitizedWarning) console.error(`${y}warning:${r} ${res.sanitizedWarning}`);
         }
       } finally { await store.close(); }
       break;

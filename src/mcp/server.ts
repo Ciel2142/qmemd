@@ -164,6 +164,11 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
         if (res.reportWarning) {
           text += `\nwarning: ${res.reportWarning}`;
         }
+        // sanitizedWarning (qp-ey3): leaked tool-call/template markup was stripped from the body
+        // before storing — generic guidance built from fixed token labels, no fs path.
+        if (res.sanitizedWarning) {
+          text += `\nwarning: ${res.sanitizedWarning}`;
+        }
         if (res.supersededSlug) {
           text += `\nSuperseded '${res.supersededSlug}' — it is now hidden from recall.`;
         }
@@ -211,9 +216,11 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
       // reason string (no fs path), safe to expose under the qmemd-81n allowlist.
       // dedupSkipped is the corruption-gap count (qmemd-e5h): a number, no fs path.
       // reportWarning is the report-shape nudge (qmemd-a3k): a generic guidance string, no fs path.
+      // sanitizedWarning is the leaked-markup strip notice (qp-ey3): generic guidance built from
+      // fixed token labels — no fs path, no captured content.
       // supersededSlug/conflictsWith are slugs, supersedeWarning a generic guidance string —
       // no fs path, safe under the qmemd-81n allowlist (bri/cr4).
-      return { content: [{ type: "text", text }], structuredContent: { wrote: res.wrote, slug: res.slug, type: res.type, duplicateOf: res.duplicateOf, duplicateDescription: res.duplicateDescription, duplicateBody: res.duplicateBody, disposition: res.disposition, authorityComparison: res.authorityComparison, indexed: res.indexed, synced: res.synced, syncWarning: res.syncWarning, dedupSkipped: res.dedupSkipped, reportWarning: res.reportWarning, supersededSlug: res.supersededSlug, conflictsWith: res.conflictsWith, supersedeWarning: res.supersedeWarning } };
+      return { content: [{ type: "text", text }], structuredContent: { wrote: res.wrote, slug: res.slug, type: res.type, duplicateOf: res.duplicateOf, duplicateDescription: res.duplicateDescription, duplicateBody: res.duplicateBody, disposition: res.disposition, authorityComparison: res.authorityComparison, indexed: res.indexed, synced: res.synced, syncWarning: res.syncWarning, dedupSkipped: res.dedupSkipped, reportWarning: res.reportWarning, sanitizedWarning: res.sanitizedWarning, supersededSlug: res.supersededSlug, conflictsWith: res.conflictsWith, supersedeWarning: res.supersedeWarning } };
     } catch (err) {
       return sanitizeToolError(err);
     }
@@ -706,7 +713,7 @@ export async function startMcpHttpServer(
           platforms: body.platforms as Platform[] | undefined,
           ttl: body.ttl, reviewBy: body.reviewBy,
         });
-        sendJson(nodeRes, 200, { wrote: res.wrote, slug: res.slug, type: res.type, duplicateOf: res.duplicateOf, duplicateDescription: res.duplicateDescription, duplicateBody: res.duplicateBody, disposition: res.disposition, indexed: res.indexed, synced: res.synced, syncWarning: res.syncWarning, dedupSkipped: res.dedupSkipped, reportWarning: res.reportWarning, supersededSlug: res.supersededSlug, conflictsWith: res.conflictsWith, supersedeWarning: res.supersedeWarning });
+        sendJson(nodeRes, 200, { wrote: res.wrote, slug: res.slug, type: res.type, duplicateOf: res.duplicateOf, duplicateDescription: res.duplicateDescription, duplicateBody: res.duplicateBody, disposition: res.disposition, indexed: res.indexed, synced: res.synced, syncWarning: res.syncWarning, dedupSkipped: res.dedupSkipped, reportWarning: res.reportWarning, sanitizedWarning: res.sanitizedWarning, supersededSlug: res.supersededSlug, conflictsWith: res.conflictsWith, supersedeWarning: res.supersedeWarning });
         return;
       }
 
