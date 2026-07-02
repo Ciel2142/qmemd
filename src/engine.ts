@@ -928,6 +928,65 @@ export function reportShapeWarning(fact: string): string | null {
   return "this looks like a multi-paragraph report, not an atomic fact — qmemd stores durable facts; a write-up/retro belongs in docs/reports/ (committed as a doc), not the memory store. Keep the one durable takeaway as the fact instead.";
 }
 
+// -----------------------------------------------------------------------------
+// Leaked tool-call / template markup (qp-leaked-template-body-corruption-ey3).
+// Harness tool-serialization framing that must never live in a stored fact body.
+// Shared by doctor (detect + --fix) and remember (prevent). Model-free (I1/I5).
+// Bounded literal patterns only — no `.*` / nested quantifiers (ReDoS: runs on every
+// write and every fixMemory file). Case-sensitive, un-prefixed forms only (bead
+// anti-over-reach: do NOT expand into general HTML or antml:-prefixed variants).
+// -----------------------------------------------------------------------------
+const LEAK_PATTERNS: readonly { label: string; re: RegExp }[] = [
+  { label: "<fact>",            re: /<fact>/ },
+  { label: "</fact>",           re: /<\/fact>/ },
+  { label: "<parameter name=",  re: /^\s*<parameter name=/m },
+  { label: "<invoke>",          re: /<invoke\b[^>]*>/ },
+  { label: "</invoke>",         re: /<\/invoke>/ },
+  { label: "<function_calls>",  re: /<function_calls>/ },
+  { label: "</function_calls>", re: /<\/function_calls>/ },
+];
+
+/**
+ * The distinct CANONICAL labels of leaked tool-call/template tokens present in `text`
+ * ([] when clean). Returns the fixed labels above, NEVER a raw matched slice — so a
+ * caller (CLI warning, doctor detail) can build a message without echoing
+ * caller-controlled bytes into a log / MCP structuredContent.
+ */
+export function leakedMarkupTokens(text: string): string[] {
+  return LEAK_PATTERNS.filter(p => p.re.test(text)).map(p => p.label);
+}
+
+/**
+ * Remove every leaked token from `text`. Identity (byte-for-byte) on clean input,
+ * idempotent, and a FIXED POINT — one removal can splice two fragments into a NEW
+ * token (`<fa<fact>ct>` -> `<fact>`), so it loops until no token remains (bounded:
+ * each pass strictly shrinks the string). Removes a bare `<parameter …>` line whole;
+ * strips inline tags in place and drops a line left empty SOLELY by a tag strip;
+ * never collapses a pre-existing blank/paragraph break.
+ */
+export function stripLeakedMarkup(text: string): string {
+  if (leakedMarkupTokens(text).length === 0) return text; // byte-identity on clean input
+  let out = text;
+  for (let guard = 0; leakedMarkupTokens(out).length > 0 && guard < 100; guard++) {
+    const kept: string[] = [];
+    for (const line of out.split("\n")) {
+      if (/^\s*<parameter name=/.test(line)) continue; // drop the bare parameter line whole
+      const stripped = line
+        .replace(/<fact>/g, "")
+        .replace(/<\/fact>/g, "")
+        .replace(/<invoke\b[^>]*>/g, "")
+        .replace(/<\/invoke>/g, "")
+        .replace(/<function_calls>/g, "")
+        .replace(/<\/function_calls>/g, "");
+      // Drop a line emptied SOLELY by a tag strip; keep an already-blank line.
+      if (stripped.trim() === "" && line.trim() !== "") continue;
+      kept.push(stripped);
+    }
+    out = kept.join("\n");
+  }
+  return out;
+}
+
 async function reindexMemory(store: QMDStore): Promise<void> {
   await store.update({ collections: [MEMORY_COLLECTION] });
 }

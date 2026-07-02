@@ -19,6 +19,8 @@ import {
   tagHistogram,
   formatTagHistogram,
   reportShapeWarning,
+  leakedMarkupTokens,
+  stripLeakedMarkup,
   projectOverview,
   countUnreadableFacts,
   reviewByFromTtl,
@@ -1133,6 +1135,53 @@ describe("reportShapeWarning (qmemd-a3k)", () => {
 
   test("does NOT flag two short paragraphs", () => {
     expect(reportShapeWarning("First short note.\n\nSecond short note.")).toBeNull();
+  });
+});
+
+describe("leakedMarkupTokens / stripLeakedMarkup (pure, qp-ey3)", () => {
+  test("clean prose has no tokens and strips to itself (byte-identity)", () => {
+    const s = "Keystore alias is the cert CN.\n\nSecond paragraph.\n";
+    expect(leakedMarkupTokens(s)).toEqual([]);
+    expect(stripLeakedMarkup(s)).toBe(s);
+  });
+
+  test("detects each canonical token by its fixed label (never a raw slice)", () => {
+    expect(leakedMarkupTokens("a </fact>")).toEqual(["</fact>"]);
+    expect(leakedMarkupTokens("a <fact> b")).toEqual(["<fact>"]);
+    expect(leakedMarkupTokens('<parameter name="type">project')).toEqual(["<parameter name="]);
+    expect(leakedMarkupTokens('<invoke name="x">')).toEqual(["<invoke>"]);
+    expect(leakedMarkupTokens("</invoke>")).toEqual(["</invoke>"]);
+    expect(leakedMarkupTokens("<function_calls>")).toEqual(["<function_calls>"]);
+    expect(leakedMarkupTokens("</function_calls>")).toEqual(["</function_calls>"]);
+  });
+
+  test("strips the real six-case shape (trailing </fact> + bare parameter line)", () => {
+    const body = "Keystore alias is the cert CN.\n</fact>\n<parameter name=\"type\">project";
+    const out = stripLeakedMarkup(body);
+    expect(leakedMarkupTokens(out)).toEqual([]);
+    expect(out).toContain("Keystore alias is the cert CN.");
+    expect(out).not.toContain("</fact>");
+    expect(out).not.toContain("<parameter");
+  });
+
+  test("is a fixed point — closed under splicing/nesting", () => {
+    expect(leakedMarkupTokens(stripLeakedMarkup("<fa<fact>ct>"))).toEqual([]);
+    expect(leakedMarkupTokens(stripLeakedMarkup("<function<function_calls>_calls>"))).toEqual([]);
+  });
+
+  test("is idempotent", () => {
+    const x = "note\n</fact>\n<parameter name=\"type\">project\n";
+    expect(stripLeakedMarkup(stripLeakedMarkup(x))).toBe(stripLeakedMarkup(x));
+  });
+
+  test("drops a bare parameter line but preserves a pre-existing blank line", () => {
+    expect(stripLeakedMarkup('a\n<parameter name="x">y\nb')).toBe("a\nb");
+    expect(stripLeakedMarkup('a\n\n<parameter name="x">y\nb')).toBe("a\n\nb");
+  });
+
+  test("whitespace-indented parameter line is still detected + stripped", () => {
+    expect(leakedMarkupTokens('  <parameter name="x">y')).toEqual(["<parameter name="]);
+    expect(stripLeakedMarkup('a\n  <parameter name="x">y\nb')).toBe("a\nb");
   });
 });
 
