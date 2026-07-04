@@ -40,12 +40,17 @@ export type IssueCode =
   | "REVIEW_BY_MALFORMED"         // review_by is not a real YYYY-MM-DD — staleFacts fails it open into the unreviewed lane (9su); the intended schedule is lost, manual
   | "BODY_TEMPLATE_LEAK";         // leaked tool-call/template markup in the BODY (qp-ey3) — --fix strips it (body-only; frontmatter untouched)
 
-/** The mechanically-repairable subset. The rest (broken fences, empty/garbage
- *  frontmatter) need a human — doctor cannot guess the intended structure. */
+/** The codes whose fixability is STATIC — the fixer acts whenever the audit flags them
+ *  (NULL_BYTES strip always applies; TYPE/NAME surgery only fires on a well-formed block
+ *  because the audit early-returns on broken fences; a parsed superseded_by implies a
+ *  byte-0 fence, so the dangling-clear can always act). BODY_TEMPLATE_LEAK and
+ *  LINK_ONE_SIDED are NOT here: their fixability is DERIVED per file by probing the
+ *  actual fixer (qp-wex) — a static entry made `[fixable]` lie on fence-broken or
+ *  unstrippable content, wedging --fix → re-audit → exit-1 loops. The rest (broken
+ *  fences, empty/garbage frontmatter) need a human — doctor cannot guess structure. */
 const FIXABLE: ReadonlySet<IssueCode> = new Set<IssueCode>([
   "NULL_BYTES", "TYPE_MISMATCH", "NAME_MISMATCH",
-  "LINK_DANGLING_SUPERSEDED_BY", "LINK_ONE_SIDED",
-  "BODY_TEMPLATE_LEAK",
+  "LINK_DANGLING_SUPERSEDED_BY",
 ]);
 
 export interface FactIssue {
@@ -152,7 +157,19 @@ export function auditFact(content: string, folderType: string, slug: string): Fa
   // fence is broken), so a leak fires even on a fence-broken file. Frontmatter is never scanned —
   // a token in description/source is out of scope (that lane is remember's, not body corruption).
   const leaked = leakedMarkupTokens(parseMemory(content).body);
-  if (leaked.length > 0) issues.push(mk("BODY_TEMPLATE_LEAK", `leaked tool-call/template markup in body: ${leaked.join(", ")}`));
+  if (leaked.length > 0) {
+    // Fixability probed against the actual fixer (qp-wex): stripBodyLeak returns null on a
+    // fence-broken file (left for human repair) and on a token the line-based stripper cannot
+    // remove (a multiline <invoke …> — the detector's [^>]* crosses newlines, the stripper
+    // does not; qp-xwz). A static [fixable] here sent operators into --fix loops that never fix.
+    const canFix = stripBodyLeak(content) !== null;
+    issues.push({
+      code: "BODY_TEMPLATE_LEAK",
+      fixable: canFix,
+      detail: `leaked tool-call/template markup in body: ${leaked.join(", ")}`
+        + (canFix ? "" : " — not mechanically strippable (fence-broken file or multiline markup); repair by hand"),
+    });
+  }
 
   const fm = inspect(content);
   if (!fm.hasOpen) { issues.push(mk("MISSING_OPEN")); return issues; }
@@ -314,17 +331,29 @@ export function auditMemory(root: string): FactReport[] {
 // Cross-fact link audits (bri) — corpus context required.
 // -----------------------------------------------------------------------------
 
-/** Slug → {type, relpath, fm} over every parseable fact — corpus context for the link audits. */
-function scanLinkFacts(root: string): Map<string, { type: string; relpath: string; fm: ReturnType<typeof parseMemory>["frontmatter"] }> {
-  const bySlug = new Map<string, { type: string; relpath: string; fm: ReturnType<typeof parseMemory>["frontmatter"] }>();
+interface LinkFact {
+  type: string;
+  relpath: string;
+  fm: ReturnType<typeof parseMemory>["frontmatter"];
+  /** Whether the file has a locatable byte-0 fence pair — i.e. whether the
+   *  setFrontmatterKey-based fixers can act on it at all (qp-wex). */
+  fenced: boolean;
+}
+
+/** Slug → LinkFact over every parseable fact — corpus context for the link audits. */
+function scanLinkFacts(root: string): Map<string, LinkFact> {
+  const bySlug = new Map<string, LinkFact>();
   for (const type of MEMORY_TYPES) {
     const dir = join(root, type);
     if (!existsSync(dir)) continue;
     for (const f of readdirSync(dir)) {
       if (!f.endsWith(".md")) continue;
       try {
-        const fm = parseMemory(readFileSync(join(dir, f), "utf-8")).frontmatter;
-        bySlug.set(f.replace(/\.md$/, ""), { type, relpath: `${type}/${f}`, fm });
+        const raw = readFileSync(join(dir, f), "utf-8");
+        bySlug.set(f.replace(/\.md$/, ""), {
+          type, relpath: `${type}/${f}`, fm: parseMemory(raw).frontmatter,
+          fenced: locateFences(raw) !== null,
+        });
       } catch { /* unreadable files are doctor's other half — not link-auditable */ }
     }
   }
@@ -355,8 +384,15 @@ export function auditLinks(root: string): FactReport[] {
       if (!target) {
         report(slug).issues.push(mk("LINK_DANGLING_SUPERSEDES", `supersedes '${f.fm.supersedes}' — no such fact; the lineage note is stale`));
       } else if (target.fm.supersededBy === undefined) {
-        // The fixable side is the TARGET (it needs the stamp) — report it there.
-        report(f.fm.supersedes).issues.push(mk("LINK_ONE_SIDED", `'${slug}' supersedes this fact but the superseded_by stamp is missing (partial double-write) — --fix completes it`));
+        // The fixable side is the TARGET (it needs the stamp) — report it there. Fixable
+        // only when the target actually has a fence for setFrontmatterKey to stamp into
+        // (qp-wex): on a fenceless target --fix would silently no-op forever.
+        report(f.fm.supersedes).issues.push({
+          code: "LINK_ONE_SIDED",
+          fixable: target.fenced,
+          detail: `'${slug}' supersedes this fact but the superseded_by stamp is missing (partial double-write)`
+            + (target.fenced ? " — --fix completes it" : " — this file has no frontmatter fence, so --fix cannot stamp it; repair the frontmatter by hand first"),
+        });
       }
       // target.supersededBy naming a DIFFERENT fact: the target is retired either way — no issue.
     }
@@ -437,6 +473,7 @@ function fixLinks(root: string, alreadyBacked: ReadonlySet<string>): FixResult[]
   };
   for (const r of auditLinks(root)) {
     for (const iss of r.issues) {
+      if (!iss.fixable) continue; // audit already ruled the fixer cannot act (qp-wex)
       if (iss.code === "LINK_DANGLING_SUPERSEDED_BY") {
         repair(r.relpath, c => removeFrontmatterKey(c, "superseded_by"), iss.code);
       } else if (iss.code === "LINK_ONE_SIDED") {

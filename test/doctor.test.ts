@@ -96,6 +96,53 @@ describe("auditFact (pure)", () => {
   });
 });
 
+describe("fixability derived from fixer capability (qp-wex)", () => {
+  const leak = (issues: FactIssue[]): FactIssue =>
+    issues.find(i => i.code === "BODY_TEMPLATE_LEAK")!;
+
+  test("a strippable leak in a well-fenced body stays fixable", () => {
+    const content = validFact({ name: "slug", type: "project" }, "Keep this.\n</fact>\nAnd this.");
+    expect(leak(auditFact(content, "project", "slug")).fixable).toBe(true);
+  });
+
+  test("a leak on a fence-broken file is NOT fixable — stripBodyLeak leaves it for human repair", () => {
+    // MISSING_CLOSE: stripBodyLeak returns null (no locatable fence pair), so the
+    // static-table [fixable] label sent operators into a --fix → re-audit → exit-1 loop.
+    const noClose = "---\nname: slug\ntype: project\nbody with <fact> leak\n";
+    const issue = leak(auditFact(noClose, "project", "slug"));
+    expect(issue.fixable).toBe(false);
+    expect(issue.detail).toMatch(/repair by hand/);
+    // MISSING_OPEN variant: whole file is body, leak fires, equally unstrippable.
+    expect(leak(auditFact("prose <fact> prose", "project", "slug")).fixable).toBe(false);
+  });
+
+  test("a multiline <invoke …> the line-based stripper cannot remove is NOT fixable (xwz asymmetry)", () => {
+    // The detector's [^>]* crosses newlines; the stripper works line-by-line and
+    // never matches an open tag whose > sits on a later line.
+    const content = validFact({ name: "slug", type: "project" }, 'note\n<invoke\nname="x">\ntail');
+    const issue = leak(auditFact(content, "project", "slug"));
+    expect(issue.fixable).toBe(false);
+    expect(issue.detail).toMatch(/repair by hand/);
+  });
+
+  test("fixMemory leaves an unfixable leaky file untouched: no write, no .bak, honest re-audit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qmemd-doctor-wedge-"));
+    try {
+      await mkdir(join(root, "project"), { recursive: true });
+      const noClose = "---\nname: wedged\ntype: project\nbody with <fact> leak\n";
+      await writeFile(join(root, "project", "wedged.md"), noClose);
+      expect(fixMemory(root)).toHaveLength(0);
+      expect(readFileSync(join(root, "project", "wedged.md"), "utf-8")).toBe(noClose);
+      expect(existsSync(join(root, "project", "wedged.md.bak"))).toBe(false);
+      // The re-audit must NOT direct the operator back to --fix.
+      const issues = auditMemory(root).find(r => r.slug === "wedged")!.issues;
+      expect(issues.filter(i => i.fixable)).toHaveLength(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("fixContent (pure, surgical)", () => {
   test("rewrites a drifted name to the slug, preserving body and other fields", () => {
     const before = validFact({ name: "drifted", type: "project" }, "Keep me.");
@@ -316,6 +363,25 @@ describe("supersession link audits (bri)", () => {
     expect(reports.find(r => r.slug === "old-fact")!.issues.some(i => i.code === "LINK_ONE_SIDED" && i.fixable)).toBe(true);
     expect(reports.find(r => r.slug === "cyc-a")!.issues.some(i => i.code === "LINK_CYCLE" && !i.fixable)).toBe(true);
     expect(reports.find(r => r.slug === "cyc-b")!.issues.some(i => i.code === "LINK_CYCLE")).toBe(true);
+  });
+
+  test("LINK_ONE_SIDED on a fenceless target is NOT fixable — setFrontmatterKey cannot stamp it (qp-wex)", async () => {
+    await write("new-fact", "supersedes: old-fact\n");
+    // The target is a fenceless hand-written file: parseMemory serves it body-only,
+    // so the one-sided report fires, but --fix's setFrontmatterKey would no-op on it.
+    await mkdir(join(root, "project"), { recursive: true });
+    const fenceless = "Old truth prose\n---\na rule, not a fence\n";
+    await writeFile(join(root, "project", "old-fact.md"), fenceless);
+    const reports = auditMemory(root);
+    const one = reports.find(r => r.slug === "old-fact")!.issues.find(i => i.code === "LINK_ONE_SIDED")!;
+    expect(one.fixable).toBe(false);
+    expect(one.detail).toMatch(/no frontmatter fence/);
+    expect(one.detail).not.toMatch(/--fix completes it/); // the old detail text must not lie
+    // --fix leaves the file byte-identical and reports no fix for it.
+    const results = fixMemory(root);
+    expect(results.find(r => r.slug === "old-fact")).toBeUndefined();
+    expect(readFileSync(join(root, "project", "old-fact.md"), "utf-8")).toBe(fenceless);
+    expect(existsSync(join(root, "project", "old-fact.md.bak"))).toBe(false);
   });
 
   test("--fix clears a dangling superseded_by (un-supersede) and completes a one-sided pair, with .bak", async () => {
