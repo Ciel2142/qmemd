@@ -155,6 +155,15 @@ describe("fixContent (pure, surgical)", () => {
     expect(fixContent("---\nname: drifted\n", "project", "real")).toBeNull();
   });
 
+  test("does not mutate a fence-broken file when stripping a body leak (qp-yf2)", () => {
+    // A fenceless note (no byte-0 frontmatter) whose body contains --- horizontal
+    // rules plus leaked markup both before and after the second rule. stripBodyLeak
+    // must not mistake the hr rules for a fence pair and mutate a file its own
+    // contract promises to leave for human repair — so no mechanical fix applies.
+    const fenceless = "head with </fact> leak\n---\nmiddle\n---\ntail with </fact> leak\n";
+    expect(fixContent(fenceless, "project", "slug")).toBeNull();
+  });
+
   test("strips a body leak but leaves frontmatter bytes untouched (qp-ey3)", () => {
     const content = validFact({ name: "slug", type: "project" },
       "Keystore alias is the cert CN.\n</fact>\n<parameter name=\"type\">project");

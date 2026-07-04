@@ -31,6 +31,8 @@ import {
   staleFacts,
   resolveReviewedDate,
   markReviewed,
+  setFrontmatterKey,
+  locateFences,
   Platform,
   type MemoryFrontmatter,
   type MemoryType,
@@ -3565,6 +3567,25 @@ describe("remember --supersedes (bri)", () => {
     await expect(remember(store, root, { fact: "irrelevant", replace: "self-slug", supersedes: "self-slug" }, git))
       .rejects.toThrow(/cannot be combined with replace/);
   });
+
+  it("surfaces a warning when the target has no frontmatter fence, instead of silently no-op'ing (qp-yf2 C7)", async () => {
+    const { remember } = await import("../src/engine.js");
+    // A fenceless hand-written/adopted fact whose body contains --- rules:
+    // setFrontmatterKey cannot stamp it, so the stamp must be reported as NOT done.
+    const fenceless = "Setup notes\n---\nstep 1\n---\nstep 2\n";
+    await mkdir(join(root, "project"), { recursive: true });
+    await writeFile(join(root, "project", "old-truth.md"), fenceless);
+    const res = await remember(store, root, { fact: "the new truth about ports", type: "project", supersedes: "old-truth" }, git);
+    expect(res.wrote).toBe(true); // the new fact itself is still written
+    expect(res.supersedeWarning).toMatch(/no frontmatter fence/);
+    // Old file byte-identical — never corrupted, never falsely stamped.
+    expect(readFileSync(join(root, "project", "old-truth.md"), "utf-8")).toBe(fenceless);
+    // The commit must carry ONLY the new fact — no unstamped old path riding along.
+    const commits = gitCalls.filter(a => a[0] === "commit");
+    expect(commits).toHaveLength(1);
+    expect(commits[0]).toContain(`project/${res.slug}.md`);
+    expect(commits[0]).not.toContain("project/old-truth.md");
+  });
 });
 
 describe("force records conflicts_with (cr4)", () => {
@@ -3995,5 +4016,66 @@ describe("markReviewed (s4w, SDK-backed)", () => {
   test("throws on a missing fact", async () => {
     const { markReviewed } = await import("../src/engine.js");
     await expect(markReviewed(store, root, "no-such-slug", {})).rejects.toThrow(/no fact named 'no-such-slug'/);
+  });
+
+  test("throws on a fenceless fact instead of reporting a success that never lands (qp-yf2 C6)", async () => {
+    const { markReviewed } = await import("../src/engine.js");
+    // setFrontmatterKey would return the content unchanged, git would no-op, and the
+    // fact would resurface in `qmemd stale` forever — fail loudly with the repair path.
+    const fenceless = "Setup notes\n---\nstep 1\n---\nstep 2\n";
+    await mkdir(join(root, "project"), { recursive: true });
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(join(root, "project", "fenceless.md"), fenceless);
+    await expect(markReviewed(store, root, "fenceless", {})).rejects.toThrow(/no frontmatter fence/);
+    // File byte-identical — the failed verb must not touch it.
+    expect(readFileSync(join(root, "project", "fenceless.md"), "utf-8")).toBe(fenceless);
+  });
+
+  test("re-reviewing with the same date is an idempotent success, not a false failure", async () => {
+    // Pins the guard design: the failure predicate is locateFences()=null, NOT
+    // written-bytes equality — a same-value restamp writes identical bytes and is fine.
+    const { remember, markReviewed } = await import("../src/engine.js");
+    const r = await remember(store, root, { fact: "Vault token rotates monthly", type: "project" });
+    const first = await markReviewed(store, root, r.slug, { reviewBy: "2027-01-01" });
+    expect(first.reviewBy).toBe("2027-01-01");
+    const second = await markReviewed(store, root, r.slug, { reviewBy: "2027-01-01" });
+    expect(second.reviewBy).toBe("2027-01-01");
+    expect(getFact(root, r.slug)!.frontmatter.reviewBy).toBe("2027-01-01");
+  });
+});
+
+describe("setFrontmatterKey / locateFences (fence-location, qp-yf2)", () => {
+  const wellFenced = "---\ntype: project\nname: foo\ncreated: 2026-01-01\n---\nbody line\n";
+
+  test("locateFences anchors the open fence at byte 0 like parseMemory", () => {
+    // A fenceless note whose BODY contains --- horizontal rules must NOT be
+    // seen as frontmatter (parseMemory requires the fence at content start).
+    const fenceless = "Setup notes\n---\nstep 1\n---\nstep 2\n";
+    expect(locateFences(fenceless)).toBeNull();
+    // A real frontmatter block is located at line 0.
+    expect(locateFences(wellFenced)).toEqual({ open: 0, close: 4 });
+  });
+
+  test("does not corrupt a fenceless body that contains --- rules", () => {
+    // C5: setFrontmatterKey must return the content byte-for-byte unchanged
+    // when there is no byte-0 frontmatter fence, instead of splicing the key
+    // between two markdown horizontal rules in the prose.
+    const fenceless = "Setup notes\n---\nstep 1\n---\nstep 2\n";
+    expect(setFrontmatterKey(fenceless, "review_by", "2026-10-02")).toBe(fenceless);
+  });
+
+  test("still replaces an existing key in a well-fenced fact", () => {
+    const out = setFrontmatterKey(wellFenced, "type", "user");
+    expect(out).toBe("---\ntype: user\nname: foo\ncreated: 2026-01-01\n---\nbody line\n");
+  });
+
+  test("still inserts an absent key just after the open fence", () => {
+    const out = setFrontmatterKey(wellFenced, "review_by", "2026-10-02");
+    expect(out).toBe("---\nreview_by: 2026-10-02\ntype: project\nname: foo\ncreated: 2026-01-01\n---\nbody line\n");
+  });
+
+  test("returns content unchanged when the open fence has no close", () => {
+    const noClose = "---\ntype: project\nname: foo\nbody with no closing fence\n";
+    expect(setFrontmatterKey(noClose, "review_by", "2026-10-02")).toBe(noClose);
   });
 });

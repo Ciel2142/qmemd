@@ -295,6 +295,26 @@ export function serializeMemory(fm: MemoryFrontmatter, body: string): string {
 }
 
 /**
+ * Locate the frontmatter fence pair, anchored to byte 0 exactly like parseMemory
+ * (qp-yf2): the open fence is recognized ONLY when the first line — after a leading
+ * BOM — starts with "---"; the close fence is the first subsequent "---" line.
+ * Returns null when there is no byte-0 fence or no closing fence, so a fenceless
+ * note whose body contains "---" horizontal rules is never mistaken for frontmatter.
+ * Single source of fence-locating truth for setFrontmatterKey and doctor --fix.
+ */
+export function locateFences(content: string): { open: number; close: number } | null {
+  const lines = content.split("\n");
+  const first = lines[0];
+  if (first === undefined) return null;
+  const noBom = first.charCodeAt(0) === 0xFEFF ? first.slice(1) : first;
+  if (!noBom.startsWith("---")) return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i]!.startsWith("---")) return { open: 0, close: i };
+  }
+  return null;
+}
+
+/**
  * Replace the value of `key` within the frontmatter block, or insert `key: value`
  * just after the opening fence if the key is absent. Touches ONLY that one line —
  * every other frontmatter line, comment, and the body are preserved byte-for-byte.
@@ -302,20 +322,10 @@ export function serializeMemory(fm: MemoryFrontmatter, body: string): string {
  * Shared by doctor --fix and the remember() supersede stamp (bri).
  */
 export function setFrontmatterKey(content: string, key: string, value: string): string {
+  const fences = locateFences(content);
+  if (!fences) return content;
+  const { open, close } = fences;
   const lines = content.split("\n");
-  let open = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i]!;
-    const noBom = l.charCodeAt(0) === 0xFEFF ? l.slice(1) : l;
-    if (noBom.startsWith("---")) { open = i; break; }
-  }
-  if (open < 0) return content;
-  let close = -1;
-  for (let i = open + 1; i < lines.length; i++) {
-    if (lines[i]!.startsWith("---")) { close = i; break; }
-  }
-  if (close < 0) return content;
-
   const re = new RegExp(`^${key}\\s*:`, "i");
   for (let i = open + 1; i < close; i++) {
     if (re.test(lines[i]!)) { lines[i] = `${key}: ${value}`; return lines.join("\n"); }
@@ -1658,8 +1668,18 @@ export async function remember(
   if (supersedeTarget) {
     try {
       const raw = readFileSync(supersedeTarget.path, "utf-8");
-      writeFileSync(supersedeTarget.path, setFrontmatterKey(raw, "superseded_by", yamlScalar(slug)));
-      commitPaths.push(`${supersedeTarget.type}/${supersedeTarget.slug}.md`);
+      // Fenceless target: setFrontmatterKey would no-op and the retired fact would stay
+      // active in every recall lane while the commit claims otherwise (qp-yf2 C7). The
+      // guard is locateFences, NOT written-bytes equality — an idempotent restamp of the
+      // same slug writes identical bytes and is a success. doctor --fix completes the
+      // link only after the fence is repaired by hand (MISSING_OPEN is not fixable).
+      if (!locateFences(raw)) {
+        supersedeWarning = `fact written, but '${input.supersedes}' has no frontmatter fence — superseding link not stamped; repair its frontmatter ('qmemd doctor' locates it), then run 'qmemd doctor --fix' to complete the link`;
+        console.error(`[qmemd] remember '${slug}': ${supersedeWarning}`);
+      } else {
+        writeFileSync(supersedeTarget.path, setFrontmatterKey(raw, "superseded_by", yamlScalar(slug)));
+        commitPaths.push(`${supersedeTarget.type}/${supersedeTarget.slug}.md`);
+      }
     } catch (e) {
       // e.message (ENOENT/EACCES) embeds the absolute path — keep it on stderr only;
       // the surfaced warning must stay path-free (qmemd-81n).
@@ -2501,6 +2521,13 @@ export async function markReviewed(
   if (!fact) throw new Error(`no fact named '${slug}' to mark reviewed`);
   const reviewBy = resolveReviewedDate(fact.type, opts);
   const content = readFileSync(fact.path, "utf-8");
+  // Fenceless fact: setFrontmatterKey would return the content unchanged, git would
+  // no-op, and the fact would resurface in `qmemd stale` forever while this verb
+  // reports success (qp-yf2 C6). The fence is not mechanically fixable (MISSING_OPEN
+  // needs a human), so fail loudly with the repair path instead.
+  if (!locateFences(content)) {
+    throw new Error(`fact '${slug}' has no frontmatter fence — review_by cannot be stamped; repair the file's frontmatter ('qmemd doctor' locates it), then retry`);
+  }
   writeFileSync(fact.path, setFrontmatterKey(content, "review_by", reviewBy));
   const commit = gitCommit(root, `reviewed: ${slug}`, `${fact.type}/${slug}.md`, git);
   const push = gitPush(root, git);
