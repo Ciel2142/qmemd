@@ -19,9 +19,7 @@
 // it never auto-merges. Merge UX is a follow-up — this is report-only.
 // =============================================================================
 
-import { join } from "node:path";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { MEMORY_TYPES, parseMemory, firstLine, tokenizeForDedup, getFact, type MemoryType } from "./engine.js";
+import { parseMemory, firstLine, tokenizeForDedup, getFact, walkFactFiles, type MemoryType } from "./engine.js";
 
 /**
  * Default report threshold. Sits inside the rso-measured within-project gap
@@ -109,25 +107,20 @@ interface WalkedFact {
 function walkFacts(root: string): { facts: WalkedFact[]; unreadable: number } {
   const facts: WalkedFact[] = [];
   let unreadable = 0;
-  for (const type of MEMORY_TYPES) {
-    const dir = join(root, type);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
-      let parsed;
-      try { parsed = parseMemory(readFileSync(join(dir, f), "utf-8")); }
-      catch { unreadable++; continue; }
-      const fm = parsed.frontmatter;
-      if (fm.supersededBy) continue; // retired — never a merge candidate
-      const compareText = `${fm.name} ${firstLine(parsed.body)}`;
-      facts.push({
-        slug: f.replace(/\.md$/, ""),
-        type,
-        project: fm.project,
-        description: fm.description,
-        tokens: new Set(tokenizeForDedup(compareText)),
-      });
-    }
+  for (const ff of walkFactFiles(root, { onUnreadable: () => unreadable++ })) {
+    let parsed;
+    try { parsed = parseMemory(ff.raw); }
+    catch { unreadable++; continue; }
+    const fm = parsed.frontmatter;
+    if (fm.supersededBy) continue; // retired — never a merge candidate
+    const compareText = `${fm.name} ${firstLine(parsed.body)}`;
+    facts.push({
+      slug: ff.slug,
+      type: ff.type,
+      project: fm.project,
+      description: fm.description,
+      tokens: new Set(tokenizeForDedup(compareText)),
+    });
   }
   return { facts, unreadable };
 }

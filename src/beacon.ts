@@ -127,13 +127,21 @@ export function pruneOldStates(hookDir: string, maxAgeMs: number, now: number): 
   }
 }
 
+/** Prune cadence: writeState runs on EVERY Bash PreToolUse, but the readdir+stat sweep
+ *  only needs to run occasionally — stale markers age in days, not calls (qp-nq2). */
+const PRUNE_EVERY_N_WRITES = 20;
+
 export function writeState(path: string, state: BeaconState): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(state));
   renameSync(tmp, path); // atomic replace
   // Opportunistic cleanup of old sessions' markers (qmemd-4y2) — best-effort, never throws.
-  pruneOldStates(dirname(path), STATE_MAX_AGE_MS, Date.now());
+  // Gated to every Nth call of the session (plus the first) so the hot hook path is not
+  // paying a directory sweep per Bash command.
+  if (state.callCount % PRUNE_EVERY_N_WRITES === 0 || state.callCount === 1) {
+    pruneOldStates(dirname(path), STATE_MAX_AGE_MS, Date.now());
+  }
 }
 
 export interface BeaconDeps {

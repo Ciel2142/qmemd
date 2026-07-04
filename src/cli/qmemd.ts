@@ -4,7 +4,7 @@ import { basename, join as pathJoin, dirname } from "node:path";
 import { openMemoryStore, MEMORY_COLLECTION } from "../store.js";
 import { remember, recallQueryWithStatus, recallSession, forget, getFact, listFacts, staleFacts, markReviewed, projectOverview, formatTagHistogram, countUnreadableFacts, pendingVectorPhrase, completenessFooter, MEMORY_TYPES, PLATFORMS, DEFAULT_MIN_SCORE, applyMerge } from "../engine.js";
 import type { MemoryType, Platform, RecallResult, RecallHit, MergePlan, StaleReport } from "../engine.js";
-import { tryDaemonRecall } from "../client.js";
+import { tryDaemonRecall, daemonPort } from "../client.js";
 import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capability.js";
 import { runBeacon, runWriteBeacon } from "../beacon.js";
 import { gitPullFfOnly, sessionSyncWarning } from "../git.js";
@@ -437,11 +437,14 @@ async function main() {
     case "list": {
       const type = requireValidType(values.type); // reject an invalid --type (qmemd-jzz)
       const platform = requireValidPlatform(values.platform); // reject an invalid --platform (qmemd-jzz sibling)
-      const entries = listFacts(root, { type, tag: values.tag, project: values.project, platform });
       // Surface unreadable/corrupt files on stderr (stdout stays the clean list / JSON) so a
       // silent skip in listFacts doesn't hide them — corpus-wide, since a broken file is
-      // broken regardless of the active filter (qmemd-e5h).
-      const unreadable = countUnreadableFacts(root);
+      // broken regardless of the active filter (qmemd-e5h). Under a --type filter listFacts
+      // walks only that folder, so fall back to the corpus-wide count; the common unfiltered
+      // path folds the count into the SAME walk instead of re-walking (qp-nq2).
+      let unreadable = 0;
+      const entries = listFacts(root, { type, tag: values.tag, project: values.project, platform }, () => unreadable++);
+      if (type) unreadable = countUnreadableFacts(root);
       if (unreadable > 0) console.error(`${y}warning:${r} ${unreadable} fact(s) unreadable — run: qmemd doctor`);
       if (values.json) { console.log(JSON.stringify(entries, null, 2)); break; }
       if (entries.length === 0) { console.log(`${d}No memories.${r}`); break; }
@@ -575,7 +578,7 @@ async function main() {
         break;
       }
       if (sub === "install-service" || sub === "uninstall-service") {
-        const port = Number(values.port) || Number(process.env.QMEMD_HTTP_PORT) || 8182;
+        const port = Number(values.port) || daemonPort();
         const platform = process.platform;
         if (platform !== "linux" && platform !== "darwin") {
           console.error(`install-service supports linux and darwin only (got '${platform}').`);
@@ -620,7 +623,7 @@ async function main() {
       }
 
       if (values.http) {
-        const port = Number(values.port) || Number(process.env.QMEMD_HTTP_PORT) || 8182;
+        const port = Number(values.port) || daemonPort();
 
         if (values.daemon) {
           if (existsSync(pidPath)) {

@@ -18,8 +18,8 @@
 // =============================================================================
 
 import { join } from "node:path";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { MEMORY_TYPES, parseMemory, yamlScalar, PLATFORMS, splitFlowSeq, setFrontmatterKey, locateFences, isValidReviewBy, leakedMarkupTokens, stripLeakedMarkup } from "./engine.js";
+import { readFileSync, writeFileSync } from "node:fs";
+import { MEMORY_TYPES, parseMemory, yamlScalar, PLATFORMS, splitFlowSeq, setFrontmatterKey, locateFences, isValidReviewBy, leakedMarkupTokens, stripLeakedMarkup, walkFactFiles } from "./engine.js";
 
 const NUL = String.fromCharCode(0); // the NUL byte, built via charcode (a literal NUL can't be embedded in source)
 
@@ -305,17 +305,9 @@ export function fixContent(content: string, folderType: string, slug: string): F
  */
 export function auditMemory(root: string): FactReport[] {
   const reports: FactReport[] = [];
-  for (const type of MEMORY_TYPES) {
-    const dir = join(root, type);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
-      let content: string;
-      try { content = readFileSync(join(dir, f), "utf-8"); } catch { continue; }
-      const slug = f.replace(/\.md$/, "");
-      const issues = auditFact(content, type, slug);
-      if (issues.length > 0) reports.push({ type, slug, relpath: `${type}/${f}`, issues });
-    }
+  for (const ff of walkFactFiles(root)) {
+    const issues = auditFact(ff.raw, ff.type, ff.slug);
+    if (issues.length > 0) reports.push({ type: ff.type, slug: ff.slug, relpath: ff.relpath, issues });
   }
   // Cross-fact link pass (bri): needs corpus context, so it cannot live in pure auditFact.
   // Merge per relpath so one file gets one report.
@@ -343,19 +335,13 @@ interface LinkFact {
 /** Slug → LinkFact over every parseable fact — corpus context for the link audits. */
 function scanLinkFacts(root: string): Map<string, LinkFact> {
   const bySlug = new Map<string, LinkFact>();
-  for (const type of MEMORY_TYPES) {
-    const dir = join(root, type);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
-      try {
-        const raw = readFileSync(join(dir, f), "utf-8");
-        bySlug.set(f.replace(/\.md$/, ""), {
-          type, relpath: `${type}/${f}`, fm: parseMemory(raw).frontmatter,
-          fenced: locateFences(raw) !== null,
-        });
-      } catch { /* unreadable files are doctor's other half — not link-auditable */ }
-    }
+  for (const ff of walkFactFiles(root)) {
+    try {
+      bySlug.set(ff.slug, {
+        type: ff.type, relpath: ff.relpath, fm: parseMemory(ff.raw).frontmatter,
+        fenced: locateFences(ff.raw) !== null,
+      });
+    } catch { /* unreadable files are doctor's other half — not link-auditable */ }
   }
   return bySlug;
 }
@@ -427,23 +413,15 @@ function ensureBakIgnored(root: string): void {
 }
 
 /** Remove a `key: ...` line from the frontmatter block. Surgical inverse of
- *  setFrontmatterKey: touches only that line; content unchanged when fences/key absent. */
+ *  setFrontmatterKey: touches only that line; content unchanged when fences/key absent.
+ *  Fence grammar is the shared byte-0 locateFences (qp-nq2) — the previous hand-rolled
+ *  scan accepted a fence ANYWHERE, diverging from parseMemory exactly like qp-yf2 C5. */
 function removeFrontmatterKey(content: string, key: string): string {
+  const fences = locateFences(content);
+  if (!fences) return content;
   const lines = content.split("\n");
-  let open = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i]!;
-    const noBom = l.charCodeAt(0) === 0xFEFF ? l.slice(1) : l;
-    if (noBom.startsWith("---")) { open = i; break; }
-  }
-  if (open < 0) return content;
-  let close = -1;
-  for (let i = open + 1; i < lines.length; i++) {
-    if (lines[i]!.startsWith("---")) { close = i; break; }
-  }
-  if (close < 0) return content;
   const re = new RegExp(`^${key}\\s*:`, "i");
-  for (let i = open + 1; i < close; i++) {
+  for (let i = fences.open + 1; i < fences.close; i++) {
     if (re.test(lines[i]!)) { lines.splice(i, 1); return lines.join("\n"); }
   }
   return content;
@@ -499,22 +477,13 @@ function fixLinks(root: string, alreadyBacked: ReadonlySet<string>): FixResult[]
  */
 export function fixMemory(root: string): FixResult[] {
   const results: FixResult[] = [];
-  for (const type of MEMORY_TYPES) {
-    const dir = join(root, type);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
-      const path = join(dir, f);
-      let content: string;
-      try { content = readFileSync(path, "utf-8"); } catch { continue; }
-      const slug = f.replace(/\.md$/, "");
-      const outcome = fixContent(content, type, slug);
-      if (!outcome) continue;
-      if (results.length === 0) ensureBakIgnored(root); // first .bak of this run
-      writeFileSync(path + ".bak", content);      // pre-fix backup
-      writeFileSync(path, outcome.content);        // repaired
-      results.push({ type, slug, relpath: `${type}/${f}`, fixed: outcome.fixed, backupRelpath: `${type}/${f}.bak` });
-    }
+  for (const ff of walkFactFiles(root)) {
+    const outcome = fixContent(ff.raw, ff.type, ff.slug);
+    if (!outcome) continue;
+    if (results.length === 0) ensureBakIgnored(root); // first .bak of this run
+    writeFileSync(ff.path + ".bak", ff.raw);     // pre-fix backup
+    writeFileSync(ff.path, outcome.content);     // repaired
+    results.push({ type: ff.type, slug: ff.slug, relpath: ff.relpath, fixed: outcome.fixed, backupRelpath: `${ff.relpath}.bak` });
   }
   // Cross-fact link fixes (bri): runs after the per-file pass, passing the relpaths
   // already backed up so this pass never overwrites an original .bak with a patched one.

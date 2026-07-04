@@ -4044,6 +4044,49 @@ describe("markReviewed (s4w, SDK-backed)", () => {
   });
 });
 
+describe("walkFactFiles (shared corpus walk, qp-nq2)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkt(join(tmpdir(), "qmemd-walk-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  const seed = async (type: string, slug: string, content = "---\nname: x\n---\nbody") => {
+    await mkdir(join(root, type), { recursive: true });
+    await writeFile(join(root, type, `${slug}.md`), content);
+  };
+
+  test("yields every .md across type folders with slug/relpath/raw; skips non-md and .md.bak", async () => {
+    const { walkFactFiles } = await import("../src/engine.js");
+    await seed("project", "alpha");
+    await seed("user", "beta", "raw bytes");
+    await writeFile(join(root, "project", "alpha.md.bak"), "backup");
+    await writeFile(join(root, "project", "notes.txt"), "not a fact");
+    const seen = [...walkFactFiles(root)].map(f => ({ type: f.type, slug: f.slug, relpath: f.relpath, raw: f.raw }));
+    expect(seen).toContainEqual({ type: "project", slug: "alpha", relpath: "project/alpha.md", raw: "---\nname: x\n---\nbody" });
+    expect(seen).toContainEqual({ type: "user", slug: "beta", relpath: "user/beta.md", raw: "raw bytes" });
+    expect(seen).toHaveLength(2);
+  });
+
+  test("types option restricts the walk to the given folders", async () => {
+    const { walkFactFiles } = await import("../src/engine.js");
+    await seed("project", "alpha");
+    await seed("reference", "gamma");
+    const seen = [...walkFactFiles(root, { types: ["reference"] })].map(f => f.slug);
+    expect(seen).toEqual(["gamma"]);
+  });
+
+  test("an unreadable entry invokes onUnreadable with the relpath and is skipped", async () => {
+    const { walkFactFiles } = await import("../src/engine.js");
+    await seed("project", "good");
+    // A DIRECTORY named like a fact file: readFileSync throws EISDIR — deterministic
+    // unreadable entry without permission-bit games.
+    await mkdir(join(root, "project", "broken.md"), { recursive: true });
+    const bad: string[] = [];
+    const seen = [...walkFactFiles(root, { onUnreadable: rp => bad.push(rp) })].map(f => f.slug);
+    expect(seen).toEqual(["good"]);
+    expect(bad).toEqual(["project/broken.md"]);
+  });
+});
+
 describe("setFrontmatterKey / locateFences (fence-location, qp-yf2)", () => {
   const wellFenced = "---\ntype: project\nname: foo\ncreated: 2026-01-01\n---\nbody line\n";
 

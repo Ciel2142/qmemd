@@ -482,16 +482,52 @@ export function truncateToBytes(s: string, maxBytes: number): string {
   return out;
 }
 
+/** One file yielded by walkFactFiles: physical identity + raw bytes, no parsing. */
+export interface FactFile {
+  /** The FOLDER the file lives in (the physical, authoritative type). */
+  type: MemoryType;
+  /** Filename stem (the authoritative slug). */
+  slug: string;
+  /** "<type>/<file>.md" — relative to the memory root, never absolute. */
+  relpath: string;
+  /** Absolute path — for callers that go on to write; never leaves the process. */
+  path: string;
+  raw: string;
+}
+
+/**
+ * The single corpus-walk skeleton (qp-nq2): every type folder → every `.md` entry →
+ * raw bytes. Skips non-`.md` names — which excludes `.md.bak` backups, since
+ * ".md.bak".endsWith(".md") is false. A read failure invokes `onUnreadable(relpath)`
+ * and skips the entry; PARSE failures are the caller's lane (some callers audit raw
+ * bytes and must see unparseable files, others parseMemory-and-count). Replaces nine
+ * hand-rolled copies whose policies (unreadable counting, extension rule) had drifted.
+ */
+export function* walkFactFiles(
+  root: string,
+  opts: { types?: readonly MemoryType[]; onUnreadable?: (relpath: string) => void } = {},
+): Generator<FactFile> {
+  for (const type of opts.types ?? MEMORY_TYPES) {
+    const dir = join(root, type);
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".md")) continue;
+      const path = join(dir, f);
+      let raw: string;
+      try { raw = readFileSync(path, "utf-8"); }
+      catch { opts.onUnreadable?.(`${type}/${f}`); continue; }
+      yield { type, slug: f.replace(/\.md$/, ""), relpath: `${type}/${f}`, path, raw };
+    }
+  }
+}
+
 function readType(root: string, type: MemoryType, onUnreadable?: () => void): ParsedMemory[] {
-  const dir = join(root, type);
-  if (!existsSync(dir)) return [];
   const out: ParsedMemory[] = [];
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith(".md")) continue;
-    // A read/parse failure bumps the caller's unreadable counter (qmemd-8jt) so the every-
-    // session snapshot folds the count into THIS pass instead of re-walking the whole corpus
-    // through countUnreadableFacts afterwards (qmemd-e5h/j5i — single read on the hot path).
-    try { out.push(parseMemory(readFileSync(join(dir, f), "utf-8"))); } catch { onUnreadable?.(); }
+  // A read/parse failure bumps the caller's unreadable counter (qmemd-8jt) so the every-
+  // session snapshot folds the count into THIS pass instead of re-walking the whole corpus
+  // through countUnreadableFacts afterwards (qmemd-e5h/j5i — single read on the hot path).
+  for (const ff of walkFactFiles(root, { types: [type], onUnreadable: () => onUnreadable?.() })) {
+    try { out.push(parseMemory(ff.raw)); } catch { onUnreadable?.(); }
   }
   return out;
 }
@@ -506,13 +542,8 @@ function readType(root: string, type: MemoryType, onUnreadable?: () => void): Pa
  */
 export function countUnreadableFacts(root: string): number {
   let n = 0;
-  for (const type of MEMORY_TYPES) {
-    const dir = join(root, type);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
-      try { parseMemory(readFileSync(join(dir, f), "utf-8")); } catch { n++; }
-    }
+  for (const ff of walkFactFiles(root, { onUnreadable: () => n++ })) {
+    try { parseMemory(ff.raw); } catch { n++; }
   }
   return n;
 }
@@ -1365,16 +1396,11 @@ interface ScanResult {
 function scanFacts(root: string): ScanResult {
   const facts: ScanResult["facts"] = [];
   let unreadable = 0;
-  for (const type of MEMORY_TYPES) {
-    const dir = join(root, type);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
-      try {
-        const parsed = parseMemory(readFileSync(join(dir, f), "utf-8"));
-        facts.push({ slug: f.replace(/\.md$/, ""), type, name: parsed.frontmatter.name, body: parsed.body });
-      } catch { unreadable++; /* count the dedup gap rather than hide it (qmemd-e5h) */ }
-    }
+  for (const ff of walkFactFiles(root, { onUnreadable: () => unreadable++ })) {
+    try {
+      const parsed = parseMemory(ff.raw);
+      facts.push({ slug: ff.slug, type: ff.type, name: parsed.frontmatter.name, body: parsed.body });
+    } catch { unreadable++; /* count the dedup gap rather than hide it (qmemd-e5h) */ }
   }
   return { facts, unreadable };
 }
@@ -2353,22 +2379,18 @@ export interface ListEntry {
  *  in frontmatter.tags; `project` matches that project OR "global" (so "alpha"
  *  returns alpha+global, but "global" returns global-only); omitting a filter
  *  returns everything. Returns plain data — no fs path. Filesystem only (bgf). */
-export function listFacts(root: string, filter: ListFilter = {}): ListEntry[] {
-  const types = filter.type ? [filter.type] : MEMORY_TYPES;
+export function listFacts(root: string, filter: ListFilter = {}, onUnreadable?: () => void): ListEntry[] {
   const out: ListEntry[] = [];
-  for (const type of types) {
-    const dir = join(root, type);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
-      let parsed: ParsedMemory;
-      try { parsed = parseMemory(readFileSync(join(dir, f), "utf-8")); } catch { continue; }
-      const fm = parsed.frontmatter;
-      if (filter.tag !== undefined && !fm.tags.includes(filter.tag)) continue;
-      if (filter.project !== undefined && fm.project !== filter.project && fm.project !== "global") continue;
-      if (filter.platform !== undefined && !platformVisible(fm.platforms ?? [], filter.platform)) continue;
-      out.push({ slug: f.replace(/\.md$/, ""), type, description: fm.description, tags: fm.tags, created: fm.created, pinned: fm.pinned, platforms: fm.platforms ?? [], supersededBy: fm.supersededBy });
-    }
+  // onUnreadable sees only the WALKED folders: under a --type filter it is per-type, not
+  // corpus-wide — a caller needing the corpus-wide count uses countUnreadableFacts (e5h).
+  for (const ff of walkFactFiles(root, { types: filter.type ? [filter.type] : undefined, onUnreadable: () => onUnreadable?.() })) {
+    let parsed: ParsedMemory;
+    try { parsed = parseMemory(ff.raw); } catch { onUnreadable?.(); continue; }
+    const fm = parsed.frontmatter;
+    if (filter.tag !== undefined && !fm.tags.includes(filter.tag)) continue;
+    if (filter.project !== undefined && fm.project !== filter.project && fm.project !== "global") continue;
+    if (filter.platform !== undefined && !platformVisible(fm.platforms ?? [], filter.platform)) continue;
+    out.push({ slug: ff.slug, type: ff.type, description: fm.description, tags: fm.tags, created: fm.created, pinned: fm.pinned, platforms: fm.platforms ?? [], supersededBy: fm.supersededBy });
   }
   out.sort((a, b) => b.created.localeCompare(a.created) || a.slug.localeCompare(b.slug));
   return out;
@@ -2430,18 +2452,14 @@ export function staleFacts(root: string, opts: StaleOptions = {}): StaleReport {
   const limit = opts.limit ?? 10;
   const due: StaleEntry[] = [];
   const backlog: StaleEntry[] = []; // never-reviewed decay-prone facts not yet due (the `unreviewed` lane)
-  for (const type of MEMORY_TYPES) {
-    const dir = join(root, type);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
+  for (const ff of walkFactFiles(root)) {
       let fm: MemoryFrontmatter;
-      try { fm = parseMemory(readFileSync(join(dir, f), "utf-8")).frontmatter; }
+      try { fm = parseMemory(ff.raw).frontmatter; }
       catch { continue; /* unreadable — doctor's half (e5h) */ }
       if (fm.supersededBy) continue;                 // retired, not stale
       if (fm.reviewBy === DURABLE_SENTINEL) continue; // explicit durable: exempt (before any date logic)
       const base: StaleEntry = {
-        slug: f.replace(/\.md$/, ""), type, description: fm.description, project: fm.project,
+        slug: ff.slug, type: ff.type, description: fm.description, project: fm.project,
         created: fm.created, ...(fm.updated !== undefined ? { updated: fm.updated } : {}),
         pinned: fm.pinned,
       };
@@ -2453,7 +2471,7 @@ export function staleFacts(root: string, opts: StaleOptions = {}): StaleReport {
       }
       // No (valid) explicit review_by ⇒ inherit the per-type default window. A malformed
       // review_by also lands here (fail-open to surfacing; doctor flags it separately).
-      const W = ttlDefaultDays(type);
+      const W = ttlDefaultDays(ff.type);
       if (W === null) continue; // durable type (user/feedback): exempt
       const anchor = (base.updated ?? base.created).slice(0, 10);
       const anchorMs = Date.parse(`${anchor}T00:00:00.000Z`);
@@ -2468,7 +2486,6 @@ export function staleFacts(root: string, opts: StaleOptions = {}): StaleReport {
       const dueDate = reviewByFromTtl(`${W}d`, new Date(anchorMs));
       if (dueDate <= todayStr) due.push({ ...base, dueDate }); // implicit, overdue: never reviewed
       else backlog.push(base);                                 // never reviewed, not yet due
-    }
   }
   // due: effective date asc then slug; backlog: oldest anchor first then slug.
   due.sort((a, b) => (a.dueDate ?? "").localeCompare(b.dueDate ?? "") || a.slug.localeCompare(b.slug));
