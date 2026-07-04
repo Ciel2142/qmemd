@@ -31,6 +31,8 @@ import {
   staleFacts,
   resolveReviewedDate,
   markReviewed,
+  setFrontmatterKey,
+  locateFences,
   Platform,
   type MemoryFrontmatter,
   type MemoryType,
@@ -3995,5 +3997,41 @@ describe("markReviewed (s4w, SDK-backed)", () => {
   test("throws on a missing fact", async () => {
     const { markReviewed } = await import("../src/engine.js");
     await expect(markReviewed(store, root, "no-such-slug", {})).rejects.toThrow(/no fact named 'no-such-slug'/);
+  });
+});
+
+describe("setFrontmatterKey / locateFences (fence-location, qp-yf2)", () => {
+  const wellFenced = "---\ntype: project\nname: foo\ncreated: 2026-01-01\n---\nbody line\n";
+
+  test("locateFences anchors the open fence at byte 0 like parseMemory", () => {
+    // A fenceless note whose BODY contains --- horizontal rules must NOT be
+    // seen as frontmatter (parseMemory requires the fence at content start).
+    const fenceless = "Setup notes\n---\nstep 1\n---\nstep 2\n";
+    expect(locateFences(fenceless)).toBeNull();
+    // A real frontmatter block is located at line 0.
+    expect(locateFences(wellFenced)).toEqual({ open: 0, close: 4 });
+  });
+
+  test("does not corrupt a fenceless body that contains --- rules", () => {
+    // C5: setFrontmatterKey must return the content byte-for-byte unchanged
+    // when there is no byte-0 frontmatter fence, instead of splicing the key
+    // between two markdown horizontal rules in the prose.
+    const fenceless = "Setup notes\n---\nstep 1\n---\nstep 2\n";
+    expect(setFrontmatterKey(fenceless, "review_by", "2026-10-02")).toBe(fenceless);
+  });
+
+  test("still replaces an existing key in a well-fenced fact", () => {
+    const out = setFrontmatterKey(wellFenced, "type", "user");
+    expect(out).toBe("---\ntype: user\nname: foo\ncreated: 2026-01-01\n---\nbody line\n");
+  });
+
+  test("still inserts an absent key just after the open fence", () => {
+    const out = setFrontmatterKey(wellFenced, "review_by", "2026-10-02");
+    expect(out).toBe("---\nreview_by: 2026-10-02\ntype: project\nname: foo\ncreated: 2026-01-01\n---\nbody line\n");
+  });
+
+  test("returns content unchanged when the open fence has no close", () => {
+    const noClose = "---\ntype: project\nname: foo\nbody with no closing fence\n";
+    expect(setFrontmatterKey(noClose, "review_by", "2026-10-02")).toBe(noClose);
   });
 });

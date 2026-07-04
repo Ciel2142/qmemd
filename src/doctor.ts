@@ -19,7 +19,7 @@
 
 import { join } from "node:path";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { MEMORY_TYPES, parseMemory, yamlScalar, PLATFORMS, splitFlowSeq, setFrontmatterKey, isValidReviewBy, leakedMarkupTokens, stripLeakedMarkup } from "./engine.js";
+import { MEMORY_TYPES, parseMemory, yamlScalar, PLATFORMS, splitFlowSeq, setFrontmatterKey, locateFences, isValidReviewBy, leakedMarkupTokens, stripLeakedMarkup } from "./engine.js";
 
 const NUL = String.fromCharCode(0); // the NUL byte, built via charcode (a literal NUL can't be embedded in source)
 
@@ -226,20 +226,13 @@ export function auditFact(content: string, folderType: string, slug: string): Fa
  * surgery guard) or when nothing changed.
  */
 function stripBodyLeak(content: string): string | null {
+  // Byte-0 fence location (qp-yf2): a fenceless file whose body contains --- rules
+  // is left for human repair, not mutated by mistaking those rules for a fence.
+  const fences = locateFences(content);
+  if (!fences) return null;
   const lines = content.split("\n");
-  let open = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const noBom = lines[i]!.charCodeAt(0) === 0xFEFF ? lines[i]!.slice(1) : lines[i]!;
-    if (noBom.startsWith("---")) { open = i; break; }
-  }
-  if (open < 0) return null;
-  let close = -1;
-  for (let i = open + 1; i < lines.length; i++) {
-    if (lines[i]!.startsWith("---")) { close = i; break; }
-  }
-  if (close < 0) return null;
-  const head = lines.slice(0, close + 1).join("\n");
-  const body = lines.slice(close + 1).join("\n");
+  const head = lines.slice(0, fences.close + 1).join("\n");
+  const body = lines.slice(fences.close + 1).join("\n");
   const cleaned = stripLeakedMarkup(body);
   return cleaned === body ? null : `${head}\n${cleaned}`;
 }

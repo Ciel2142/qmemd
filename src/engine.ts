@@ -295,6 +295,26 @@ export function serializeMemory(fm: MemoryFrontmatter, body: string): string {
 }
 
 /**
+ * Locate the frontmatter fence pair, anchored to byte 0 exactly like parseMemory
+ * (qp-yf2): the open fence is recognized ONLY when the first line — after a leading
+ * BOM — starts with "---"; the close fence is the first subsequent "---" line.
+ * Returns null when there is no byte-0 fence or no closing fence, so a fenceless
+ * note whose body contains "---" horizontal rules is never mistaken for frontmatter.
+ * Single source of fence-locating truth for setFrontmatterKey and doctor --fix.
+ */
+export function locateFences(content: string): { open: number; close: number } | null {
+  const lines = content.split("\n");
+  const first = lines[0];
+  if (first === undefined) return null;
+  const noBom = first.charCodeAt(0) === 0xFEFF ? first.slice(1) : first;
+  if (!noBom.startsWith("---")) return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i]!.startsWith("---")) return { open: 0, close: i };
+  }
+  return null;
+}
+
+/**
  * Replace the value of `key` within the frontmatter block, or insert `key: value`
  * just after the opening fence if the key is absent. Touches ONLY that one line —
  * every other frontmatter line, comment, and the body are preserved byte-for-byte.
@@ -302,20 +322,10 @@ export function serializeMemory(fm: MemoryFrontmatter, body: string): string {
  * Shared by doctor --fix and the remember() supersede stamp (bri).
  */
 export function setFrontmatterKey(content: string, key: string, value: string): string {
+  const fences = locateFences(content);
+  if (!fences) return content;
+  const { open, close } = fences;
   const lines = content.split("\n");
-  let open = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i]!;
-    const noBom = l.charCodeAt(0) === 0xFEFF ? l.slice(1) : l;
-    if (noBom.startsWith("---")) { open = i; break; }
-  }
-  if (open < 0) return content;
-  let close = -1;
-  for (let i = open + 1; i < lines.length; i++) {
-    if (lines[i]!.startsWith("---")) { close = i; break; }
-  }
-  if (close < 0) return content;
-
   const re = new RegExp(`^${key}\\s*:`, "i");
   for (let i = open + 1; i < close; i++) {
     if (re.test(lines[i]!)) { lines[i] = `${key}: ${value}`; return lines.join("\n"); }
