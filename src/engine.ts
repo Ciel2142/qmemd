@@ -1668,8 +1668,18 @@ export async function remember(
   if (supersedeTarget) {
     try {
       const raw = readFileSync(supersedeTarget.path, "utf-8");
-      writeFileSync(supersedeTarget.path, setFrontmatterKey(raw, "superseded_by", yamlScalar(slug)));
-      commitPaths.push(`${supersedeTarget.type}/${supersedeTarget.slug}.md`);
+      // Fenceless target: setFrontmatterKey would no-op and the retired fact would stay
+      // active in every recall lane while the commit claims otherwise (qp-yf2 C7). The
+      // guard is locateFences, NOT written-bytes equality — an idempotent restamp of the
+      // same slug writes identical bytes and is a success. doctor --fix completes the
+      // link only after the fence is repaired by hand (MISSING_OPEN is not fixable).
+      if (!locateFences(raw)) {
+        supersedeWarning = `fact written, but '${input.supersedes}' has no frontmatter fence — superseding link not stamped; repair its frontmatter ('qmemd doctor' locates it), then run 'qmemd doctor --fix' to complete the link`;
+        console.error(`[qmemd] remember '${slug}': ${supersedeWarning}`);
+      } else {
+        writeFileSync(supersedeTarget.path, setFrontmatterKey(raw, "superseded_by", yamlScalar(slug)));
+        commitPaths.push(`${supersedeTarget.type}/${supersedeTarget.slug}.md`);
+      }
     } catch (e) {
       // e.message (ENOENT/EACCES) embeds the absolute path — keep it on stderr only;
       // the surfaced warning must stay path-free (qmemd-81n).
@@ -2511,6 +2521,13 @@ export async function markReviewed(
   if (!fact) throw new Error(`no fact named '${slug}' to mark reviewed`);
   const reviewBy = resolveReviewedDate(fact.type, opts);
   const content = readFileSync(fact.path, "utf-8");
+  // Fenceless fact: setFrontmatterKey would return the content unchanged, git would
+  // no-op, and the fact would resurface in `qmemd stale` forever while this verb
+  // reports success (qp-yf2 C6). The fence is not mechanically fixable (MISSING_OPEN
+  // needs a human), so fail loudly with the repair path instead.
+  if (!locateFences(content)) {
+    throw new Error(`fact '${slug}' has no frontmatter fence — review_by cannot be stamped; repair the file's frontmatter ('qmemd doctor' locates it), then retry`);
+  }
   writeFileSync(fact.path, setFrontmatterKey(content, "review_by", reviewBy));
   const commit = gitCommit(root, `reviewed: ${slug}`, `${fact.type}/${slug}.md`, git);
   const push = gitPush(root, git);
