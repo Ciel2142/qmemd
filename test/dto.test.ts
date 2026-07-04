@@ -113,3 +113,23 @@ describe("DTO mappers never leak an absolute path (qmemd-81n)", () => {
     expect("path" in dto).toBe(false);
   });
 });
+
+describe("toRememberDTO (qp-nq2 — one mapper for MCP structuredContent + REST)", () => {
+  test("maps the full remember surface incl. authorityComparison, drops path", async () => {
+    const { toRememberDTO } = await import("../src/mcp/server.js");
+    const res = {
+      wrote: false, slug: "s", path: "/abs/secret/s.md", type: "project" as const,
+      duplicateOf: "other", duplicateDescription: "dd", duplicateBody: "db",
+      disposition: "conflict" as const,
+      authorityComparison: { candidate: { source: "a" }, existing: { slug: "other" } },
+      indexed: true, synced: true, dedupSkipped: 0,
+      supersedeWarning: "w",
+    };
+    // Structural cast: only the mapped subset matters here.
+    const dto = toRememberDTO(res as never);
+    expect("path" in dto).toBe(false);
+    // REST omitted authorityComparison before the shared mapper (the drift this locks out).
+    expect(dto.authorityComparison).toEqual(res.authorityComparison);
+    expect(dto).toMatchObject({ wrote: false, slug: "s", type: "project", duplicateOf: "other", disposition: "conflict", supersedeWarning: "w" });
+  });
+});

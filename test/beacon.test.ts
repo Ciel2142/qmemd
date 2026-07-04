@@ -124,6 +124,22 @@ describe("beacon marker IO (tfu)", () => {
     expect(readState(p)).toBeNull();
   });
 
+  test("writeState prunes only on the first and every 20th call — not per Bash call (qp-nq2)", async () => {
+    const p = stateFilePath(cache, "gated");
+    const state = (callCount: number): BeaconState =>
+      ({ repo: "x", callCount, lastBeaconAtCall: 0, beaconedRepos: [], perRepo: {} });
+    // Seed a stale sibling marker (8 days old) that only a prune sweep would remove.
+    mkdirSync(dirname(p), { recursive: true });
+    const stale = join(dirname(p), "stale-session.json");
+    writeFileSync(stale, "{}");
+    const old = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+    utimesSync(stale, old, old);
+    writeState(p, state(7)); // mid-session call: sweep must NOT run
+    expect(existsSync(stale)).toBe(true);
+    writeState(p, state(20)); // gate call: sweep runs, stale marker goes
+    expect(existsSync(stale)).toBe(false);
+  });
+
   test("stateFilePath sanitizes a hostile session id to one safe segment", () => {
     const p = stateFilePath(cache, "../../etc/passwd");
     expect(p.startsWith(join(cache, "hook"))).toBe(true);

@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { openMemoryStore } from "../store.js";
 import { type QMDStore } from "@tobilu/qmd";
-import { remember, recallQueryWithStatus, recallSession, forget as forgetFact, markReviewed, getFact, listFacts, pendingVectorPhrase, completenessFooter, MEMORY_TYPES, PLATFORMS, DEFAULT_MIN_SCORE, type RecallHit, type FullFact, type ListEntry, type MemoryType, type Platform } from "../engine.js";
+import { remember, recallQueryWithStatus, recallSession, forget as forgetFact, markReviewed, getFact, listFacts, pendingVectorPhrase, completenessFooter, MEMORY_TYPES, PLATFORMS, DEFAULT_MIN_SCORE, type RecallHit, type FullFact, type ListEntry, type MemoryType, type Platform, type RememberResult } from "../engine.js";
 import { memoryRoot } from "../paths.js";
 import { gitPullFfOnly, sessionSyncWarning, type GitDeps } from "../git.js";
 import { rootHash } from "../client.js";
@@ -48,6 +48,22 @@ export function toFactDTO(fact: FullFact): FactDTO {
 }
 export function toListEntryDTO(e: ListEntry): ListEntryDTO {
   return { slug: e.slug, type: e.type, description: e.description, tags: e.tags, created: e.created, pinned: e.pinned, platforms: e.platforms ?? [], supersededBy: e.supersededBy };
+}
+// Everything here is a slug/flag/count/guidance string — no fs path (qmemd-81n). `path`
+// from RememberResult is deliberately NOT mapped. Before this mapper the MCP and REST
+// remember responses were hand-built separately and drifted: REST silently omitted
+// authorityComparison, blinding its conflict resolution (qp-nq2).
+export type RememberDTO = ReturnType<typeof toRememberDTO>;
+export function toRememberDTO(res: RememberResult) {
+  return {
+    wrote: res.wrote, slug: res.slug, type: res.type, duplicateOf: res.duplicateOf,
+    duplicateDescription: res.duplicateDescription, duplicateBody: res.duplicateBody,
+    disposition: res.disposition, authorityComparison: res.authorityComparison,
+    indexed: res.indexed, synced: res.synced, syncWarning: res.syncWarning,
+    dedupSkipped: res.dedupSkipped, reportWarning: res.reportWarning,
+    sanitizedWarning: res.sanitizedWarning, supersededSlug: res.supersededSlug,
+    conflictsWith: res.conflictsWith, supersedeWarning: res.supersedeWarning,
+  };
 }
 
 const MEMORY_TYPES_Z = z.enum(["user", "feedback", "project", "reference"]);
@@ -220,7 +236,7 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
       // fixed token labels — no fs path, no captured content.
       // supersededSlug/conflictsWith are slugs, supersedeWarning a generic guidance string —
       // no fs path, safe under the qmemd-81n allowlist (bri/cr4).
-      return { content: [{ type: "text", text }], structuredContent: { wrote: res.wrote, slug: res.slug, type: res.type, duplicateOf: res.duplicateOf, duplicateDescription: res.duplicateDescription, duplicateBody: res.duplicateBody, disposition: res.disposition, authorityComparison: res.authorityComparison, indexed: res.indexed, synced: res.synced, syncWarning: res.syncWarning, dedupSkipped: res.dedupSkipped, reportWarning: res.reportWarning, sanitizedWarning: res.sanitizedWarning, supersededSlug: res.supersededSlug, conflictsWith: res.conflictsWith, supersedeWarning: res.supersedeWarning } };
+      return { content: [{ type: "text", text }], structuredContent: toRememberDTO(res) };
     } catch (err) {
       return sanitizeToolError(err);
     }
@@ -713,7 +729,7 @@ export async function startMcpHttpServer(
           platforms: body.platforms as Platform[] | undefined,
           ttl: body.ttl, reviewBy: body.reviewBy,
         });
-        sendJson(nodeRes, 200, { wrote: res.wrote, slug: res.slug, type: res.type, duplicateOf: res.duplicateOf, duplicateDescription: res.duplicateDescription, duplicateBody: res.duplicateBody, disposition: res.disposition, indexed: res.indexed, synced: res.synced, syncWarning: res.syncWarning, dedupSkipped: res.dedupSkipped, reportWarning: res.reportWarning, sanitizedWarning: res.sanitizedWarning, supersededSlug: res.supersededSlug, conflictsWith: res.conflictsWith, supersedeWarning: res.supersedeWarning });
+        sendJson(nodeRes, 200, toRememberDTO(res));
         return;
       }
 
