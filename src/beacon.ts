@@ -60,15 +60,28 @@ export function decideWriteBeacon(state: BeaconState | null, repo: string, thres
   };
 }
 
-/** Render the beacon text. No filesystem path (qmemd-81n) — repo name + tag shape only. */
+/** Beacon histogram cap: top-N tags per scope line; the full shape stays on
+ *  demand via `qmemd tags`. Keeps a repo-pivot fire bounded (a mixed dump
+ *  measured ~200 tags ≈ 1.4k tokens before the split). */
+const BEACON_TAG_CAP = 12;
+
+function scopeLine(label: string, scope: { total: number; tags: { tag: string; count: number }[] }): string {
+  const shown = formatTagHistogram(scope.tags.slice(0, BEACON_TAG_CAP)) || "(untagged)";
+  const hidden = scope.tags.length - BEACON_TAG_CAP;
+  return `   ${label} ${shown}${hidden > 0 ? ` (+${hidden} more)` : ""}`;
+}
+
+/** Render the beacon text. No filesystem path (qmemd-81n) — repo name + tag shape only.
+ *  Counts are split repo vs global: the pre-split "N memories for this repo" line counted
+ *  project+global together and read as repo-only (misleading at 13 repo + 167 global). */
 export function formatBeacon(ov: ProjectOverview, terse: boolean): string {
-  if (terse) return `💡 qmemd · ${ov.project}: ${ov.total} memories — recall before diagnosing`;
-  const shape = formatTagHistogram(ov.tags) || "(untagged)";
-  return [
-    `💡 qmemd · ${ov.project} — ${ov.total} memories for this repo:`,
-    `   ${shape}`,
-    `   → recall before diagnosing, e.g.  qmemd recall "${ov.project} <topic>"`,
-  ].join("\n");
+  const counts = `${ov.repo.total} repo + ${ov.global.total} global`;
+  if (terse) return `💡 qmemd · ${ov.project}: ${counts} — recall before diagnosing`;
+  const lines = [`💡 qmemd · ${ov.project} — ${counts} memories:`];
+  if (ov.repo.total > 0) lines.push(scopeLine("repo:  ", ov.repo));
+  if (ov.global.total > 0) lines.push(scopeLine("global:", ov.global));
+  lines.push(`   → recall before diagnosing, e.g.  qmemd recall "${ov.project} <topic>"`);
+  return lines.join("\n");
 }
 
 /** Render the write-beacon line (qmemd-yl3). No filesystem path (qmemd-81n) — repo + count
