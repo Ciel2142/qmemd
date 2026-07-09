@@ -649,6 +649,35 @@ describe("CLI tags verb (tfu)", () => {
     expect(res.stdout).toContain("beta");
     expect(res.stdout).toMatch(/jdk\(1\)/);
   });
+
+  test("human output splits repo vs global lines with honest counts", async () => {
+    await writeProj("jdk-fact", "beta", ["jdk", "build"]);
+    await writeProj("k3s-fact", "global", ["k3s"]);
+    const res = runCli(["tags", "--project", "beta"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("1 repo + 1 global memories");
+    expect(res.stdout).toMatch(/repo:.*build\(1\).*jdk\(1\)/);
+    expect(res.stdout).toMatch(/global: +k3s\(1\)/);
+  });
+
+  test("zero-global corpus omits the global line", async () => {
+    await writeProj("jdk-fact", "beta", ["jdk"]);
+    const res = runCli(["tags", "--project", "beta"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("1 repo + 0 global memories");
+    expect(res.stdout).not.toMatch(/global:/);
+  });
+
+  test("--json carries the repo/global split alongside the pre-split fields", async () => {
+    await writeProj("jdk-fact", "beta", ["jdk"]);
+    await writeProj("k3s-fact", "global", ["k3s"]);
+    const res = runCli(["tags", "--project", "beta", "--json"], root);
+    expect(res.status).toBe(0);
+    const ov = JSON.parse(res.stdout);
+    expect(ov.total).toBe(2);                          // pre-split contract intact
+    expect(ov.repo).toEqual({ total: 1, tags: [{ tag: "jdk", count: 1 }] });
+    expect(ov.global).toEqual({ total: 1, tags: [{ tag: "k3s", count: 1 }] });
+  });
 });
 
 describe("doctor (CLI, qmemd-61h)", () => {
