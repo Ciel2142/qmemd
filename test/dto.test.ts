@@ -30,7 +30,7 @@ describe("DTO mappers never leak an absolute path (qmemd-81n)", () => {
   test("toListEntryDTO passes the no-path entry through", () => {
     const dto = toListEntryDTO({
       slug: "s", type: "reference", description: "d",
-      tags: [], created: "2026-06-01", pinned: false, platforms: [],
+      tags: [], created: "2026-06-01", pinned: false, platforms: [], project: "alpha",
     });
     expect("path" in dto).toBe(false);
     expect(dto).toEqual({ slug: "s", type: "reference", description: "d", tags: [], created: "2026-06-01", pinned: false, platforms: [], supersededBy: undefined });
@@ -39,7 +39,7 @@ describe("DTO mappers never leak an absolute path (qmemd-81n)", () => {
   test("toListEntryDTO passes supersededBy through (bri)", () => {
     const dto = toListEntryDTO({
       slug: "old-fact", type: "project", description: "d",
-      tags: [], created: "2026-06-01", pinned: false, platforms: [], supersededBy: "new-fact",
+      tags: [], created: "2026-06-01", pinned: false, platforms: [], project: "alpha", supersededBy: "new-fact",
     });
     expect(dto.supersededBy).toBe("new-fact");
     expect("path" in dto).toBe(false);

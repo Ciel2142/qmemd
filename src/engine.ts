@@ -2370,6 +2370,8 @@ export interface ListEntry {
   created: string;
   pinned: boolean;
   platforms: Platform[];
+  /** Raw frontmatter project scope: "global" or a repo name. */
+  project: string;
   /** Set when the fact is retired (bri): hidden from recall, shown here for audit. */
   supersededBy?: string;
 }
@@ -2390,7 +2392,7 @@ export function listFacts(root: string, filter: ListFilter = {}, onUnreadable?: 
     if (filter.tag !== undefined && !fm.tags.includes(filter.tag)) continue;
     if (filter.project !== undefined && fm.project !== filter.project && fm.project !== "global") continue;
     if (filter.platform !== undefined && !platformVisible(fm.platforms ?? [], filter.platform)) continue;
-    out.push({ slug: ff.slug, type: ff.type, description: fm.description, tags: fm.tags, created: fm.created, pinned: fm.pinned, platforms: fm.platforms ?? [], supersededBy: fm.supersededBy });
+    out.push({ slug: ff.slug, type: ff.type, description: fm.description, tags: fm.tags, created: fm.created, pinned: fm.pinned, platforms: fm.platforms ?? [], project: fm.project, supersededBy: fm.supersededBy });
   }
   out.sort((a, b) => b.created.localeCompare(a.created) || a.slug.localeCompare(b.slug));
   return out;
@@ -2576,23 +2578,41 @@ export function formatTagHistogram(hist: { tag: string; count: number }[]): stri
   return hist.map(({ tag, count }) => `${tag}(${count})`).join(" ");
 }
 
+export interface ScopeOverview {
+  total: number;
+  tags: { tag: string; count: number }[];
+}
+
 export interface ProjectOverview {
   project: string;
   total: number;
   tags: { tag: string; count: number }[];
   byType: Record<MemoryType, number>;
+  /** Facts scoped to exactly this project (excludes global). */
+  repo: ScopeOverview;
+  /** `project: global` facts visible everywhere. */
+  global: ScopeOverview;
 }
 
 /** Model-free corpus overview for a project (project-scoped + global, mirroring
  *  listFacts). `types` defaults to all four; the beacon passes ["project","reference"]
- *  to exclude always-on user/feedback (already injected every session). No fs path,
- *  no model — safe on a Bash hot path. */
+ *  to exclude always-on user/feedback (already injected every session). `total`/`tags`
+ *  stay mixed (pre-split JSON contract); `repo`/`global` carry the honest split. No fs
+ *  path, no model — safe on a Bash hot path. */
 export function projectOverview(root: string, project: string, types: MemoryType[] = MEMORY_TYPES): ProjectOverview {
   const entries: ListEntry[] = [];
   for (const t of types) entries.push(...listFacts(root, { type: t, project }));
   const byType: Record<MemoryType, number> = { user: 0, feedback: 0, project: 0, reference: 0 };
   for (const e of entries) byType[e.type]++;
-  return { project, total: entries.length, tags: tagHistogram(entries.map(e => e.tags)), byType };
+  const scope = (pred: (e: ListEntry) => boolean): ScopeOverview => {
+    const sub = entries.filter(pred);
+    return { total: sub.length, tags: tagHistogram(sub.map(e => e.tags)) };
+  };
+  return {
+    project, total: entries.length, tags: tagHistogram(entries.map(e => e.tags)), byType,
+    repo: scope(e => e.project !== "global"),
+    global: scope(e => e.project === "global"),
+  };
 }
 
 // =============================================================================
