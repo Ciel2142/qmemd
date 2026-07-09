@@ -115,7 +115,7 @@ describe("adversarial: structuredContent payloads never carry the store's fs lay
       frontmatter: { name: "s", description: "d", type: "project", tags: [], project: "global", platforms: [], created: "2026-06-01", pinned: false },
     });
     const entry = toListEntryDTO({
-      slug: "s", type: "project", description: "d", tags: [], created: "2026-06-01", pinned: false, platforms: [],
+      slug: "s", type: "project", description: "d", tags: [], created: "2026-06-01", pinned: false, platforms: [], project: "global",
     });
     // Composed exactly like the MCP tool results / REST bodies.
     const payloads = [{ hits: [hit], degraded: false }, fact, { entries: [entry] }];

@@ -7,10 +7,13 @@ import { mkdirSync, writeFileSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
-const ov = (project: string, total: number): ProjectOverview => ({
-  project, total,
+const ov = (project: string, repoTotal: number, globalTotal: number): ProjectOverview => ({
+  project,
+  total: repoTotal + globalTotal,
   tags: [{ tag: "jdk", count: 2 }, { tag: "build", count: 1 }],
-  byType: { user: 0, feedback: 0, project: total, reference: 0 },
+  byType: { user: 0, feedback: 0, project: repoTotal + globalTotal, reference: 0 },
+  repo: { total: repoTotal, tags: repoTotal ? [{ tag: "jdk", count: 2 }, { tag: "build", count: 1 }] : [] },
+  global: { total: globalTotal, tags: globalTotal ? [{ tag: "k3s", count: 3 }, { tag: "pi", count: 1 }] : [] },
 });
 
 describe("decideBeacon (tfu)", () => {
@@ -56,39 +59,61 @@ describe("decideBeacon (tfu)", () => {
 });
 
 describe("formatBeacon (tfu)", () => {
-  test("full form names the repo, total, tag shape, and a recall example", () => {
-    const s = formatBeacon(ov("beta", 14), false);
+  test("full form names the repo, split counts, both tag shapes, and a recall example", () => {
+    const s = formatBeacon(ov("beta", 14, 3), false);
     expect(s).toContain("beta");
-    expect(s).toContain("14 memories");
-    expect(s).toContain("jdk(2) build(1)");
+    expect(s).toContain("14 repo + 3 global memories:");
+    expect(s).toMatch(/repo: +jdk\(2\) build\(1\)/);
+    expect(s).toMatch(/global: +k3s\(3\) pi\(1\)/);
     expect(s).toContain('qmemd recall "beta');
   });
   test("full form does not assert load-state it cannot know (i34)", () => {
-    // The beacon is a stateless throttle fired on Bash calls; it has no view into what the
-    // agent recalled or read from the session snapshot, and ov.total counts the whole
-    // project+reference corpus (incl. the snapshot-shown slice + pinned). So it must not claim
-    // the count is what's "not loaded this session" — state the holdings, prompt a recall
-    // (mirroring the already-honest terse branch).
-    const s = formatBeacon(ov("beta", 14), false);
+    const s = formatBeacon(ov("beta", 14, 3), false);
     expect(s).not.toContain("not loaded this session");
-    expect(s).toContain("14 memories");
     expect(s).toContain("recall before diagnosing");
   });
-  test("terse form is one line with no tag shape", () => {
-    const s = formatBeacon(ov("beta", 14), true);
+  test("terse form is one line with split counts and no tag shape", () => {
+    const s = formatBeacon(ov("beta", 14, 3), true);
     expect(s).toContain("beta");
-    expect(s).toContain("14 memories");
+    expect(s).toContain("14 repo + 3 global");
     expect(s).not.toContain("jdk(2)");
     expect(s.split("\n").length).toBe(1);
   });
   test("never leaks a filesystem path (qmemd-81n)", () => {
-    const s = formatBeacon(ov("beta", 3), false);
-    expect(s).not.toMatch(/\//); // no slash → no /home/... path
+    expect(formatBeacon(ov("beta", 3, 2), false)).not.toMatch(/\//);
+    expect(formatBeacon(ov("beta", 3, 2), true)).not.toMatch(/\//);
   });
-  test("untagged corpus still renders without an empty shape line", () => {
-    const bare: ProjectOverview = { project: "x", total: 2, tags: [], byType: { user: 0, feedback: 0, project: 2, reference: 0 } };
-    const s = formatBeacon(bare, false);
-    expect(s).toContain("(untagged)");
+  test("zero-repo omits the repo line but keeps the honest count", () => {
+    const s = formatBeacon(ov("beta", 0, 5), false);
+    expect(s).toContain("0 repo + 5 global memories:");
+    expect(s).not.toMatch(/\n {3}repo:/);
+    expect(s).toMatch(/global: +k3s\(3\)/);
+  });
+  test("zero-global omits the global line", () => {
+    const s = formatBeacon(ov("beta", 5, 0), false);
+    expect(s).toContain("5 repo + 0 global memories:");
+    expect(s).not.toMatch(/\n {3}global:/);
+    expect(s).toMatch(/repo: +jdk\(2\)/);
+  });
+  test("histogram lines cap at 12 tags with a (+N more) overflow", () => {
+    const many = Array.from({ length: 15 }, (_, i) => ({ tag: `t${String(i).padStart(2, "0")}`, count: 15 - i }));
+    const wide: ProjectOverview = {
+      project: "beta", total: 15, tags: many,
+      byType: { user: 0, feedback: 0, project: 15, reference: 0 },
+      repo: { total: 15, tags: many }, global: { total: 0, tags: [] },
+    };
+    const s = formatBeacon(wide, false);
+    expect(s).toContain("t11(4)");        // 12th tag shown
+    expect(s).not.toContain("t12(3)");    // 13th capped
+    expect(s).toContain("(+3 more)");
+  });
+  test("a scope with facts but no tags renders (untagged)", () => {
+    const bare: ProjectOverview = {
+      project: "x", total: 2, tags: [],
+      byType: { user: 0, feedback: 0, project: 2, reference: 0 },
+      repo: { total: 2, tags: [] }, global: { total: 0, tags: [] },
+    };
+    expect(formatBeacon(bare, false)).toContain("(untagged)");
   });
 });
 
@@ -221,7 +246,7 @@ describe("runBeacon orchestration (tfu)", () => {
   // PreToolUse). The throttle must run first; throttled calls never touch the corpus.
   test("throttled call does not scan the corpus (qmemd-abi)", () => {
     let scans = 0;
-    const overview = (_root: string, project: string) => { scans++; return ov(project, 14); };
+    const overview = (_root: string, project: string) => { scans++; return ov(project, 14, 0); };
     const deps = { memoryRoot: root, cacheDir: cache, everyN: 20, overview };
     expect(runBeacon(evt(), deps)).toContain("beta"); // first call fires → one scan
     expect(scans).toBe(1);
@@ -232,7 +257,8 @@ describe("runBeacon orchestration (tfu)", () => {
   test("fact-less repo advances the throttle: scan runs 1/everyN, not every call (qmemd-abi)", () => {
     let scans = 0;
     const empty = (project: string): ProjectOverview =>
-      ({ project, total: 0, tags: [], byType: { user: 0, feedback: 0, project: 0, reference: 0 } });
+      ({ project, total: 0, tags: [], byType: { user: 0, feedback: 0, project: 0, reference: 0 },
+         repo: { total: 0, tags: [] }, global: { total: 0, tags: [] } });
     const overview = (_root: string, project: string) => { scans++; return empty(project); };
     const deps = { memoryRoot: root, cacheDir: cache, everyN: 20, overview };
     expect(runBeacon(evt(), deps)).toBeNull(); // pivot fire-attempt → scan → empty → silent
@@ -246,13 +272,15 @@ describe("runBeacon orchestration (tfu)", () => {
       project, total,
       tags: total ? [{ tag: "jdk", count: 2 }] : [],
       byType: { user: 0, feedback: 0, project: total, reference: 0 },
+      repo: { total, tags: total ? [{ tag: "jdk", count: 2 }] : [] },
+      global: { total: 0, tags: [] },
     });
     const deps = { memoryRoot: root, cacheDir: cache, everyN: 2, overview };
     expect(runBeacon(evt(), deps)).toBeNull();      // call 1: fire-attempt, corpus empty
     total = 3;                                      // facts appear mid-session
     expect(runBeacon(evt(), deps)).toBeNull();      // call 2: sinceLast=1 < 2 — throttled
     const out = runBeacon(evt(), deps);             // call 3: sinceLast=2 ≥ 2 → fires
-    expect(out).toContain("3 memories for this repo:"); // full table…
+    expect(out).toContain("3 repo + 0 global memories:"); // full table…
     expect(out).toContain("jdk(2)");                    // …not the terse one-liner
   });
 

@@ -462,13 +462,14 @@ async function main() {
     }
     case "tags": {
       // Model-free tag(count) overview for a project (defaults to cwd basename).
+      // Split repo vs global (mirrors the beacon; uncapped — this IS the full view).
       const project = values.project ?? basename(process.cwd());
       const ov = projectOverview(root, project);
       if (values.json) { console.log(JSON.stringify(ov)); break; }
       if (ov.total === 0) { console.log(`${d}No memories for ${project}.${r}`); break; }
-      const shape = formatTagHistogram(ov.tags) || "(untagged)";
-      console.log(`${cy}${project}${r} — ${ov.total} memories ${d}(project ${ov.byType.project}, reference ${ov.byType.reference}, user ${ov.byType.user}, feedback ${ov.byType.feedback})${r}`);
-      console.log(`  ${shape}`);
+      console.log(`${cy}${project}${r} — ${ov.repo.total} repo + ${ov.global.total} global memories ${d}(project ${ov.byType.project}, reference ${ov.byType.reference}, user ${ov.byType.user}, feedback ${ov.byType.feedback})${r}`);
+      if (ov.repo.total > 0) console.log(`  repo:   ${formatTagHistogram(ov.repo.tags) || "(untagged)"}`);
+      if (ov.global.total > 0) console.log(`  global: ${formatTagHistogram(ov.global.tags) || "(untagged)"}`);
       break;
     }
     case "stale": {

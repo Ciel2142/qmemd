@@ -2894,6 +2894,40 @@ describe("projectOverview (tfu)", () => {
     expect(ov.total).toBe(0);
     expect(ov.tags).toEqual([]);
   });
+
+  test("splits repo-scoped vs global facts into repo/global sub-overviews", async () => {
+    await write("project", "a", "beta", ["jdk", "build"]);
+    await write("project", "b", "beta", ["jdk"]);
+    await write("project", "c", "global", ["k3s"]);
+    await write("project", "d", "other-repo", ["nope"]); // excluded entirely
+    const ov = projectOverview(root, "beta", ["project", "reference"]);
+    // mixed fields unchanged
+    expect(ov.total).toBe(3);
+    expect(formatTagHistogram(ov.tags)).toBe("jdk(2) build(1) k3s(1)");
+    // new split
+    expect(ov.repo.total).toBe(2);
+    expect(formatTagHistogram(ov.repo.tags)).toBe("jdk(2) build(1)");
+    expect(ov.global.total).toBe(1);
+    expect(formatTagHistogram(ov.global.tags)).toBe("k3s(1)");
+  });
+
+  test("listFacts entries carry the frontmatter project", async () => {
+    await write("project", "a", "beta", ["jdk"]);
+    await write("project", "c", "global", ["k3s"]);
+    const entries = listFacts(root, { project: "beta" });
+    expect(entries.find(e => e.slug === "a")?.project).toBe("beta");
+    expect(entries.find(e => e.slug === "c")?.project).toBe("global");
+  });
+
+  test("querying project 'global' puts everything in global, repo stays 0", async () => {
+    await write("project", "c", "global", ["k3s"]);
+    await write("project", "d", "other-repo", ["nope"]); // gated out
+    const ov = projectOverview(root, "global", ["project", "reference"]);
+    expect(ov.repo.total).toBe(0);
+    expect(ov.repo.tags).toEqual([]);
+    expect(ov.global.total).toBe(1);
+    expect(ov.total).toBe(1);
+  });
 });
 
 describe("platform primitives (platform scoping)", () => {

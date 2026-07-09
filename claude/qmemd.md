@@ -18,9 +18,10 @@ The snapshot injects every user + feedback fact (complete) but only the **most r
 
 Full how-to: the `qmemd-memory` skill.
 
-**Memory-presence beacon:** when you see a `💡 qmemd · <repo> — N memories…` line injected
-before a Bash command, qmemd is telling you it holds N project/reference facts for this repo
-that you have not loaded this session. Treat it as a prompt to `recall` the relevant `tag` (e.g.
+**Memory-presence beacon:** when you see a `💡 qmemd · <repo> — R repo + G global memories…`
+line injected before a Bash command, qmemd is telling you it holds R project/reference facts
+scoped to this repo plus G global ones (each scope's top tags listed on its own line, capped).
+Treat it as a prompt to `recall` the relevant `tag` (e.g.
 `qmemd recall "<repo> build"`) **before** diagnosing — especially build/toolchain errors. The
 beacon is throttled (re-fires only on a repo pivot or every ~20 Bash calls) and never blocks the
 command. `qmemd tags [--project p]` prints the same overview on demand.
