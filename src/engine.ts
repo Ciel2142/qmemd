@@ -428,7 +428,12 @@ export function parseMemory(content: string): ParsedMemory {
       for (const line of block.split(/\r?\n/)) {
         const m = line.match(/^([a-z_]+):\s*(.*)$/i);
         if (!m) continue;
-        const key = m[1]!;
+        // Lowercase the captured key (qp-parsememory-case-sensitive-keys-cke): the regex is /i, so
+        // a capitalized key (Type:, Review_by:) matches the line but would fall through the
+        // lowercase-literal switch and be silently dropped — while doctor's inspect() lowercases
+        // keys and blesses the file clean. Lowercasing here honors the /i intent and keeps the two
+        // frontmatter decoders in agreement.
+        const key = m[1]!.toLowerCase();
         const val = (m[2] ?? "").trim();
         switch (key) {
           case "name": fm.name = unquoteScalar(val); break;

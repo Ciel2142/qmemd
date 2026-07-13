@@ -2654,6 +2654,16 @@ describe("parseMemory frontmatter type safety (h4j)", () => {
     expect(fm.tags.length).toBe(3);
     expect(fm.tags.every(t => typeof t === "string")).toBe(true);
   });
+
+  test("a miscased frontmatter key is decoded, not silently dropped (qp-cke)", () => {
+    // The key regex is /i, so a capitalized key matched the line but fell through the
+    // lowercase-literal switch: fm.type stayed the `reference` default and fm.reviewBy was lost
+    // (fact dropped to the never-reviewed lane) — while doctor's lowercasing inspect() blessed it.
+    const fm = parseMemory("---\nName: n\nType: project\nReview_by: 2026-01-01\n---\nbody\n").frontmatter;
+    expect(fm.name).toBe("n");
+    expect(fm.type).toBe("project");
+    expect(fm.reviewBy).toBe("2026-01-01");
+  });
 });
 
 describe("parseMemory source field empty-string policy (qmemd-9go)", () => {
