@@ -3835,6 +3835,12 @@ describe("reviewByFromTtl (9su)", () => {
     expect(() => reviewByFromTtl("90", from)).toThrow(/^invalid ttl/);
     expect(() => reviewByFromTtl("0d", from)).toThrow(/^invalid ttl/);
   });
+  test("an astronomically large ttl is the 'invalid ttl' client error, not an uncaught RangeError (qp-bql)", () => {
+    // Shape-valid but past the Date epoch: it must raise the intended path-free ClientError,
+    // not let `new Date(overflow).toISOString()` throw RangeError (→ CLI stack, REST 500).
+    expect(() => reviewByFromTtl("999999999d", from)).toThrow(/^invalid ttl/);
+    expect(() => reviewByFromTtl("3000000y", from)).toThrow(/^invalid ttl/);
+  });
 });
 
 describe("parseTtlDays (s4w)", () => {
@@ -3846,6 +3852,11 @@ describe("parseTtlDays (s4w)", () => {
     expect(parseTtlDays("0d")).toBeNull();
     expect(parseTtlDays("soon")).toBeNull();
     expect(parseTtlDays("90")).toBeNull();
+  });
+  test("a day count past the epoch-overflow bound is null, not a huge finite number (qp-bql)", () => {
+    expect(parseTtlDays("999999999d")).toBeNull();
+    expect(parseTtlDays("3000000y")).toBeNull();
+    expect(parseTtlDays("100y")).toBe(36500); // a generous-but-sane window still parses
   });
 });
 
@@ -3867,6 +3878,12 @@ describe("ttlDefaultDays (s4w)", () => {
     expect(ttlDefaultDays("reference")).toBeNull();
     process.env.QMEMD_TTL_PROJECT = "garbage";
     expect(ttlDefaultDays("project")).toBe(90); // unparseable → hardcoded default, never throws
+  });
+  test("a parseable-but-overflowing env override falls back to the default, never throws (qp-bql)", () => {
+    // Contract: never-throw. A huge env override must not flow a Date-overflowing day count into
+    // staleFacts/doctor, which would RangeError on the first never-reviewed fact of a healthy corpus.
+    process.env.QMEMD_TTL_PROJECT = "3000000y";
+    expect(ttlDefaultDays("project")).toBe(90);
   });
 });
 

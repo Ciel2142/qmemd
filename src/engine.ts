@@ -131,7 +131,14 @@ export function parseTtlDays(ttl: string): number | null {
   const n = parseInt(m[1]!, 10);
   if (n < 1) return null;
   const DAYS: Record<string, number> = { d: 1, w: 7, m: 30, y: 365 };
-  return n * DAYS[m[2]!.toLowerCase()]!;
+  const total = n * DAYS[m[2]!.toLowerCase()]!;
+  // Upper bound (qp-ttl-overflow-crash-bql): a Date is valid only to ±8.64e15 ms (≈ year 275760).
+  // A shape-valid but astronomically large ttl (999999999d, an env override 3000000y) would push
+  // reviewByFromTtl's `from + total*86.4e6` past that so new Date(...).toISOString() throws an
+  // uncaught RangeError, and would flow a huge day count into staleFacts/doctor. Treat it as
+  // malformed (null): reviewByFromTtl then raises the intended "invalid ttl" ClientError and
+  // ttlDefaultDays falls back to its default — MAX_TTL_DAYS (~100,000y) clears every real window.
+  return total > 36_500_000 ? null : total;
 }
 
 /**
