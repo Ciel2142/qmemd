@@ -189,8 +189,16 @@ export function memoryFilePath(root: string, type: MemoryType, slug: string): st
  * only ever emits [a-z0-9-] and fallbackSlug() emits "mem-<hex>", so guarding the
  * finalized slug never rejects a legitimately computed one.
  */
+/** Non-throwing form of the assertSafeSlug check: true when `slug` is a single safe path
+ *  segment (non-empty, no '/', '\', '..', or newline). Used where a malformed value must be
+ *  SKIPPED rather than surfaced as a client error — e.g. a stale/malformed Tier-2 dedup index
+ *  hit whose path is not <memory-type>/<slug>.md (qp-tier2-malformed-row-abort-o1m). */
+export function isSafeSlug(slug: string): boolean {
+  return slug !== "" && !/[\\/]|\.\.|[\n\r]/.test(slug);
+}
+
 export function assertSafeSlug(slug: string): void {
-  if (slug === "" || /[\\/]|\.\.|[\n\r]/.test(slug)) {
+  if (!isSafeSlug(slug)) {
     throw new ClientError(`unsafe slug ${JSON.stringify(slug)}: must be a single path segment with no '/', '\\', '..', or newline`);
   }
 }
@@ -1074,18 +1082,6 @@ async function reindexMemory(store: QMDStore): Promise<void> {
   await store.update({ collections: [MEMORY_COLLECTION] });
 }
 
-/**
- * Extract the slug from a SearchResult.filepath virtual path.
- * filepath format: "qmd://memory/type/slug.md"
- * Falls back to displayPath ("memory/type/slug.md") or the raw string.
- */
-function slugFromFilepath(filepath: string): string {
-  // Strip "qmd://" prefix if present, then take the last segment minus ".md"
-  const stripped = filepath.startsWith("qmd://") ? filepath.slice(6) : filepath;
-  const last = stripped.split("/").pop() ?? "";
-  return last.replace(/\.md$/, "") || stripped;
-}
-
 /** Build the near-duplicate preview (the matched fact's description + a capped, ellipsised
  *  body) for a blocked remember, so the decider can see what it collided with (qmemd-cs0).
  *  Best-effort: returns {} when the file is missing/unreadable — the block still reports
@@ -1611,28 +1607,38 @@ export async function remember(
     const hits = await store.searchLex(normalizeForHash(input.fact), { limit: 1, collection: MEMORY_COLLECTION });
     const top = hits[0];
     if (top !== undefined && top.score > DEDUP_SCORE_FTS) {
-      const dupSlug = slugFromFilepath(top.filepath);
-      // searchFTS returns a virtual "qmd://memory/<type>/<slug>.md" path; resolve
-      // it back to a real filesystem path and the hit's actual type so the return
-      // shape matches the Tier-1 (file-existence) branch.
-      const stripped = top.filepath.startsWith("qmd://") ? top.filepath.slice(6) : top.filepath;
-      const dupType = (stripped.split("/").slice(-2, -1)[0] ?? type) as MemoryType;
-      const dupPath = memoryFilePath(root, dupType, dupSlug);
-      // An FTS hit is usually a paraphrase to BLOCK, but BM25 also matches a CONTRADICTION
-      // whose differing value still shares enough terms to clear the (tiny) floor — e.g.
-      // "…JDK 21" vs "…JDK 25", where the i5y AND-query assumption does not hold and Tier-2
-      // fires before Tier-2.5 can classify (qmemd-5td). Classify here too instead of assuming
-      // "duplicate", mirroring Tier-2.5, so an FTS-caught conflict SURFACES with its authority
-      // comparison rather than being silently swallowed as a dup. Fall back to "duplicate" if
-      // the matched fact is unreadable (mirrors duplicatePreview — never block on the lookup).
-      const existing = getFact(root, dupSlug);
-      const disposition: RememberDisposition = existing
-        ? classifyNearMatch(`${slug} ${firstLine(input.fact)}`, `${existing.frontmatter.name} ${firstLine(existing.body)}`)
-        : "duplicate";
-      // No write happened, so nothing is newly unindexed (qmemd-32x). Surface the
-      // matched fact so the decider isn't blocked blind (qmemd-cs0).
-      return { wrote: false, slug: dupSlug, path: dupPath, type: dupType, duplicateOf: dupSlug, disposition, indexed: true, synced: true, dedupSkipped, ...duplicatePreview(root, dupSlug),
-        ...(disposition === "conflict" ? { authorityComparison: buildAuthorityComparison(root, type, input.source, dupSlug) } : {}) };
+      // searchFTS returns a virtual "qmd://memory/<type>/<slug>.md" path; resolve it back to a
+      // real type + slug. A stale/malformed index row (an out-of-band file adopted via `qmemd
+      // reindex` whose path is not <memory-type>/<slug>.md) can be the top lex hit — validate it
+      // the way recallQuery's toHit does (qmemd-4ri) and SKIP a bad row rather than acting on it.
+      // Before this, a multi-segment slug fallback ("memory/user/.md") + an unvalidated getFact threw
+      // ClientError('unsafe slug') for such a row (qp-tier2-malformed-row-abort-o1m), aborting an
+      // unrelated remember until the index was rebuilt; an unvalidated type cast could also return
+      // a bogus dupType. A skipped row falls through to the model-free Tier-2.5 disk scan below,
+      // which reads real files and is immune to index corruption.
+      const { type: rawType, slug: dupSlug } = parseVirtualMemoryPath(top.filepath);
+      if ((MEMORY_TYPES as string[]).includes(rawType) && isSafeSlug(dupSlug)) {
+        const dupType = rawType as MemoryType;
+        const dupPath = memoryFilePath(root, dupType, dupSlug);
+        // An FTS hit is usually a paraphrase to BLOCK, but BM25 also matches a CONTRADICTION
+        // whose differing value still shares enough terms to clear the (tiny) floor — e.g.
+        // "…JDK 21" vs "…JDK 25", where the i5y AND-query assumption does not hold and Tier-2
+        // fires before Tier-2.5 can classify (qmemd-5td). Classify here too instead of assuming
+        // "duplicate", mirroring Tier-2.5, so an FTS-caught conflict SURFACES with its authority
+        // comparison rather than being silently swallowed as a dup. Fall back to "duplicate" if
+        // the matched fact is unreadable — wrap the lookup best-effort (mirrors duplicatePreview),
+        // so a parse error on the matched file never aborts this write either.
+        let existing: FullFact | null = null;
+        try { existing = getFact(root, dupSlug); } catch { existing = null; }
+        const disposition: RememberDisposition = existing
+          ? classifyNearMatch(`${slug} ${firstLine(input.fact)}`, `${existing.frontmatter.name} ${firstLine(existing.body)}`)
+          : "duplicate";
+        // No write happened, so nothing is newly unindexed (qmemd-32x). Surface the
+        // matched fact so the decider isn't blocked blind (qmemd-cs0).
+        return { wrote: false, slug: dupSlug, path: dupPath, type: dupType, duplicateOf: dupSlug, disposition, indexed: true, synced: true, dedupSkipped, ...duplicatePreview(root, dupSlug),
+          ...(disposition === "conflict" ? { authorityComparison: buildAuthorityComparison(root, type, input.source, dupSlug) } : {}) };
+      }
+      console.error(`[qmemd] remember: skipping malformed Tier-2 index hit '${top.filepath}' (not a <memory-type>/<slug>.md path) — run qmemd reindex`);
     }
 
     // Tier 2.5: model-free near-duplicate pre-pass (qmemd-i5y) + contradiction classifier

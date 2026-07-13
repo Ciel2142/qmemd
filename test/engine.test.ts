@@ -3720,6 +3720,43 @@ describe("hybrid candidateLimit rerank cap (qp-hybrid-recall-40-candidate-cap-4u
   });
 });
 
+describe("Tier-2 dedup skips a malformed index row (qp-tier2-malformed-row-abort-o1m)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-tier2-bad-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  // A stale/malformed index row (an out-of-band file adopted via `qmemd reindex` whose virtual
+  // path is not <memory-type>/<slug>.md) becomes the top-1 lex hit for a NEW remember. Before the
+  // fix, slugFromFilepath's multi-segment fallback ("memory/user/.md") + an unvalidated getFact
+  // threw ClientError('unsafe slug'), aborting the unrelated write until the index was rebuilt.
+  function malformedTopHitStore(filepath: string) {
+    return {
+      async searchLex() { return [{ filepath, title: "", score: 1 }]; },
+      async update() { return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0 }; },
+    } as unknown as QMDStore;
+  }
+
+  test("a malformed top lex hit does not abort the write; the new fact is stored", async () => {
+    const { remember, getFact } = await import("../src/engine.js");
+    const res = await remember(malformedTopHitStore("qmd://memory/user/.md"), root, {
+      fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project",
+    });
+    expect(res.wrote).toBe(true);
+    expect(res.slug).not.toContain("/"); // never the malformed multi-segment path
+    expect(getFact(root, res.slug)).not.toBeNull();
+  });
+
+  test("a non-memory-type index row is skipped, not treated as a duplicate", async () => {
+    const { remember } = await import("../src/engine.js");
+    // Valid slug, but the type segment ('junk') is not a MemoryType — a corrupt/stale row.
+    const res = await remember(malformedTopHitStore("qmd://memory/junk/orphan.md"), root, {
+      fact: "The night shift starts at 22:00 sharp", type: "project",
+    });
+    expect(res.wrote).toBe(true);
+    expect(res.duplicateOf).toBeUndefined();
+  });
+});
+
 describe("completenessFooter (40h)", () => {
   test("returns null when nothing is hidden (40h footer)", async () => {
     const { completenessFooter } = await import("../src/engine.js");
