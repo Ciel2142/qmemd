@@ -703,8 +703,13 @@ export async function startMcpHttpServer(
           sendJson(nodeRes, 400, { error: "minScore must be a number >= 0" });
           return;
         }
-        const limit = body.limit !== undefined && Number.isFinite(Number(body.limit))
-          ? Math.max(1, Math.floor(Number(body.limit)))
+        // Only a real finite number is a limit (qp-rest-recall-limit-coercion-3y5): the old
+        // Number()-coercion turned null/false/""/[]  — all common "unset" idioms — into 0, which
+        // passed Number.isFinite and clamped to Math.max(1,…)=1, silently capping recall to ONE
+        // hit (with moreMatches>0 masquerading as legit top-N). typeof-guard so every non-number
+        // falls through to the engine default (10), matching this block's stated intent.
+        const limit = typeof body.limit === "number" && Number.isFinite(body.limit)
+          ? Math.max(1, Math.floor(body.limit))
           : undefined;
         // Specific-platform scoping (qmemd-5gx REST half, shipped with vuk for CLI
         // delegation parity): validate against the closed set, and reject the combo with
@@ -769,6 +774,24 @@ export async function startMcpHttpServer(
         if (body.reviewBy !== undefined && typeof body.reviewBy !== "string") {
           sendJson(nodeRes, 400, { error: "reviewBy must be a YYYY-MM-DD string" });
           return;
+        }
+        // Type parity with the MCP zod layer (qp-rest-remember-typecheck-parity-scj): pin/force
+        // are booleans and project/source/as/replace/supersedes are strings there. Passed
+        // verbatim, a mistyped value silently CORRUPTS the fact — pin:"yes" serializes
+        // `pinned: yes` which parseMemory reads as NOT pinned (wrote:true, but unpinned), and
+        // project:123 scopes the fact to a name no basename(cwd)/global recall gate ever matches
+        // (stored yet permanently invisible). Reject a mismatch with 400, like the checks above.
+        for (const k of ["pin", "force"] as const) {
+          if (body[k] !== undefined && typeof body[k] !== "boolean") {
+            sendJson(nodeRes, 400, { error: `${k} must be a boolean` });
+            return;
+          }
+        }
+        for (const k of ["project", "source", "as", "replace", "supersedes"] as const) {
+          if (body[k] !== undefined && typeof body[k] !== "string") {
+            sendJson(nodeRes, 400, { error: `${k} must be a string` });
+            return;
+          }
         }
         const res = await remember(store, root, {
           fact: body.fact, type: body.type as MemoryType | undefined, tags: body.tags,

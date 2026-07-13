@@ -404,6 +404,39 @@ describe("HTTP server: robustness on malformed/oversized local requests (qp-daem
   });
 });
 
+describe("HTTP server: REST input-validation parity, part 2 (qp-rest-recall-limit-coercion-3y5 + qp-rest-remember-typecheck-parity-scj)", () => {
+  const post = (path: string, body: unknown) => fetch(`${baseUrl}${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+
+  test("3y5: {limit:null} is treated as unset (engine default), not silently coerced to 1", async () => {
+    // Seed three lexically-matching facts (model-free lex writes) under a unique token.
+    for (const s of ["alpha", "beta", "gamma"]) {
+      await post("/remember", { fact: `wibbletoken scoping marker ${s}`, type: "project" });
+    }
+    // null is the common "unset" idiom. The bug coerced Number(null)=0 -> Math.max(1,..)=1, so
+    // the caller got ONE hit + moreMatches>0 (looks like legit top-N) and missed the rest.
+    const res = await post("/recall", { query: "wibbletoken", lexOnly: true, limit: null });
+    expect(res.status).toBe(200);
+    const j = await res.json() as { hits: unknown[] };
+    expect(j.hits.length).toBeGreaterThan(1); // default 10 surfaces all three; the bug capped it to 1
+  });
+
+  test("scj: pin as a non-boolean -> 400 (would else serialize `pinned: yes` and read back NOT pinned)", async () => {
+    expect((await post("/remember", { fact: "pin-parity marker", type: "project", pin: "yes" })).status).toBe(400);
+  });
+
+  test("scj: project as a non-string -> 400 (would else scope the fact invisible to every recall)", async () => {
+    expect((await post("/remember", { fact: "project-parity marker", type: "project", project: 123 })).status).toBe(400);
+  });
+
+  test("scj: a well-typed pin:true still writes (no over-rejection)", async () => {
+    const res = await post("/remember", { fact: "well-typed pin sanity marker unique-xq7", type: "project", pin: true });
+    expect(res.status).toBe(200);
+    expect((await res.json() as { wrote: boolean }).wrote).toBe(true);
+  });
+});
+
 describe("localhost guard predicates (qmemd-1z9)", () => {
   test("isLoopbackHost accepts only loopback hostnames, ignoring port", () => {
     expect(isLoopbackHost("localhost:8182")).toBe(true);
