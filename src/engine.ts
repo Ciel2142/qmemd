@@ -2299,8 +2299,14 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   // Raw hit.score is never mutated — the sort key uses a derived bucket, not the score field.
   const recencyOf = (fm: ParsedMemory | null): string =>
     fm ? (fm.frontmatter.updated ?? fm.frontmatter.created) : "";
+  // lexFallback, like lexOnly, ranks raw BM25 (searchLex) — NOT a calibrated 0..1 rerank score.
+  // qmd normalizes BM25 to a saturating [0..1) where strong matches compress above 0.9, so
+  // bucketing it by RECENCY_TIE_BUCKET collapses genuinely different-relevance hits into ties
+  // (qp-degraded-lex-hybrid-bucketing-7tm). Both lex paths must therefore key on the EXACT score
+  // and let only exact ties break by recency, never the 0.02 bucket.
+  const lexRanked = opts.lexOnly || lexFallback;
   const scoreKey = (s: number | undefined): number =>
-    opts.lexOnly ? (s ?? -1) : Math.round((s ?? -1) / RECENCY_TIE_BUCKET);
+    lexRanked ? (s ?? -1) : Math.round((s ?? -1) / RECENCY_TIE_BUCKET);
   // Overlap tie-break (qp-dnx): WITHIN an equal score bucket, a fact whose {slug∪project∪tags}
   // shares distinctive tokens with the query orders ahead of an equally-relevant one that does
   // not — fixing the reranker's under-weighting of project-named facts. Pure tie-break: ranked
@@ -2308,7 +2314,11 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   // holds). Hybrid only, gated by the same QMEMD_RESCUE_DELTA>0 master switch as the rescue, so
   // delta=0 is bit-exact pre-feature. Raw hit.score is never mutated — overlap is a derived key.
   const delta = rescueDelta();
-  const boostOn = !opts.lexOnly && delta > 0;
+  // The overlap tie-break is a HYBRID-only refinement (it presumes the calibrated bucket above);
+  // on either lex path the exact score already orders the hits, so gate it off for lexFallback
+  // too — otherwise a degraded recall lets query-slug overlap reorder exact-scored lex hits
+  // (qp-degraded-lex-hybrid-bucketing-7tm).
+  const boostOn = !lexRanked && delta > 0;
   // Gate the below-floor candidates NOW (not just for the rescue below) so the pool-DF map can
   // span the WHOLE in-hand pool — above- AND below-floor — that the tie-break + rescue draw from
   // (qp-mgm). gate() reuses parseOnce's cache, so this is bounded reads, no extra search.

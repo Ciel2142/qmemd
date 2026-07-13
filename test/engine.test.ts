@@ -2313,6 +2313,46 @@ describe("hybrid search failure — fail open to lex on a fully-embedded corpus 
   });
 });
 
+describe("degraded lex recall uses exact-tie lex semantics, not hybrid bucketing (qp-degraded-lex-hybrid-bucketing-7tm)", () => {
+  // scoreKey/boostOn gated only on opts.lexOnly, but runSearch routes a lexFallback (degraded)
+  // recall to searchLex too. So a degraded recall bucketed qmd-normalized BM25 (saturating,
+  // compressed >0.9) by RECENCY_TIE_BUCKET as if it were a calibrated rerank score AND enabled
+  // the hybrid-only overlap tie-break — a genuinely stronger match could be bucketed into a tie
+  // and reordered below a weaker query-slug-overlapping one, then sliced out of the top-limit.
+  const root = "/tmp/qmemd-fake-7tm";
+
+  // Embed barrier THROWS (pending>0) ⇒ lexFallback path. searchLex returns two hits whose
+  // normalized BM25 scores share one RECENCY_TIE_BUCKET (0.984, 0.981 → bucket 49) but differ:
+  // the WEAKER hit's slug overlaps the query, so the hybrid overlap tie-break (on by default,
+  // DEFAULT_RESCUE_DELTA>0) would float it above the stronger one under the bug.
+  function fakeStore() {
+    return {
+      async getStatus() { return { totalDocuments: 2, needsEmbedding: 2, hasVectorIndex: true, collections: [] }; },
+      async embed() { throw new Error("model unavailable"); },
+      async searchLex() {
+        return [
+          { filepath: "qmd://memory/user/zeta.md", title: "Zeta", score: 0.984 },  // stronger, no query overlap
+          { filepath: "qmd://memory/user/alpha.md", title: "Alpha", score: 0.981 }, // weaker, slug overlaps query
+        ];
+      },
+    } as unknown as QMDStore;
+  }
+
+  test("a stronger degraded-lex hit is not bucketed/overlap-reordered below a weaker query-overlap hit", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { recallQueryWithStatus } = await import("../src/engine.js");
+      const res = await recallQueryWithStatus(fakeStore(), root, "alpha");
+      expect(res.degraded).toBe(true);
+      // Exact lex score order: stronger (zeta 0.984) first, weaker (alpha 0.981) second. Under
+      // the bug both land in bucket 49 and alpha's slug/query overlap floats it to the top.
+      expect(res.hits.map(h => h.slug)).toEqual(["zeta", "alpha"]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
 describe("recall drops malformed index paths (qmemd-4ri)", () => {
   // parseVirtualMemoryPath yields type:"" for an index filepath missing its <type>/
   // segment. The old `(type || "reference") as MemoryType` fallback silently relabeled
