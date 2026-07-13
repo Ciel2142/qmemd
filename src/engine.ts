@@ -1518,8 +1518,13 @@ export async function remember(
   // inherit, an in-place update silently wipes tags/project/pin/source and re-stamps
   // created (qmemd-q65). Null when the slug does not exist yet (e.g. --force on a new
   // slug), in which case the fm build below falls through to plain defaults.
+  // NOT the --supersedes path (qp-supersedes-slug-collision-overwrite-kyd): supersede mints a
+  // brand-new fact under a NEW slug, so it must never adopt (and then overwrite) whatever fact
+  // happens to already carry that slug — a coincidental collision would silently replace an
+  // unrelated victim and, if the victim was retired, birth the successor with its superseded_by.
+  // The supersede block below rejects such a collision outright.
   let existing: FullFact | null = null;
-  if (input.replace || input.force || input.supersedes) {
+  if (input.replace || input.force) {
     existing = getFact(root, slug);
     if (existing) type = existing.type;
   }
@@ -1543,6 +1548,14 @@ export async function remember(
   if (input.supersedes !== undefined) {
     supersedeTarget = getFact(root, input.supersedes);
     if (!supersedeTarget) throw new ClientError(`no fact named '${input.supersedes}' to supersede`);
+    // The successor's slug (derived from its text, or --as) must be free: supersede skips every
+    // dedup tier, so without this the Tier-1 slug-existence check never runs and writeFileSync
+    // would overwrite an unrelated fact sharing the slug (qp-supersedes-slug-collision-overwrite-kyd).
+    // Self-supersede (slug === input.supersedes) is already rejected above, so any hit here is a
+    // DIFFERENT fact. Client-facing (400) — the caller disambiguates with --as <unique-slug>.
+    if (getFact(root, slug)) {
+      throw new ClientError(`cannot supersede: the new fact's slug '${slug}' already names a different fact — pass --as <unique-slug> to disambiguate`);
+    }
   }
 
   // NON-PORT (mem0 add(infer=True)): qmemd never LLM-distills a fact from a transcript on

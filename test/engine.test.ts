@@ -3638,6 +3638,24 @@ describe("remember --supersedes (bri)", () => {
       .rejects.toThrow(/cannot be combined with replace/);
   });
 
+  it("rejects when the new fact's slug collides with an unrelated fact, never overwriting it (qp-kyd)", async () => {
+    const { remember, getFact } = await import("../src/engine.js");
+    await seed("old-truth");
+    // A pre-existing, unrelated fact that happens to share the new fact's slug (realistic via
+    // 60-char slugify truncation; forced here with --as). It is even retired, so a silent
+    // overwrite would make the successor inherit superseded_by and be born hidden.
+    await mkdir(join(root, "reference"), { recursive: true });
+    await writeFile(join(root, "reference", "victim-slug.md"),
+      `---\nname: victim-slug\ndescription: d\ntype: reference\ntags: []\nproject: global\ncreated: 2019-01-01\npinned: false\nsuperseded_by: something-else\n---\n\nthe unrelated victim body\n`);
+    await expect(remember(store, root, { fact: "brand new durable fact", type: "project", as: "victim-slug", supersedes: "old-truth" }, git))
+      .rejects.toThrow(/slug 'victim-slug' already names a different fact/);
+    // The victim is byte-identical — never overwritten.
+    expect(readFileSync(join(root, "reference", "victim-slug.md"), "utf-8"))
+      .toContain("the unrelated victim body");
+    // The supersede target was NOT retired by a failed run.
+    expect(getFact(root, "old-truth")!.frontmatter.supersededBy).toBeUndefined();
+  });
+
   it("surfaces a warning when the target has no frontmatter fence, instead of silently no-op'ing (qp-yf2 C7)", async () => {
     const { remember } = await import("../src/engine.js");
     // A fenceless hand-written/adopted fact whose body contains --- rules:
