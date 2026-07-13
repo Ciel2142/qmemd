@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { openMemoryStore } from "../store.js";
 import { type QMDStore } from "@tobilu/qmd";
-import { remember, recallQueryWithStatus, recallSession, forget as forgetFact, markReviewed, getFact, listFacts, pendingVectorPhrase, completenessFooter, MEMORY_TYPES, PLATFORMS, DEFAULT_MIN_SCORE, type RecallHit, type FullFact, type ListEntry, type MemoryType, type Platform, type RememberResult } from "../engine.js";
+import { remember, recallQueryWithStatus, recallSession, forget as forgetFact, markReviewed, getFact, listFacts, pendingVectorPhrase, completenessFooter, ClientError, MEMORY_TYPES, PLATFORMS, DEFAULT_MIN_SCORE, type RecallHit, type FullFact, type ListEntry, type MemoryType, type Platform, type RememberResult } from "../engine.js";
 import { memoryRoot } from "../paths.js";
 import { gitPullFfOnly, sessionSyncWarning, type GitDeps } from "../git.js";
 import { rootHash } from "../client.js";
@@ -106,7 +106,10 @@ const RECALL_OUTPUT_SCHEMA = {
 function sanitizeToolError(err: unknown): CallToolResult {
   const msg = err instanceof Error ? err.message : String(err);
   console.error("[qmemd] MCP tool error:", err);
-  const text = msg.startsWith("unsafe slug") || msg.startsWith("no fact named") || msg.startsWith("invalid platform") || msg.startsWith("supersedes cannot") || msg.startsWith("a fact cannot supersede itself") || msg.startsWith("invalid review_by") || msg.startsWith("invalid ttl") ? msg : "internal error";
+  // A ClientError carries a path-free, caller-fixable message safe to surface verbatim; every
+  // other throw is a server fault the model must not see (qmemd-81n). Replaces the hand-synced
+  // message-prefix allowlist that had drifted (qp-ey3-rejection-missing-allowlist-f6j).
+  const text = err instanceof ClientError ? msg : "internal error";
   return { content: [{ type: "text", text }], isError: true };
 }
 
@@ -781,10 +784,11 @@ export async function startMcpHttpServer(
       nodeRes.end("Not Found");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // A client error with a path-free, client-safe message, not a server fault (qmemd-81n):
-      // an unsafe slug (assertSafeSlug, qmemd-fd8), a --replace/--supersedes naming a nonexistent
-      // fact (qmemd-acm/bri), or a bad supersedes combination (bri). 400, not the catch-all 500.
-      if (msg.startsWith("unsafe slug") || msg.startsWith("no fact named") || msg.startsWith("invalid platform") || msg.startsWith("supersedes cannot") || msg.startsWith("a fact cannot supersede itself") || msg.startsWith("invalid review_by") || msg.startsWith("invalid ttl")) { sendJson(nodeRes, 400, { error: msg }); return; }
+      // A ClientError is a caller-fixable request with a path-free, client-safe message (an
+      // unsafe slug qmemd-fd8, a --replace/--supersedes naming a nonexistent fact qmemd-acm/bri,
+      // a bad supersedes combination, an entirely-leaked body qp-ey3): 400, not the catch-all
+      // 500. Replaces the hand-synced message-prefix allowlist (qp-ey3-rejection-missing-allowlist-f6j).
+      if (err instanceof ClientError) { sendJson(nodeRes, 400, { error: msg }); return; }
       console.error("HTTP handler error:", err);
       if (!nodeRes.headersSent) { nodeRes.writeHead(500); nodeRes.end("Internal Server Error"); }
     }

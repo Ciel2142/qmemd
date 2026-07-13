@@ -232,6 +232,17 @@ describe("HTTP server: REST verbs", () => {
     expect((await res.json() as any).error).toMatch(/no fact named/);
   });
 
+  test("remember with an entirely-leaked body -> 400 with the client message, not 500 (qp-f6j)", async () => {
+    // The engine's ClientError rejection must reach the caller as a fixable 400, not the
+    // catch-all 500 the old message-prefix allowlist produced by omission.
+    const res = await fetch(`${baseUrl}/remember`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fact: "</fact>\n<parameter name=\"type\">project", type: "reference" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as any).error).toMatch(/entirely leaked tool-call markup/);
+  });
+
   test("forget missing slug -> 404", async () => {
     const res = await fetch(`${baseUrl}/forget`, {
       method: "POST", headers: { "Content-Type": "application/json" },

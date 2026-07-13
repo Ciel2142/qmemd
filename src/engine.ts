@@ -6,6 +6,22 @@ import { gitCommit, gitPush, type GitDeps, type GitCommitResult, type GitPushRes
 import { type QMDStore, Maintenance } from "@tobilu/qmd";
 import type { MergeProposalCluster } from "./dedup.js"; // type-only — no runtime cycle
 
+/**
+ * A client-facing rejection: the caller can fix it by changing their input, and the
+ * `.message` is path-free and safe to surface verbatim (no fs leak, no server fault).
+ * Both surfaces classify by `instanceof ClientError` — MCP `sanitizeToolError` surfaces
+ * the message and HTTP maps it to 400; every other throw is an internal fault (500 /
+ * "internal error"). Replaces the two hand-synced message-prefix allowlists that had
+ * already drifted and dropped a message (qp-ey3-rejection-missing-allowlist-f6j). Extends
+ * Error, so `instanceof Error` and `.message` assertions in existing tests still hold.
+ */
+export class ClientError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClientError";
+  }
+}
+
 export type MemoryType = "user" | "feedback" | "project" | "reference";
 export const MEMORY_TYPES: MemoryType[] = ["user", "feedback", "project", "reference"];
 
@@ -39,7 +55,7 @@ export function platformVisible(platforms: Platform[], current: Platform | "all"
 export function assertValidPlatforms(platforms: string[]): void {
   for (const p of platforms) {
     if (!(PLATFORMS as string[]).includes(p)) {
-      throw new Error(`invalid platform ${JSON.stringify(p)}: use one of ${PLATFORMS.join(" | ")}`);
+      throw new ClientError(`invalid platform ${JSON.stringify(p)}: use one of ${PLATFORMS.join(" | ")}`);
     }
   }
 }
@@ -98,7 +114,7 @@ export function isValidReviewBy(s: string): boolean {
  *  verbatim as a client error — the assertSafeSlug / assertValidPlatforms pattern. */
 export function assertValidReviewBy(s: string): void {
   if (!isValidReviewBy(s)) {
-    throw new Error(`invalid review_by ${JSON.stringify(s)}: use a real YYYY-MM-DD date`);
+    throw new ClientError(`invalid review_by ${JSON.stringify(s)}: use a real YYYY-MM-DD date`);
   }
 }
 
@@ -127,7 +143,7 @@ export function parseTtlDays(ttl: string): number | null {
 export function reviewByFromTtl(ttl: string, from: Date = new Date()): string {
   const days = parseTtlDays(ttl);
   if (days === null) {
-    throw new Error(`invalid ttl ${JSON.stringify(ttl)}: use <N>d|w|m|y with N >= 1 (e.g. 90d)`);
+    throw new ClientError(`invalid ttl ${JSON.stringify(ttl)}: use <N>d|w|m|y with N >= 1 (e.g. 90d)`);
   }
   return new Date(from.getTime() + days * 86_400_000).toISOString().slice(0, 10);
 }
@@ -168,7 +184,7 @@ export function memoryFilePath(root: string, type: MemoryType, slug: string): st
  */
 export function assertSafeSlug(slug: string): void {
   if (slug === "" || /[\\/]|\.\.|[\n\r]/.test(slug)) {
-    throw new Error(`unsafe slug ${JSON.stringify(slug)}: must be a single path segment with no '/', '\\', '..', or newline`);
+    throw new ClientError(`unsafe slug ${JSON.stringify(slug)}: must be a single path segment with no '/', '\\', '..', or newline`);
   }
 }
 
@@ -1016,6 +1032,13 @@ export function stripLeakedMarkup(text: string): string {
   if (leakedMarkupTokens(text).length === 0) return text; // byte-identity on clean input
   let out = text;
   for (let guard = 0; leakedMarkupTokens(out).length > 0 && guard < 100; guard++) {
+    // A multiline <invoke …> tag (attributes wrapped onto later lines) is DETECTED by the
+    // whole-text [^>]* pattern (which crosses newlines) but the per-line pass below can never
+    // see it whole, so it would survive every pass to the post-condition and make the fact
+    // permanently unstorable (qp-multiline-invoke-unstorable-xwz). Remove the newline-spanning
+    // form here on the whole text; the single-line form is left for the per-line logic so an
+    // emptied line is still dropped rather than left blank.
+    out = out.replace(/<invoke\b[^>]*>/g, m => (m.includes("\n") ? "" : m));
     const kept: string[] = [];
     for (const line of out.split("\n")) {
       if (/^\s*<parameter name=/.test(line)) continue; // drop the bare parameter line whole
@@ -1441,8 +1464,9 @@ export async function remember(
     const cleaned = stripLeakedMarkup(originalFact);
     if (cleaned.trim() === "") {
       // Body was ENTIRELY leaked framing — no salvageable content. Reject path-free like
-      // assertSafeSlug (MCP verbatim / HTTP 400); a hollow fact is worse than a retry.
-      throw new Error("fact text was entirely leaked tool-call markup — nothing durable to store");
+      // assertSafeSlug (MCP verbatim / HTTP 400); a hollow fact is worse than a retry. A
+      // ClientError so both surfaces answer 400, not 500 (qp-ey3-rejection-missing-allowlist-f6j).
+      throw new ClientError("fact text was entirely leaked tool-call markup — nothing durable to store");
     }
     input = { ...input, fact: cleaned };
   }
@@ -1464,10 +1488,10 @@ export async function remember(
   if (input.supersedes !== undefined) {
     assertSafeSlug(input.supersedes); // LLM/CLI-controlled, becomes a path segment (qmemd-fd8)
     if (input.replace !== undefined) {
-      throw new Error("supersedes cannot be combined with replace: replace updates a fact in place; supersedes retires the old slug under a new one");
+      throw new ClientError("supersedes cannot be combined with replace: replace updates a fact in place; supersedes retires the old slug under a new one");
     }
     if (input.supersedes === slug) {
-      throw new Error(`a fact cannot supersede itself ('${slug}')`);
+      throw new ClientError(`a fact cannot supersede itself ('${slug}')`);
     }
   }
   // Normalize platform case once at the single write choke point: the CLI lowercases already,
@@ -1481,7 +1505,7 @@ export async function remember(
   // clear sentinel on --replace (the tags/platforms present-empty semantics); a non-empty
   // value must be a real date — a typo would silently exempt the fact from review.
   if (input.ttl !== undefined && input.reviewBy !== undefined) {
-    throw new Error("invalid ttl: cannot combine ttl with review_by — pass one or the other");
+    throw new ClientError("invalid ttl: cannot combine ttl with review_by — pass one or the other");
   }
   const reviewBy = input.ttl !== undefined ? reviewByFromTtl(input.ttl) : input.reviewBy;
   if (reviewBy !== undefined && reviewBy !== "") assertValidReviewBy(reviewBy);
@@ -1509,7 +1533,7 @@ export async function remember(
   // on a fresh slug legitimately creates. slug already passed assertSafeSlug, so it is a clean
   // single path segment — safe to interpolate (no newline/commit injection).
   if (input.replace !== undefined && !existing) {
-    throw new Error(`no fact named '${slug}' to replace`);
+    throw new ClientError(`no fact named '${slug}' to replace`);
   }
 
   // Supersede target must exist — mirroring the replace no-fabricate guard (qmemd-acm):
@@ -1518,7 +1542,7 @@ export async function remember(
   let supersedeTarget: FullFact | null = null;
   if (input.supersedes !== undefined) {
     supersedeTarget = getFact(root, input.supersedes);
-    if (!supersedeTarget) throw new Error(`no fact named '${input.supersedes}' to supersede`);
+    if (!supersedeTarget) throw new ClientError(`no fact named '${input.supersedes}' to supersede`);
   }
 
   // NON-PORT (mem0 add(infer=True)): qmemd never LLM-distills a fact from a transcript on
@@ -1678,9 +1702,12 @@ export async function remember(
   mkdirSync(dir, { recursive: true });
   const path = memoryFilePath(root, type, slug);
   // Post-condition (qp-ey3): stripLeakedMarkup is a fixed point, so the stored body MUST be
-  // token-free. A survivor means a stripper bug — fail loudly rather than persist corruption.
+  // token-free. A survivor means detection and the stripper have drifted (two hand-synced
+  // copies — qp-multiline-invoke-unstorable-xwz). Reject client-facing (ClientError → 400)
+  // rather than persist corruption or throw an opaque internal 500 that makes the fact
+  // permanently unstorable on every identical retry.
   if (leakedTokens.length > 0 && leakedMarkupTokens(input.fact).length > 0) {
-    throw new Error("internal: leaked markup survived sanitization");
+    throw new ClientError("could not remove leaked tool-call markup from the fact — strip the framing tokens and retry");
   }
   writeFileSync(path, serializeMemory(fm, input.fact));
 
@@ -2515,7 +2542,7 @@ export interface ReviewedOptions {
  */
 export function resolveReviewedDate(type: MemoryType, opts: ReviewedOptions, from: Date = new Date()): string {
   if (opts.ttl !== undefined && opts.reviewBy !== undefined) {
-    throw new Error("invalid ttl: cannot combine ttl with review_by — pass one or the other");
+    throw new ClientError("invalid ttl: cannot combine ttl with review_by — pass one or the other");
   }
   if (opts.reviewBy !== undefined) { assertValidReviewBy(opts.reviewBy); return opts.reviewBy; }
   if (opts.ttl !== undefined) {
@@ -2537,7 +2564,7 @@ export async function markReviewed(
 ): Promise<{ slug: string; reviewBy: string; path: string; synced?: boolean; syncWarning?: string }> {
   assertSafeSlug(slug); // reject traversal/newline before any fs touch (qmemd-fd8)
   const fact = getFact(root, slug);
-  if (!fact) throw new Error(`no fact named '${slug}' to mark reviewed`);
+  if (!fact) throw new ClientError(`no fact named '${slug}' to mark reviewed`);
   const reviewBy = resolveReviewedDate(fact.type, opts);
   const content = readFileSync(fact.path, "utf-8");
   // Fenceless fact: setFrontmatterKey would return the content unchanged, git would

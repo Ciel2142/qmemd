@@ -116,13 +116,14 @@ describe("fixability derived from fixer capability (qp-wex)", () => {
     expect(leak(auditFact("prose <fact> prose", "project", "slug")).fixable).toBe(false);
   });
 
-  test("a multiline <invoke …> the line-based stripper cannot remove is NOT fixable (xwz asymmetry)", () => {
-    // The detector's [^>]* crosses newlines; the stripper works line-by-line and
-    // never matches an open tag whose > sits on a later line.
+  test("a multiline <invoke …> is now strippable, so doctor derives it fixable (xwz fixed)", () => {
+    // xwz: the stripper removes a newline-spanning <invoke …> (> on a later line) on the whole
+    // text, so detection and stripping agree again. Doctor's capability-derived fixability
+    // (qp-wex) reports it fixable automatically — no static-table edit needed.
     const content = validFact({ name: "slug", type: "project" }, 'note\n<invoke\nname="x">\ntail');
     const issue = leak(auditFact(content, "project", "slug"));
-    expect(issue.fixable).toBe(false);
-    expect(issue.detail).toMatch(/repair by hand/);
+    expect(issue.fixable).toBe(true);
+    expect(issue.detail).not.toMatch(/repair by hand/);
   });
 
   test("fixMemory leaves an unfixable leaky file untouched: no write, no .bak, honest re-audit", async () => {

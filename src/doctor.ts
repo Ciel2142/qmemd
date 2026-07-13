@@ -159,15 +159,16 @@ export function auditFact(content: string, folderType: string, slug: string): Fa
   const leaked = leakedMarkupTokens(parseMemory(content).body);
   if (leaked.length > 0) {
     // Fixability probed against the actual fixer (qp-wex): stripBodyLeak returns null on a
-    // fence-broken file (left for human repair) and on a token the line-based stripper cannot
-    // remove (a multiline <invoke …> — the detector's [^>]* crosses newlines, the stripper
-    // does not; qp-xwz). A static [fixable] here sent operators into --fix loops that never fix.
+    // fence-broken file, which is left for human repair. (The stripper now also removes a
+    // multiline <invoke …> whose > sits on a later line — qp-xwz — so that case is fixable
+    // automatically without a static-table edit here.) A static [fixable] here sent operators
+    // into --fix loops that never fix.
     const canFix = stripBodyLeak(content) !== null;
     issues.push({
       code: "BODY_TEMPLATE_LEAK",
       fixable: canFix,
       detail: `leaked tool-call/template markup in body: ${leaked.join(", ")}`
-        + (canFix ? "" : " — not mechanically strippable (fence-broken file or multiline markup); repair by hand"),
+        + (canFix ? "" : " — not mechanically strippable (fence-broken file); repair by hand"),
     });
   }
 

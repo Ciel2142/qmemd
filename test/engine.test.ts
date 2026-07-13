@@ -1185,6 +1185,22 @@ describe("leakedMarkupTokens / stripLeakedMarkup (pure, qp-ey3)", () => {
     expect(leakedMarkupTokens('  <parameter name="x">y')).toEqual(["<parameter name="]);
     expect(stripLeakedMarkup('a\n  <parameter name="x">y\nb')).toBe("a\nb");
   });
+
+  test("a multiline <invoke …> (> on a later line) is detected AND stripped (qp-xwz)", () => {
+    // Detection's [^>]* crosses newlines, so the token was flagged but the old line-based
+    // stripper could never remove it — the fact was permanently unstorable. The stripper now
+    // collapses the newline-spanning form, keeping detection ⟺ strippability a fixed point.
+    const multiline = 'note\n<invoke\nname="x">\ntail';
+    expect(leakedMarkupTokens(multiline)).toEqual(["<invoke>"]);
+    expect(leakedMarkupTokens(stripLeakedMarkup(multiline))).toEqual([]);
+    expect(stripLeakedMarkup(multiline)).not.toContain("<invoke");
+    expect(stripLeakedMarkup(multiline)).toContain("note");
+    expect(stripLeakedMarkup(multiline)).toContain("tail");
+  });
+
+  test("a single-line <invoke …> still drops its emptied line (no blank-line regression)", () => {
+    expect(stripLeakedMarkup('a\n<invoke name="x">\nb')).toBe("a\nb");
+  });
 });
 
 describe("remember (SDK-backed)", () => {
@@ -1254,6 +1270,26 @@ describe("remember (SDK-backed)", () => {
     const { remember } = await import("../src/engine.js");
     await expect(remember(store, root, { fact: "</fact>\n<parameter name=\"type\">project", type: "reference" }))
       .rejects.toThrow(/entirely leaked tool-call markup/);
+  });
+
+  test("the entirely-leaked rejection is a ClientError → 400, not an internal 500 (qp-f6j)", async () => {
+    const { remember, ClientError } = await import("../src/engine.js");
+    await expect(remember(store, root, { fact: "</fact>\n<parameter name=\"type\">project", type: "reference" }))
+      .rejects.toBeInstanceOf(ClientError);
+  });
+
+  test("a fact carrying a multiline <invoke …> is now storable, not a permanent internal error (qp-xwz)", async () => {
+    // Regression: detection flagged the multiline tag but the line-based stripper could not
+    // remove it, so the post-condition threw `internal: leaked markup survived sanitization`
+    // on every identical retry — the fact was permanently unstorable. It now strips + writes.
+    const { remember } = await import("../src/engine.js");
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await remember(store, root, { fact: 'Qdrant REST is on port 6333.\n<invoke\nname="remember">', type: "project" });
+    expect(res.wrote).toBe(true);
+    const onDisk = readFileSync(res.path, "utf-8");
+    expect(onDisk).not.toContain("<invoke");
+    expect(onDisk).toContain("Qdrant REST is on port 6333.");
+    spy.mockRestore();
   });
 
   test("--force writes despite duplicate", async () => {
