@@ -44,6 +44,14 @@ describe("Claude Code plugin manifests", () => {
     expect(m.plugins[0].version).toBe(pkg.version);
   });
 
+  // The Codex/Cursor integration manifests carry the same version and drifted to 0.6.0
+  // while package.json was 0.7.0 (qp-plugin-manifest-version-drift-iz4). Pin them too so
+  // a future release bump cannot silently miss any of the four manifests.
+  test("codex + cursor plugin manifests track package.json version", () => {
+    expect(readJSON("integrations/codex/.codex-plugin/plugin.json").version).toBe(pkg.version);
+    expect(readJSON("integrations/cursor/.cursor-plugin/plugin.json").version).toBe(pkg.version);
+  });
+
   test("plugin.json declares the inline qmemd MCP server, no corpus/index override", () => {
     // Claude Code plugins declare MCP either inline in plugin.json (used here) or via
     // a WRAPPED `.mcp.json` ({ "mcpServers": {...} }) — a bare server map is only valid
