@@ -463,10 +463,45 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload));
 }
 
-/** Collect a request body to a string. */
+/**
+ * Default cap on a collected request body (qp-daemon-http-robustness-mu2): 1 MiB dwarfs any
+ * legitimate fact/query while stopping an oversized or slow-drip POST from OOM-killing the
+ * shared daemon. Overridable via QMEMD_MAX_BODY_BYTES (read at request time, the embedTimeoutMs
+ * precedent) so the bound is testable without a multi-MB payload.
+ */
+export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+export function maxRequestBodyBytes(): number {
+  const n = Number(process.env.QMEMD_MAX_BODY_BYTES);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_BODY_BYTES;
+}
+
+/** An over-cap request body — mapped to a 413 by the HTTP handler (never a daemon crash). */
+export class PayloadTooLargeError extends Error {}
+
+/**
+ * Collect a request body to a string, bounded by maxRequestBodyBytes (qp-daemon-http-robustness-mu2).
+ * A declared Content-Length over the cap is rejected up front; the streaming total is also checked
+ * so a lying Content-Length or a chunked/slow-drip body cannot slip past. On overflow the socket is
+ * destroyed and a PayloadTooLargeError is thrown, so the daemon never buffers unbounded.
+ */
 async function collectBody(req: IncomingMessage): Promise<string> {
+  const cap = maxRequestBodyBytes();
+  const declared = Number(req.headers["content-length"]);
+  // Throw WITHOUT destroying the socket so the handler can still flush a 413 — destroying it
+  // first resets the connection and the client sees a hang-up instead. Memory stays bounded
+  // either way: the Content-Length fast-path throws before reading a byte, and the streaming
+  // check stops accumulating at the cap (abandoning the for-await tears the stream down anyway).
+  if (Number.isFinite(declared) && declared > cap) {
+    throw new PayloadTooLargeError(`request body exceeds ${cap} bytes`);
+  }
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    total += buf.length;
+    if (total > cap) throw new PayloadTooLargeError(`request body exceeds ${cap} bytes`);
+    chunks.push(buf);
+  }
   return Buffer.concat(chunks).toString();
 }
 
@@ -479,7 +514,10 @@ async function collectBody(req: IncomingMessage): Promise<string> {
  * transport, so it guards JSON.parse inline.
  */
 async function parseJsonBody(req: IncomingMessage): Promise<{ ok: true; value: unknown } | { ok: false }> {
-  try { return { ok: true, value: JSON.parse(await collectBody(req)) }; }
+  // collectBody runs OUTSIDE the try so a PayloadTooLargeError propagates to the handler's
+  // catch (→ 413), rather than being folded into the {ok:false} → 400 malformed-JSON signal.
+  const raw = await collectBody(req);
+  try { return { ok: true, value: JSON.parse(raw) }; }
   catch { return { ok: false }; }
 }
 
@@ -574,8 +612,6 @@ export async function startMcpHttpServer(
   function log(msg: string): void { if (!quiet) console.error(msg); }
 
   const httpServer = createServer(async (nodeReq: IncomingMessage, nodeRes: ServerResponse) => {
-    const url = new URL(nodeReq.url || "/", `http://localhost:${port}`);
-    const pathname = url.pathname;
     const method = nodeReq.method || "GET";
 
     try {
@@ -594,6 +630,15 @@ export async function startMcpHttpServer(
         sendJson(nodeRes, 415, { error: "unsupported media type: POST requires Content-Type: application/json" });
         return;
       }
+
+      // Parse the request-target INSIDE the try, AFTER the guards (qp-daemon-http-robustness-mu2):
+      // Node delivers a malformed target (e.g. `//`) unnormalized, and new URL() throws on it.
+      // Parsing it above — outside the try, in this async callback — turned that throw into an
+      // unhandled rejection that terminated the shared daemon. A malformed target is a client 400.
+      let url: URL;
+      try { url = new URL(nodeReq.url || "/", `http://localhost:${port}`); }
+      catch { sendJson(nodeRes, 400, { error: "invalid request target" }); return; }
+      const pathname = url.pathname;
 
       if (pathname === "/health" && method === "GET") {
         // rootHash (qmemd-vuk): identity of the served memory root, as a sha256 so no
@@ -631,7 +676,7 @@ export async function startMcpHttpServer(
       // ---- REST: recall ----
       if (pathname === "/recall" && method === "POST") {
         const parsed = await parseJsonBody(nodeReq);
-        if (!parsed.ok) { sendJson(nodeRes, 400, { error: "invalid JSON body" }); return; }
+        if (!parsed.ok || parsed.value === null || typeof parsed.value !== "object") { sendJson(nodeRes, 400, { error: "invalid JSON body: expected a JSON object" }); return; }
         const body = parsed.value as {
           query?: string; session?: boolean; type?: MemoryType;
           limit?: number; lexOnly?: boolean; minScore?: number; project?: string; full?: boolean; skim?: boolean; allPlatforms?: boolean;
@@ -690,7 +735,7 @@ export async function startMcpHttpServer(
       // ---- REST: remember ----
       if (pathname === "/remember" && method === "POST") {
         const parsed = await parseJsonBody(nodeReq);
-        if (!parsed.ok) { sendJson(nodeRes, 400, { error: "invalid JSON body" }); return; }
+        if (!parsed.ok || parsed.value === null || typeof parsed.value !== "object") { sendJson(nodeRes, 400, { error: "invalid JSON body: expected a JSON object" }); return; }
         const body = parsed.value as {
           fact?: string; type?: string; tags?: string[]; project?: string;
           pin?: boolean; source?: string; as?: string; replace?: string; supersedes?: string; force?: boolean; platforms?: unknown;
@@ -739,7 +784,7 @@ export async function startMcpHttpServer(
       // ---- REST: forget ----
       if (pathname === "/forget" && method === "POST") {
         const parsed = await parseJsonBody(nodeReq);
-        if (!parsed.ok) { sendJson(nodeRes, 400, { error: "invalid JSON body" }); return; }
+        if (!parsed.ok || parsed.value === null || typeof parsed.value !== "object") { sendJson(nodeRes, 400, { error: "invalid JSON body: expected a JSON object" }); return; }
         const body = parsed.value as { slug?: string };
         if (!body.slug) { sendJson(nodeRes, 400, { error: "Missing required field: slug" }); return; }
         const res = await forgetFact(store, root, body.slug); // unsafe slug throws -> caught -> 400
@@ -789,6 +834,9 @@ export async function startMcpHttpServer(
       // a bad supersedes combination, an entirely-leaked body qp-ey3): 400, not the catch-all
       // 500. Replaces the hand-synced message-prefix allowlist (qp-ey3-rejection-missing-allowlist-f6j).
       if (err instanceof ClientError) { sendJson(nodeRes, 400, { error: msg }); return; }
+      // An oversized body (qp-daemon-http-robustness-mu2) is a client 413 — the socket is already
+      // destroyed by collectBody, so only respond if headers haven't gone out.
+      if (err instanceof PayloadTooLargeError) { if (!nodeRes.headersSent) sendJson(nodeRes, 413, { error: msg }); return; }
       console.error("HTTP handler error:", err);
       if (!nodeRes.headersSent) { nodeRes.writeHead(500); nodeRes.end("Internal Server Error"); }
     }

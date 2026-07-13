@@ -364,6 +364,46 @@ describe("HTTP server: malformed JSON body -> 400, not 500 (qmemd-bzq)", () => {
   });
 });
 
+describe("HTTP server: robustness on malformed/oversized local requests (qp-daemon-http-robustness-mu2)", () => {
+  // C14: new URL(req.url) parsed the request-target OUTSIDE the handler try, so a malformed
+  // target (Node delivers `//` unnormalized) threw an unhandled rejection that terminated the
+  // shared daemon. It must answer a client 400 and stay alive.
+  test("C14: a malformed request-target answers 400 and does NOT crash the daemon", async () => {
+    const res = await rawRequest(handle.port, { method: "GET", path: "//" });
+    expect(res.status).toBe(400);
+    // Server still serving after the malformed request (would ECONNREFUSED / hang if it died).
+    expect((await fetch(`${baseUrl}/health`)).status).toBe(200);
+  });
+
+  // C15: collectBody buffered the whole body with no cap, so an oversized POST OOM-killed the
+  // shared daemon. Cap it (QMEMD_MAX_BODY_BYTES) with an abort → 413.
+  test("C15: an oversized POST body is rejected 413, not buffered unbounded", async () => {
+    const saved = process.env.QMEMD_MAX_BODY_BYTES;
+    process.env.QMEMD_MAX_BODY_BYTES = "100";
+    try {
+      const res = await rawRequest(handle.port, {
+        method: "POST", path: "/recall",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "x".repeat(500) }), // > 100 bytes
+      });
+      expect(res.status).toBe(413);
+      expect((await fetch(`${baseUrl}/health`)).status).toBe(200);
+    } finally {
+      if (saved === undefined) delete process.env.QMEMD_MAX_BODY_BYTES; else process.env.QMEMD_MAX_BODY_BYTES = saved;
+    }
+  });
+
+  // C16: a JSON body of literal `null` parses ok:true with value null; the REST handlers then
+  // deref it (body.query / body.fact / body.slug) → TypeError → caught as a 500 with a per-request
+  // stack in the daemon log (the qmemd-bzq noise class). It must be a client 400.
+  test.each(["/recall", "/remember", "/forget"])("C16: POST %s with a literal null body -> 400, not 500", async (path) => {
+    const res = await fetch(`${baseUrl}${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "null",
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("localhost guard predicates (qmemd-1z9)", () => {
   test("isLoopbackHost accepts only loopback hostnames, ignoring port", () => {
     expect(isLoopbackHost("localhost:8182")).toBe(true);
