@@ -105,6 +105,24 @@ describe("mergeProposal — agent-judge consolidation proposal (qmemd-a6e)", () 
     expect(forget).toBe("qmemd forget factb factc");
   });
 
+  test("shell-quotes a tag with a space or $() so it can't split argv / execute on paste (qp-review-minor-followups-4lz)", async () => {
+    await writeFact(root, "facta", { project: "alpha", body: JDK_A, tags: ["safe", "evil tag", "$(touch pwned)"] });
+    await writeFact(root, "factb", { project: "alpha", body: JDK_B, tags: ["safe"] });
+    const [replace] = buildMergeCommands(mergeProposal(root).clusters[0]!);
+    // The whole comma-joined tag list is a single POSIX-quoted argv token — the space + $() live
+    // INSIDE the quotes, never as bare shell syntax that would split argv or execute on paste.
+    expect(replace).toMatch(/--tags '[^']*evil tag[^']*'/);
+    expect(replace).toContain("$(touch pwned)");
+    expect(replace).not.toMatch(/--tags [^']*\$\(/); // never a bare $( right after --tags
+  });
+
+  test("leaves a well-formed tag list bare (quote-if-needed is a no-op on safe values)", async () => {
+    await writeFact(root, "facta", { project: "alpha", body: JDK_A, tags: ["jdk", "build"] });
+    await writeFact(root, "factb", { project: "alpha", body: JDK_B, tags: ["build"] });
+    const [replace] = buildMergeCommands(mergeProposal(root).clusters[0]!);
+    expect(replace).toContain("--tags build,jdk"); // still bare + readable
+  });
+
   test("emits --platforms \"\" (clear→all) when the union is widest", async () => {
     await writeFact(root, "facta", { project: "alpha", body: JDK_A, platforms: ["linux"] });
     await writeFact(root, "factb", { project: "alpha", body: JDK_B }); // unscoped → union = [] (all)

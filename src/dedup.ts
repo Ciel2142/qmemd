@@ -345,14 +345,25 @@ export function mergeProposal(root: string, opts: DedupOptions = {}): MergePropo
  * the rest. Always passes --platforms/--tags explicitly so the merge applies the union,
  * not the keeper's possibly-narrower inherited scope. The agent edits the folded text.
  */
+/** Shell-quote a value for the paste-to-run merge skeleton ONLY when it carries a character
+ *  outside the safe bareword set — so a well-formed slug/tag/platform stays readable and bare,
+ *  but a tag with a space, quote, or $(...)/backtick (tags are free-form AND MCP-writable) is
+ *  neutralized with POSIX single-quoting instead of splitting argv or executing when the skeleton
+ *  is pasted into a shell (qp-review-minor-followups-4lz). Slugs (assertSafeSlug) and platforms
+ *  (closed enum) are already safe, so this is a no-op there — the guard is defence-in-depth. */
+function shQuoteIfNeeded(s: string): string {
+  if (s !== "" && /^[A-Za-z0-9_,.:@/=+-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`; // close-quote, escaped literal ', reopen-quote
+}
+
 export function buildMergeCommands(cluster: MergeProposalCluster): string[] {
   const keeper = cluster.suggestedKeeper;
   const others = cluster.members.map(m => m.slug).filter(s => s !== keeper);
-  const parts = [`qmemd remember --replace ${keeper} "<EDIT: fold every unique datum from all ${cluster.members.length} facts>"`];
-  if (cluster.unionTags.length > 0) parts.push(`--tags ${cluster.unionTags.join(",")}`);
-  parts.push(cluster.unionPlatforms.length > 0 ? `--platforms ${cluster.unionPlatforms.join(",")}` : `--platforms ""`);
+  const parts = [`qmemd remember --replace ${shQuoteIfNeeded(keeper)} "<EDIT: fold every unique datum from all ${cluster.members.length} facts>"`];
+  if (cluster.unionTags.length > 0) parts.push(`--tags ${shQuoteIfNeeded(cluster.unionTags.join(","))}`);
+  parts.push(cluster.unionPlatforms.length > 0 ? `--platforms ${shQuoteIfNeeded(cluster.unionPlatforms.join(","))}` : `--platforms ""`);
   if (cluster.anyPinned) parts.push("--pin");
   const lines = [parts.join(" ")];
-  if (others.length > 0) lines.push(`qmemd forget ${others.join(" ")}`);
+  if (others.length > 0) lines.push(`qmemd forget ${others.map(shQuoteIfNeeded).join(" ")}`);
   return lines;
 }
