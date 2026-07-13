@@ -621,6 +621,36 @@ describe("CLI recall --limit validation (qmemd-1jt)", () => {
   });
 });
 
+describe("CLI doctor/stale --limit validation (qp-doctor-limit-inconsistent-rak)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-cli-lim-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  // doctor used Math.max(1, parseInt(...)||10), silently coercing 0/negative/non-numeric to a
+  // valid limit while recall + stale reject the same input — one flag, two contracts. All three
+  // now share requireValidLimit, so the reject behaviour is uniform.
+  for (const verb of ["doctor", "stale"] as const) {
+    test(`${verb} --limit 0 exits non-zero instead of silently coercing`, async () => {
+      const res = runCli([verb, "--limit", "0"], root);
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toMatch(/invalid --limit/i);
+    });
+
+    test(`${verb} non-numeric --limit exits non-zero`, async () => {
+      const res = runCli([verb, "--limit", "abc"], root);
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toMatch(/invalid --limit/i);
+    });
+
+    test(`${verb} negative --limit exits non-zero instead of clamping to 1`, async () => {
+      // Equals form so parseArgs takes "-3" as the value, not a short option.
+      const res = runCli([verb, "--limit=-3"], root);
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toMatch(/invalid --limit/i);
+    });
+  }
+});
+
 describe("CLI tags verb (tfu)", () => {
   let root: string;
   beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-tags-")); });

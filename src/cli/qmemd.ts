@@ -34,6 +34,20 @@ function requireValidType(t: string | undefined): MemoryType | undefined {
   return t as MemoryType;
 }
 
+/** Validate an optional --limit value: undefined → default 10; given → must parse to an integer
+ *  >= 1, else error + exit 1 (the qmemd-1jt hardening). Shared by recall/stale/doctor so one flag
+ *  carries one contract across every verb — doctor previously coerced 0/negative/non-numeric to a
+ *  valid limit while recall + stale rejected it (qp-doctor-limit-inconsistent-rak). */
+function requireValidLimit(v: string | undefined): number {
+  if (v === undefined) return 10;
+  const n = parseInt(String(v), 10);
+  if (!Number.isInteger(n) || n < 1) {
+    console.error(`invalid --limit '${v}'. Use an integer >= 1 (default 10).`);
+    process.exit(1);
+  }
+  return n;
+}
+
 /** Validate a single --platform value against PLATFORMS (qmemd-jzz sibling). Exits 1 on invalid. */
 function requireValidPlatform(p: string | undefined): Platform | undefined {
   if (p === undefined) return undefined;
@@ -310,11 +324,7 @@ async function main() {
       const type = requireValidType(values.type); // reject before opening the store (qmemd-jzz)
       // No `|| default` on numeric input: it silently swallowed --limit 0 and
       // --limit abc as 10 (qmemd-1jt). Missing → default; given → must be an int >= 1.
-      const limit = values.limit === undefined ? 10 : parseInt(String(values.limit), 10);
-      if (!Number.isInteger(limit) || limit < 1) {
-        console.error(`invalid --limit '${values.limit}'. Use an integer >= 1 (default 10).`);
-        process.exit(1);
-      }
+      const limit = requireValidLimit(values.limit);
       // --min-score: hybrid confidence floor (default DEFAULT_MIN_SCORE). Pass through
       // only when given; the engine applies the default. Reject non-numeric/negative.
       let minScore: number | undefined;
@@ -476,11 +486,7 @@ async function main() {
       // Offline staleness pass (9su/s4w): list facts due for review + the never-reviewed
       // backlog. Filesystem-only, no model, strictly read-only — SURFACE for review, never
       // auto-delete. Exit 0 always: a review queue, not an integrity failure (doctor gates).
-      const limit = values.limit === undefined ? 10 : parseInt(String(values.limit), 10);
-      if (!Number.isInteger(limit) || limit < 1) {
-        console.error(`invalid --limit '${values.limit}'. Use an integer >= 1 (default 10).`);
-        process.exit(1);
-      }
+      const limit = requireValidLimit(values.limit);
       const report = staleFacts(root, { limit });
       if (values.json) { console.log(JSON.stringify(report, null, 2)); break; }
       if (report.due.length === 0 && report.unreviewedTotal === 0) {
@@ -680,7 +686,7 @@ async function main() {
       // Frontmatter integrity audit (qmemd-61h). Filesystem-only — NEVER opens the
       // store or loads the embedding model (mirrors recallSession/listFacts). Exits
       // non-zero when issues remain so it can gate a preflight / pre-commit hook.
-      const staleLimit = values.limit === undefined ? 10 : Math.max(1, parseInt(String(values.limit), 10) || 10);
+      const staleLimit = requireValidLimit(values.limit); // uniform reject, not silent coercion (qp-doctor-limit-inconsistent-rak)
       if (values.fix) {
         const fixes = fixMemory(root);             // surgical mechanical repairs, each leaves a .bak
         const remaining = auditMemory(root);       // re-audit: what's left needs manual review
