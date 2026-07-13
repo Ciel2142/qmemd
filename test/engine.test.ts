@@ -2240,6 +2240,79 @@ describe("embed barrier timeout — fail open to lex (cw2)", () => {
   });
 });
 
+describe("hybrid search failure — fail open to lex on a fully-embedded corpus (qp-recall-no-degraded-fallback-79x)", () => {
+  // The embed-barrier degradation (cw2) only wraps the PRE-search vector backfill, which runs
+  // solely when needsEmbedding>0. On a fully-embedded corpus that barrier is skipped, so a
+  // broken/stalled query-time model (deleted GGUF, driver update, cold-load stall) surfaced
+  // straight out of the bare store.search — recall threw or hung with no lex fallback. The fix
+  // wraps the hybrid search in the same raceTimeout + lex envelope regardless of pending count.
+  const root = "/tmp/qmemd-fake-79x";
+  const ENV = "QMEMD_EMBED_TIMEOUT_MS";
+  let saved: string | undefined;
+  beforeEach(() => { saved = process.env[ENV]; });
+  afterEach(() => { if (saved === undefined) delete process.env[ENV]; else process.env[ENV] = saved; });
+
+  // Fully-embedded corpus (needsEmbedding:0 ⇒ embed barrier skipped) with injectable hybrid
+  // search behavior + a calls[] trace. searchLex always succeeds (model-free).
+  function fakeStore(search: () => Promise<unknown>) {
+    const calls: string[] = [];
+    const store = {
+      async getStatus() { calls.push("getStatus"); return { totalDocuments: 1, needsEmbedding: 0, hasVectorIndex: true, collections: [] }; },
+      search() { calls.push("search"); return search(); },
+      async searchLex() { calls.push("searchLex"); return [{ filepath: "qmd://memory/user/foo.md", title: "Foo fact", score: 0.5 }]; },
+    } as unknown as QMDStore;
+    return { store, calls };
+  }
+
+  test("a hung hybrid search times out and falls open to lex instead of hanging", async () => {
+    process.env[ENV] = "40";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { recallQueryWithStatus } = await import("../src/engine.js");
+      const { store, calls } = fakeStore(() => new Promise(() => {})); // never settles
+      const res = await recallQueryWithStatus(store, root, "foo");
+      expect(res.degraded).toBe(true);
+      expect(res.vectorsPending).toBe(-1); // search failed ⇒ vector usability unknown, not a misleading 0
+      expect(calls).toContain("search");    // hybrid was attempted
+      expect(calls).toContain("searchLex"); // then degraded to lex
+      expect(res.hits.length).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a throwing hybrid search falls open to lex instead of crashing recall", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { recallQueryWithStatus } = await import("../src/engine.js");
+      const { store, calls } = fakeStore(async () => { throw new Error("model runtime gone"); });
+      const res = await recallQueryWithStatus(store, root, "foo");
+      expect(res.degraded).toBe(true);
+      expect(res.vectorsPending).toBe(-1);
+      expect(calls).toContain("searchLex");
+      expect(res.hits.length).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a hybrid search that rejects AFTER the timeout lost the race does not crash anything", async () => {
+    process.env[ENV] = "30";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { recallQueryWithStatus } = await import("../src/engine.js");
+      const { store } = fakeStore(() => new Promise((_, reject) => { setTimeout(() => reject(new Error("late search failure")), 100); }));
+      const res = await recallQueryWithStatus(store, root, "foo");
+      expect(res.degraded).toBe(true);
+      expect(res.hits.length).toBe(1);
+      // Let the orphaned rejection fire inside the test — an unhandled rejection here fails the run.
+      await new Promise(r => setTimeout(r, 150));
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
 describe("recall drops malformed index paths (qmemd-4ri)", () => {
   // parseVirtualMemoryPath yields type:"" for an index filepath missing its <type>/
   // segment. The old `(type || "reference") as MemoryType` fallback silently relabeled

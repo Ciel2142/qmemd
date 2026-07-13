@@ -2168,7 +2168,31 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     // filter rerankScore ourselves; qmd's native minScore (which filters the blended .score)
     // is deliberately NOT used (rde). `?? DEFAULT_MIN_SCORE` defaults an absent floor; an
     // explicit 0 disables it.
-    const results = await store.search({ query, collection: MEMORY_COLLECTION, limit: n, explain: true });
+    //
+    // Bound + fail-open the hybrid search itself, not just the pre-search embed barrier above
+    // (qp-recall-no-degraded-fallback-79x). That barrier only runs when vectorsPending>0; on a
+    // fully-embedded corpus it is skipped, so a broken/stalled query-time model (deleted GGUF,
+    // driver update, cold-load stall) previously surfaced straight out of a bare store.search —
+    // hanging recall forever or throwing past the CLI's try/finally. Race it against the same
+    // deadline (embedTimeoutMs) and, on timeout OR error, degrade to the model-free lex path for
+    // THIS and every later (re)fetch: a retried hybrid search would re-attempt the same doomed
+    // model load. The losing search keeps running unawaited (qmd has no cancellation) — swallow
+    // its eventual rejection so a raced-out promise can't surface as an unhandled rejection.
+    const searchRun = store.search({ query, collection: MEMORY_COLLECTION, limit: n, explain: true });
+    searchRun.catch(() => {});
+    let results: Awaited<typeof searchRun>;
+    try {
+      results = await raceTimeout(searchRun, embedTimeoutMs(), "hybrid recall");
+    } catch (e) {
+      console.error(`[qmemd] hybrid recall failed, falling back to lexical: ${e instanceof Error ? e.message : String(e)}`);
+      degraded = true;
+      lexFallback = true;
+      // The queue count (needsEmbedding) may read 0 here — vectors ARE built, but the query-time
+      // model is unusable, so a "0 still pending; run qmemd embed" warning would misdirect. -1
+      // (the getStatus-unreadable sentinel) renders as "an unknown number of vectors" instead.
+      vectorsPending = -1;
+      return runSearch(n); // lexFallback is now set ⇒ re-enters the model-free branch above
+    }
     // RAW row count, captured BEFORE the minRerank filter below — this is the saturation signal
     // (`rawCount === fetchLimit` ⇒ the store hit the pool cap and may have more), NOT the
     // post-floor survivor count. A future edit must not move this past the .filter().
