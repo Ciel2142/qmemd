@@ -33,6 +33,19 @@ describe("captureDaemonEnv", () => {
     expect(pairs.find(([k]) => k === "QMEMD_EMBED_MODEL")).toBeUndefined();
   });
 
+  test("captures XDG_CACHE_HOME when set, so the daemon's cacheDir()/index path matches the CLI's (qp-daemon-index-identity-health-0lq)", () => {
+    // Without QMEMD_DB, indexDbPath() derives from cacheDir() → XDG_CACHE_HOME. A systemd --user
+    // daemon never sources .bashrc, so an uncaptured XDG_CACHE_HOME makes it open an empty
+    // ~/.cache/qmemd index while the CLI writes under $XDG_CACHE_HOME — /health rootHash still
+    // matches, so every hybrid recall delegates and returns hits:[] though facts exist on disk.
+    const pairs = captureDaemonEnv("linux", { ...base, XDG_CACHE_HOME: "/home/u/.cache" });
+    expect(pairs).toContainEqual(["XDG_CACHE_HOME", "/home/u/.cache"]);
+  });
+
+  test("omits XDG_CACHE_HOME when unset", () => {
+    expect(captureDaemonEnv("linux", base).find(([k]) => k === "XDG_CACHE_HOME")).toBeUndefined();
+  });
+
   test("darwin omits LD_LIBRARY_PATH even when set", () => {
     const pairs = captureDaemonEnv("darwin", { ...base, LD_LIBRARY_PATH: "/cuda" });
     expect(pairs.find(([k]) => k === "LD_LIBRARY_PATH")).toBeUndefined();

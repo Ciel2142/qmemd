@@ -21,6 +21,12 @@ export function captureDaemonEnv(
   pairs.push(["QMD_MEMORY_DIR", env.QMD_MEMORY_DIR || memoryRoot()]);
   if (env.PATH) pairs.push(["PATH", env.PATH]);
   if (platform === "linux" && env.LD_LIBRARY_PATH) pairs.push(["LD_LIBRARY_PATH", env.LD_LIBRARY_PATH]);
+  // XDG_CACHE_HOME governs indexDbPath() via cacheDir() when QMEMD_DB is unset (qp-daemon-index-
+  // identity-health-0lq). A systemd --user daemon never sources .bashrc, so without capturing it
+  // the daemon opens an empty ~/.cache/qmemd index while the CLI writes under $XDG_CACHE_HOME —
+  // /health rootHash (sha of QMD_MEMORY_DIR) still matches, so hybrid recall delegates and returns
+  // hits:[] though facts exist. Captured alongside QMEMD_DB, the other index-location input.
+  if (env.XDG_CACHE_HOME) pairs.push(["XDG_CACHE_HOME", env.XDG_CACHE_HOME]);
   if (env.QMEMD_DB) pairs.push(["QMEMD_DB", env.QMEMD_DB]);
   if (env.QMEMD_EMBED_MODEL) pairs.push(["QMEMD_EMBED_MODEL", env.QMEMD_EMBED_MODEL]);
   return pairs;
