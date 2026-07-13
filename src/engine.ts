@@ -1837,6 +1837,17 @@ export interface RecallHit {
  */
 export const DEFAULT_MIN_SCORE = 0.575;
 
+/** qmd's default rerank-candidate pool size (RERANK_CANDIDATE_LIMIT, @tobilu/qmd 2.5.3
+ *  store.ts): hybridQuery slices the RRF fusion pool to this many rows BEFORE reranking, so a
+ *  store.search that omits candidateLimit returns at most 40 rows for ANY limit. qmemd must
+ *  request a candidateLimit >= the pool it fetches, or a corpus past 40 is silently truncated
+ *  and the completeness footer lies (qp-hybrid-recall-40-candidate-cap-4u5). Kept as a FLOOR
+ *  (not a hardcoded 40) so a small request still reranks a full 40-candidate pool — never fewer
+ *  — preserving hybrid recall quality. Not re-exported from the qmd package root; mirrored here
+ *  with the value pinned in this comment. (The per-source top-20 FTS/vec probe caps inside
+ *  hybridQuery are a separate, deeper retrieval-recall bound qmemd cannot lift via search opts.) */
+export const RERANK_CANDIDATE_FLOOR = 40;
+
 /** Width of the rerank-score band treated as "effectively equal relevance" for the
  *  recency tie-break (bri). Scores are BUCKETED (rounded to this width) then compared —
  *  a transitive comparator, unlike a raw |Δ|<ε check — and the raw score is never
@@ -1855,7 +1866,8 @@ export const RECALL_BOOST_STOPLIST: ReadonlySet<string> = new Set([
  *  (qp-mgm): a token shared by MORE than this many of the retrieved candidates is pool-common
  *  topic noise (e.g. "port" across six port facts, "k3s" across two k3s facts) and is dropped, so
  *  it can no longer drive the tie-break or rescue a near-miss. 1 ⇒ the token must be UNIQUE to a
- *  single candidate in the pool. This is pool-DF over the ≤40 IN-HAND candidates, NOT corpus-DF —
+ *  single candidate in the pool. This is pool-DF over the IN-HAND candidates (the fetched pool,
+ *  now sized by candidateLimit ≥ RERANK_CANDIDATE_FLOOR — no longer a hard 40), NOT corpus-DF —
  *  it adapts to the query's own pool yet stays deterministic + test-stable (the static stoplist
  *  remains the universal floor; pool-DF is the corpus-adaptive layer the chair adjudicated). */
 export const RECALL_POOL_DF_MAX = 1;
@@ -2178,7 +2190,13 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     // THIS and every later (re)fetch: a retried hybrid search would re-attempt the same doomed
     // model load. The losing search keeps running unawaited (qmd has no cancellation) — swallow
     // its eventual rejection so a raced-out promise can't surface as an unhandled rejection.
-    const searchRun = store.search({ query, collection: MEMORY_COLLECTION, limit: n, explain: true });
+    // candidateLimit (qp-hybrid-recall-40-candidate-cap-4u5): size the rerank pool to the pool we
+    // actually fetch, floored at qmd's default 40, so a limit/refetch past 40 is reranked in full
+    // instead of silently sliced to 40 rows. Without it, runSearch(n>40) returns ≤40 rows and the
+    // saturation check below (rawCount === fetchLimit) can never trip, reporting a truncated recall
+    // as complete. The floor keeps a small request's rerank pool at a full 40 candidates (quality).
+    const candidateLimit = Math.max(n, RERANK_CANDIDATE_FLOOR);
+    const searchRun = store.search({ query, collection: MEMORY_COLLECTION, limit: n, candidateLimit, explain: true });
     searchRun.catch(() => {});
     let results: Awaited<typeof searchRun>;
     try {

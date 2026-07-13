@@ -3641,6 +3641,85 @@ describe("recall completeness counters (40h)", () => {
   });
 });
 
+describe("hybrid candidateLimit rerank cap (qp-hybrid-recall-40-candidate-cap-4u5)", () => {
+  // No files on disk: the type/platform gate fail-opens on unreadable candidates (fm null),
+  // so fake-store hits pass the gates. Same convention as the 40h block above.
+  const root = "/tmp/qmemd-fake-candidatecap";
+
+  // Models qmd's REAL hybridQuery cap, which the diskStore/hybridFloorStore above do NOT:
+  // the RRF fusion pool is sliced to `candidateLimit` (default RERANK_CANDIDATE_LIMIT=40)
+  // BEFORE rerank, then the reranked survivors are sliced to `limit`. So a search returns at
+  // most min(corpus, candidateLimit, limit) rows — NOT min(corpus, limit). qmemd must pass a
+  // candidateLimit >= the pool it asks for, or a corpus past 40 is silently truncated at 40.
+  function candidateCapStore(rows: Array<{ type: string; slug: string }>) {
+    return {
+      async getStatus() { return { totalDocuments: rows.length, needsEmbedding: 0, hasVectorIndex: true, collections: [] }; },
+      async embed() { return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0 }; },
+      async search(o: { limit?: number; candidateLimit?: number }) {
+        const cap = Math.min(o?.candidateLimit ?? 40, o?.limit ?? 10);
+        return rows.slice(0, cap).map(r => ({ file: `qmd://memory/${r.type}/${r.slug}.md`, title: r.slug, score: 0.9, explain: { rerankScore: 0.8 } }));
+      },
+      async searchLex() { return []; },
+    } as unknown as QMDStore;
+  }
+
+  test("a limit past 40 is served in full, not truncated at the 40-row rerank pool", async () => {
+    const { recallQueryWithStatus } = await import("../src/engine.js");
+    const rows = Array.from({ length: 45 }, (_, i) => ({ type: "project", slug: `f${i}` }));
+    // platform:all ⇒ widen=false ⇒ fetchLimit === limit === 50. The store holds 45 relevant
+    // facts; all 45 must come back. Under the 40-cap bug only 40 surface and the recall reports
+    // itself complete (moreMatches 0, saturated false) — a silent 5-fact truncation.
+    const res = await recallQueryWithStatus(candidateCapStore(rows), root, "q", { limit: 50, platform: "all" });
+    expect(res.hits.length).toBe(45);
+    expect(res.moreMatches).toBe(0);
+    expect(res.saturated).toBe(false);
+  });
+
+  test("the corpus-wide refetch reranks past 40 so a deep on-platform hit is not dropped", async () => {
+    const { recallQueryWithStatus, serializeMemory } = await import("../src/engine.js");
+    const diskRoot = await mkdtemp(join(tmpdir(), "qmemd-candidatecap-"));
+    try {
+      await mkdir(join(diskRoot, "project"), { recursive: true });
+      const put = async (slug: string, platforms: Platform[]) =>
+        writeFile(join(diskRoot, "project", `${slug}.md`), serializeMemory(
+          { name: slug, description: slug, type: "project", tags: [], project: "global", created: "2026-06-09", pinned: false, platforms },
+          "body"));
+      for (let i = 0; i < 45; i++) await put(`m${i}`, ["macos"]);
+      await put("linux-deep", ["linux"]); // rank 46 — past the 40-row rerank pool
+      const rows = [...Array.from({ length: 45 }, (_, i) => ({ type: "project", slug: `m${i}` })), { type: "project", slug: "linux-deep" }];
+      // limit 2, platform linux: the first pool (8) is all macos → gated underflow on a
+      // saturated pool → corpus-wide refetch (46). Under the 40-cap bug the refetch reranks
+      // only 40 macos rows and linux-deep (rank 46) never enters the pool, so it is dropped
+      // while saturated is set false — the completeness footer lies.
+      const res = await recallQueryWithStatus(candidateCapStore(rows), diskRoot, "q", { limit: 2, platform: "linux" });
+      expect(res.hits.map(h => h.slug)).toContain("linux-deep");
+    } finally { await rm(diskRoot, { recursive: true, force: true }); }
+  });
+
+  test("search is called with candidateLimit >= the pool it fetches (never below qmd's 40 floor)", async () => {
+    const { recallQueryWithStatus } = await import("../src/engine.js");
+    const seen: Array<{ limit?: number; candidateLimit?: number }> = [];
+    const rows = Array.from({ length: 60 }, (_, i) => ({ type: "project", slug: `s${i}` }));
+    const spy = {
+      async getStatus() { return { totalDocuments: rows.length, needsEmbedding: 0, hasVectorIndex: true, collections: [] }; },
+      async embed() { return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0 }; },
+      async search(o: { limit?: number; candidateLimit?: number }) {
+        seen.push({ limit: o?.limit, candidateLimit: o?.candidateLimit });
+        const cap = Math.min(o?.candidateLimit ?? 40, o?.limit ?? 10);
+        return rows.slice(0, cap).map(r => ({ file: `qmd://memory/${r.type}/${r.slug}.md`, title: r.slug, score: 0.9, explain: { rerankScore: 0.8 } }));
+      },
+      async searchLex() { return []; },
+    } as unknown as QMDStore;
+    // limit 3, non-widen (platform all): fetchLimit = 3. candidateLimit must still floor at 40
+    // so the rerank pool is not shrunk below qmd's default for a small request.
+    await recallQueryWithStatus(spy, root, "q", { limit: 3, platform: "all" });
+    for (const o of seen) {
+      expect(o.candidateLimit).toBeGreaterThanOrEqual(o.limit ?? 0);
+      expect(o.candidateLimit).toBeGreaterThanOrEqual(40);
+    }
+  });
+});
+
 describe("completenessFooter (40h)", () => {
   test("returns null when nothing is hidden (40h footer)", async () => {
     const { completenessFooter } = await import("../src/engine.js");
