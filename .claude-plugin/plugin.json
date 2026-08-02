@@ -6,8 +6,5 @@
   "homepage": "https://github.com/Ciel2142/qmemd#readme",
   "repository": "https://github.com/Ciel2142/qmemd",
   "license": "MIT",
-  "keywords": ["memory", "mcp", "recall", "remember", "markdown", "agent", "claude"],
-  "mcpServers": {
-    "qmemd": { "command": "qmemd", "args": ["mcp"] }
-  }
+  "keywords": ["memory", "mcp", "recall", "remember", "markdown", "agent", "claude"]
 }

@@ -235,14 +235,21 @@ Register it under `mcpServers` in your MCP client config (e.g. `~/.claude.json`)
 
 ## Install as a Claude Code plugin (recommended)
 
-qmemd ships as a native Claude Code plugin that bundles the skill, the MCP server,
-both hooks (session snapshot + beacon), and the `/qmemd:*` commands in one install.
-It is the recommended path for most users: it wires the same SessionStart snapshot
-and beacon hooks the `scripts/` installers do, but works straight from an
-`npm i -g` install — no git checkout required.
+qmemd ships as a native Claude Code plugin that bundles the skill, both hooks
+(session snapshot + beacon), and the `/qmemd:*` commands in one install. It is the
+recommended path for most users: it wires the same SessionStart snapshot and beacon
+hooks the `scripts/` installers do, but works straight from an `npm i -g` install —
+no git checkout required.
 
-1. **Install the CLI.** The plugin launches the MCP server as `qmemd mcp` and the
-   `/qmemd:*` commands shell out to it, so the `qmemd` command must be on PATH:
+The plugin deliberately does **not** declare an MCP server. Register one yourself,
+either the stdio server ([MCP server](#mcp-server) above) or the shared HTTP daemon
+(`qmemd mcp install-service`, see [HTTP API](#http-api-rest--mcp-over-http)) — one
+server, one set of tools. A plugin-declared server would stand up a *second*
+process alongside whichever one you already run, duplicating all six tools in the
+model's context and letting the two drift to different versions.
+
+1. **Install the CLI.** The hooks and the `/qmemd:*` commands shell out to it (as
+   does whichever MCP server you register), so the `qmemd` command must be on PATH:
 
    ```bash
    npm install -g @ciel2142/qmemd
@@ -267,7 +274,7 @@ and beacon hooks the `scripts/` installers do, but works straight from an
 4. **Restart Claude Code, then verify:** the `/qmemd:*` commands appear in the
    slash-command menu, and a fresh session injects the qmemd rule + the
    `recall --session` snapshot at the top of its context (the SessionStart hook).
-   `qmemd --version` confirms the CLI from step 1.
+   `qmemd status` confirms the CLI from step 1 (there is no `--version` flag).
 
 **Migrating from the bash installer?** The plugin and
 `scripts/install-claude-integration.sh` wire the *same* SessionStart + beacon hooks;

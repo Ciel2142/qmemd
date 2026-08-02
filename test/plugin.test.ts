@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 // Plugin hook scripts are plain runtime .mjs (outside src/, so tsc/typecheck ignore
 // them — see tsconfig.typecheck.json). We import their pure helpers directly and
@@ -52,18 +52,22 @@ describe("Claude Code plugin manifests", () => {
     expect(readJSON("integrations/cursor/.cursor-plugin/plugin.json").version).toBe(pkg.version);
   });
 
-  test("plugin.json declares the inline qmemd MCP server, no corpus/index override", () => {
-    // Claude Code plugins declare MCP either inline in plugin.json (used here) or via
-    // a WRAPPED `.mcp.json` ({ "mcpServers": {...} }) — a bare server map is only valid
-    // in ~/.claude.json, not in a plugin, so it would silently fail to register.
-    const mcp = readJSON(".claude-plugin/plugin.json").mcpServers?.qmemd;
-    expect(mcp).toBeDefined();
-    expect(mcp.command).toBe("qmemd");
-    expect(mcp.args).toEqual(["mcp"]);
-    // Must never repoint the user's durable git-backed corpus or its index.
-    const env = mcp.env ?? {};
-    expect(env.QMD_MEMORY_DIR).toBeUndefined();
-    expect(env.QMEMD_DB).toBeUndefined();
+  test("plugin.json declares NO MCP server — the user registers exactly one", () => {
+    // The plugin used to declare `qmemd mcp` inline. That stood up a SECOND server next to
+    // whichever one the user already ran (a `qmemd` entry in ~/.claude.json, or the shared
+    // HTTP daemon from `qmemd mcp install-service`): all six tools duplicated in the model's
+    // context under two prefixes, and the two processes free to drift to different versions
+    // — the plugin's stdio child kept serving the old build until Claude Code restarted,
+    // while an `npm i -g` upgrade moved the daemon immediately.
+    // The plugin now ships hooks + commands + the skill only. Corroboration that this is the
+    // intended wiring: skills/qmemd-memory/SKILL.md's allowed-tools already name the
+    // mcp__qmemd__* tools of a user-registered server, never mcp__plugin_qmemd_qmemd__*.
+    const p = readJSON(".claude-plugin/plugin.json");
+    expect(p.mcpServers).toBeUndefined();
+    // The plugin's own value must still be there — removing MCP must not empty the manifest.
+    expect(p.name).toBe("qmemd");
+    expect(existsSync(join(REPO, "hooks/hooks.json"))).toBe(true);
+    expect(existsSync(join(REPO, "skills/qmemd-memory/SKILL.md"))).toBe(true);
   });
 });
 
