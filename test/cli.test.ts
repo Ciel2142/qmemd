@@ -997,6 +997,7 @@ describe("CLI remember --tag guard (qp-cli-remember-tag-singular-swallowed-lq8)"
     expect(out.stderr).toMatch(/--tags/); // points the user at the correct plural write flag
     // the fact must NOT have been silently written with tags: [] under the wrong flag
     expect(runCli(["show", "a-tagged-thing"], root).status).not.toBe(0);
+    expect(existsSync(join(root, "project", "a-tagged-thing.md"))).toBe(false);
   });
 
   test("the plural --tags still writes the tags (guard is not over-broad)", () => {

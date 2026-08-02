@@ -3809,7 +3809,9 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
       expect(res.wrote).toBe(true);
       expect(res.duplicateOf).toBeUndefined();
       expect(getFact(root, res.slug)).not.toBeNull();
-      expect(errSpy.mock.calls.flat().join("\n")).toMatch(/ghost/i);
+      const logged = errSpy.mock.calls.flat().join("\n");
+      expect(logged).toMatch(/vanished-fact/); // names the offending row
+      expect(logged).toMatch(/reindex/);       // and the remediation
     } finally {
       errSpy.mockRestore();
     }
