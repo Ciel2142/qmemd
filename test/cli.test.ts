@@ -986,6 +986,35 @@ describe("CLI platform scoping (qmemd-vsc)", () => {
   });
 });
 
+describe("CLI remember --tag guard (qp-cli-remember-tag-singular-swallowed-lq8)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-cli-tag-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  test("remember rejects the singular --tag instead of silently swallowing it", () => {
+    const out = runCli(["remember", "a tagged thing", "--type", "project", "--tag", "build"], root);
+    expect(out.status).toBe(1);
+    expect(out.stderr).toMatch(/--tags/); // points the user at the correct plural write flag
+    // the fact must NOT have been silently written with tags: [] under the wrong flag
+    expect(runCli(["show", "a-tagged-thing"], root).status).not.toBe(0);
+  });
+
+  test("the plural --tags still writes the tags (guard is not over-broad)", () => {
+    expect(runCli(["remember", "a tagged thing", "--type", "project", "--tags", "build,ci"], root).status).toBe(0);
+    const shown = runCli(["show", "a-tagged-thing"], root);
+    expect(shown.status).toBe(0);
+    expect(shown.stdout).toContain("build");
+    expect(shown.stdout).toContain("ci");
+  });
+
+  test("list --tag keeps working (the flag stays global, only remember rejects it)", () => {
+    expect(runCli(["remember", "a tagged thing", "--type", "project", "--tags", "build"], root).status).toBe(0);
+    const out = runCli(["list", "--tag", "build"], root);
+    expect(out.status).toBe(0);
+    expect(out.stdout).toContain("a-tagged-thing");
+  });
+});
+
 describe("CLI recall completeness footer (40h)", () => {
   let root: string;
   beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-40h-cli-")); });

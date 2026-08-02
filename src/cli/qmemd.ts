@@ -249,6 +249,14 @@ async function main() {
         console.error("remember scopes with --platforms (plural, comma-separated), e.g. --platforms linux,macos. --platform / --all-platforms are recall/list flags.");
         process.exit(1);
       }
+      // Same singular/plural trap as s5j above, one flag over: --tag is a `list` filter, remember
+      // tags with --tags (plural). parseArgs registers both globally, so without this guard the
+      // singular flag parsed fine, remember read only values.tags, and the fact was written with
+      // tags: [] while the CLI printed success (qp-cli-remember-tag-singular-swallowed-lq8).
+      if (values.tag !== undefined) {
+        console.error("remember tags with --tags (plural, comma-separated), e.g. --tags build,ci. --tag is a list filter flag.");
+        process.exit(1);
+      }
       const type = requireValidType(values.type); // reject before opening the store (qmemd-jzz)
       const store = await openMemoryStore();
       try {
