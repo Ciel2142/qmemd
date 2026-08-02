@@ -194,7 +194,7 @@ qmemd mcp                       # start the stdio MCP server (--http for the dae
 Resolve each surfaced entry with one of:
 
 - `qmemd reviewed <slug>` — you re-checked the fact and it is **still correct**: reset the staleness clock to `today + the type's window`. It forward-sets `review_by` only, leaving `updated` honest (content age stays truthful). Add `--ttl <N>d|w|m|y|never` or `--review-by YYYY-MM-DD` to set the next date explicitly; `--ttl never` (→ `review_by: never`) marks the fact permanently durable.
-- `qmemd remember --replace <slug>` — the fact **changed**: edit it in place (re-arm the clock with a fresh `--ttl`).
+- `qmemd remember --replace <slug>` — the fact **changed**: edit it in place (re-arm the clock with a fresh `--ttl`). Omit `--type` to keep the existing one; pass a different one to **retype** the fact — it moves to that folder in one commit. (`--force` never retypes: it keeps the existing folder.)
 - `qmemd remember --supersedes <slug>` — retire it under a successor fact.
 - `qmemd forget <slug>` — drop it.
 

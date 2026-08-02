@@ -190,6 +190,7 @@ function printUsage(): void {
   console.log("    --supersedes <slug>: write this fact AND retire <slug> (hidden from recall, linked in frontmatter, one commit)");
   console.log("    --ttl <N>d|w|m|y / --review-by <date>: schedule a re-verify date for a fact that ages — `qmemd stale` surfaces it once due");
   console.log("    on --replace: omit --tags/--platforms/--review-by to keep the existing values, or pass \"\" to clear them");
+  console.log("    on --replace: omit --type to keep the existing type, or pass a different one to retype — the fact moves folders (--force alone never retypes; --replace wins when both are given)");
   console.log("  qmemd recall <query> [--lex|--hybrid] [--cross-project] [--type T] [--platform P|--all-platforms] [--limit N] [--min-score N] [--full|--skim] [--json]");
   console.log("  qmemd recall --session                 - session snapshot (for hooks)");
   console.log("  qmemd show <slug>                      - print one fact in full (no model)");

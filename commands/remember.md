@@ -13,3 +13,6 @@ repo/system fact not in code or git → `project`; a URL/dashboard/discovery →
 If qmemd surfaces a near-duplicate or a conflict, show it and ask how to resolve —
 `--replace <slug>` (update in place), `--supersedes <slug>` (retire the old fact),
 or `--force` (write anyway) — rather than forcing blindly.
+
+On `--replace`, omit `--type` to keep the fact's existing type; passing a different
+one retypes it and moves the file. `--force` never retypes.

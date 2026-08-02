@@ -114,16 +114,24 @@ export function gitCommit(root: string, message: string, pathspec: string | stri
   const paths = Array.isArray(pathspec) ? pathspec : [pathspec];
   try {
     if (!isRepo(root, run)) return { ok: true, committed: false, reason: "not-a-repo" };
-    run(["add", "-A", "--", ...paths], root);
+    // Stage each pathspec on its own and keep only the ones git accepted. `add` AND `commit`
+    // both abort wholesale on a pathspec matching neither the worktree nor the index, so one
+    // unmatched path would drop the whole commit — reachable on the retype relocation (ovo),
+    // whose deleted old path is unmatched whenever that fact was never committed (adopted
+    // out-of-band, or written while git was failing). Per-path keeps the `-- <pathspec>`
+    // scoping: never a bare `add -A` over the whole tree. (An `add` that fails for a DIFFERENT
+    // reason — index.lock contention — is still swallowed here; that is qp-git-add-exit-ignored-v9v.)
+    const staged = paths.filter(p => run(["add", "-A", "--", p], root) === 0);
+    if (staged.length === 0) return { ok: true, committed: false, reason: "nothing-to-commit" };
     // Separate a real commit failure (e.g. exit 128, unconfigured identity) from the
     // benign "nothing to commit" no-op (e.g. --replace with byte-identical content): a
     // clean staged path (`diff --cached --quiet -- <path>` == 0) means there is nothing
     // to commit, so don't run — and don't misreport — a commit. Only an exit-only probe
     // is needed, which fits the GitRun seam (no stdout capture).
-    if (run(["diff", "--cached", "--quiet", "--", ...paths], root) === 0) {
+    if (run(["diff", "--cached", "--quiet", "--", ...staged], root) === 0) {
       return { ok: true, committed: false, reason: "nothing-to-commit" };
     }
-    const status = run(["commit", "-m", message, "--", ...paths], root);
+    const status = run(["commit", "-m", message, "--", ...staged], root);
     if (status === 0) return { ok: true, committed: true };
     return { ok: false, committed: false, reason: `commit-failed (status ${status})` };
   } catch {

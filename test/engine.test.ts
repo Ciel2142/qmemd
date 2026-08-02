@@ -1599,7 +1599,7 @@ describe("remember (SDK-backed)", () => {
     expect(parseMemory(readFileSync(res.path, "utf-8")).frontmatter.platforms).toEqual(["macos", "linux"]);
   });
 
-  test("replace updates in place across types when --type omitted/mismatched (s5f)", async () => {
+  test("replace updates in place under the existing type when --type is omitted (s5f)", async () => {
     const { remember } = await import("../src/engine.js");
     const first = await remember(store, root, { fact: "Prefer tabs over spaces", type: "user", as: "indent-pref" });
     expect(first.type).toBe("user");
@@ -2825,6 +2825,31 @@ describe("forget reclaims tombstone + orphaned rows (2dh)", () => {
     }
   });
 
+  // A retype deletes a file just like forget/applyMerge do, so it owes the same reclaim —
+  // otherwise the vacated <oldType>/<slug>.md leaks an active=0 tombstone plus its content
+  // (and, once embedded, vector) rows on every relocation (ovo).
+  test("after a retype, no active=0 tombstone remains for the vacated path (ovo)", async () => {
+    const { remember } = await import("../src/engine.js");
+    const tmp = await mkt(join(tmpdir(), "qmemd-ovo-idx-"));
+    const dbDir = await mkt(join(tmpdir(), "qmemd-ovo-idxdb-"));
+    const store = await openQmd({ dbPath: join(dbDir, "i.sqlite"), config: { collections: { memory: { path: tmp, pattern: "**/*.md" } } } });
+    try {
+      await remember(store, tmp, { fact: "Relocatable fact", type: "feedback", as: "movee" });
+      const db = (store.internal as unknown as { db: RawDB }).db;
+      const count = (sql: string) => db.prepare(sql).get().c;
+      expect(count("SELECT COUNT(*) AS c FROM documents")).toBe(1);
+
+      await remember(store, tmp, { fact: "Relocatable fact, revised", replace: "movee", type: "project" });
+      expect(count("SELECT COUNT(*) AS c FROM documents WHERE active = 0")).toBe(0); // vacated path reclaimed
+      expect(count("SELECT COUNT(*) AS c FROM documents")).toBe(1);                  // only the new path
+      expect(count("SELECT COUNT(*) AS c FROM content")).toBe(1);                    // no orphaned content row
+    } finally {
+      await store.close();
+      await rm(tmp, { recursive: true, force: true });
+      await rm(dbDir, { recursive: true, force: true });
+    }
+  });
+
   test("forget still returns removed:true when reclaim cleanup throws (best-effort) (2dh)", async () => {
     const { forget } = await import("../src/engine.js");
     // Real file on disk so forget enters the removal branch; a fake store whose
@@ -3912,6 +3937,109 @@ describe("remember --supersedes (bri)", () => {
     expect(commits).toHaveLength(1);
     expect(commits[0]).toContain(`project/${res.slug}.md`);
     expect(commits[0]).not.toContain("project/old-truth.md");
+  });
+});
+
+describe("remember --replace retype (qp-replace-ignores-type-ovo)", () => {
+  let root: string;
+  const store = { async searchLex() { return []; }, async update() { /* no-op */ } } as unknown as QMDStore;
+  let gitCalls: string[][];
+  let git: { run: (args: string[]) => number };
+
+  beforeEach(async () => {
+    root = await mkt(join(tmpdir(), "qmemd-ovo-retype-"));
+    gitCalls = [];
+    // diff=1 → staged, rev-parse (upstream)=1 → no upstream (skip push); everything else ok
+    git = { run: (args: string[]) => { gitCalls.push(args); return args[0] === "diff" ? 1 : 0; } };
+  });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  async function seed(type: MemoryType, slug: string, body = "the old truth"): Promise<void> {
+    await mkdir(join(root, type), { recursive: true });
+    await writeFile(join(root, type, `${slug}.md`),
+      `---\nname: ${slug}\ndescription: d\ntype: ${type}\ntags: [alpha]\nproject: diadoc\ncreated: 2020-01-01\npinned: false\n---\n\n${body}\n`);
+  }
+
+  it("relocates the fact to the requested type and removes the old file", async () => {
+    const { remember } = await import("../src/engine.js");
+    await seed("feedback", "aton-remote");
+    const res = await remember(store, root, { fact: "the remote aton is gitlab", replace: "aton-remote", type: "project" }, git);
+    expect(res.wrote).toBe(true);
+    expect(res.type).toBe("project");
+    expect(res.path).toBe(join(root, "project", "aton-remote.md"));
+    expect(existsSync(join(root, "project", "aton-remote.md"))).toBe(true);
+    expect(existsSync(join(root, "feedback", "aton-remote.md"))).toBe(false); // no shadow copy left behind
+  });
+
+  it("writes the requested type into the relocated file's frontmatter", async () => {
+    const { remember, parseMemory } = await import("../src/engine.js");
+    await seed("feedback", "aton-remote");
+    const res = await remember(store, root, { fact: "the remote aton is gitlab", replace: "aton-remote", type: "project" }, git);
+    const fm = parseMemory(readFileSync(res.path, "utf-8")).frontmatter;
+    expect(fm.type).toBe("project");   // returned type must never disagree with disk
+    expect(res.type).toBe(fm.type);
+  });
+
+  it("inherits the rest of the metadata across the relocation", async () => {
+    const { remember, parseMemory } = await import("../src/engine.js");
+    await seed("feedback", "aton-remote");
+    const res = await remember(store, root, { fact: "the remote aton is gitlab", replace: "aton-remote", type: "project" }, git);
+    const fm = parseMemory(readFileSync(res.path, "utf-8")).frontmatter;
+    expect(fm.tags).toEqual(["alpha"]);      // q65 inherit survives the move
+    expect(fm.project).toBe("diadoc");
+    expect(fm.created).toBe("2020-01-01");
+  });
+
+  it("commits the new and the removed path together", async () => {
+    const { remember } = await import("../src/engine.js");
+    await seed("feedback", "aton-remote");
+    await remember(store, root, { fact: "the remote aton is gitlab", replace: "aton-remote", type: "project" }, git);
+    const commits = gitCalls.filter(a => a[0] === "commit");
+    expect(commits).toHaveLength(1);
+    expect(commits[0]).toContain("project/aton-remote.md");
+    expect(commits[0]).toContain("feedback/aton-remote.md"); // the deletion must be staged too
+  });
+
+  it("leaves the fact in place when the requested type matches the existing one", async () => {
+    const { remember } = await import("../src/engine.js");
+    await seed("feedback", "aton-remote");
+    const res = await remember(store, root, { fact: "the remote aton is gitlab", replace: "aton-remote", type: "feedback" }, git);
+    expect(res.type).toBe("feedback");
+    expect(existsSync(join(root, "feedback", "aton-remote.md"))).toBe(true);
+    const commits = gitCalls.filter(a => a[0] === "commit");
+    expect(commits[0].filter(a => a === "feedback/aton-remote.md")).toHaveLength(1); // no duplicate pathspec
+  });
+
+  // replace and force are independent inputs on every surface, so the combination needs a
+  // pinned answer: replace names an existing fact, which is what makes a type change a retype
+  // request, so it wins. force alone still keeps the existing folder (s5f).
+  it("retypes when force rides along with replace, but not on force alone", async () => {
+    const { remember } = await import("../src/engine.js");
+    await seed("feedback", "bothflags");
+    const both = await remember(store, root, { fact: "revised body", replace: "bothflags", force: true, type: "project" }, git);
+    expect(both.type).toBe("project");
+    expect(existsSync(join(root, "feedback", "bothflags.md"))).toBe(false);
+
+    await seed("user", "forceonly");
+    const forced = await remember(store, root, { fact: "revised body", as: "forceonly", force: true, type: "project" }, git);
+    expect(forced.type).toBe("user");                                        // stays put
+    expect(existsSync(join(root, "project", "forceonly.md"))).toBe(false);   // no orphan
+  });
+
+  // The retype path skips dedup (Tier-1 is gated on !input.replace), so nothing else stops the
+  // write from landing on a DIFFERENT fact that already holds the destination slug. Such a
+  // corpus violates the global slug-uniqueness invariant, but it is reachable without hand
+  // editing — two machines can each write the slug under a different type and a git pull
+  // merges both. Mirrors the supersede collision guard (kyd).
+  it("refuses to retype onto a destination slug held by a different fact", async () => {
+    const { remember } = await import("../src/engine.js");
+    await seed("feedback", "dupslug", "aton remote is gitlab");
+    await seed("project", "dupslug", "kafka retention on prod is 7 days");
+    await expect(remember(store, root, { fact: "aton remote is gitlab, revised", replace: "dupslug", type: "project" }, git))
+      .rejects.toThrow(/already occupies/);
+    // Both files byte-intact — a rejected retype must not be a partial move.
+    expect(readFileSync(join(root, "feedback", "dupslug.md"), "utf-8")).toContain("aton remote is gitlab");
+    expect(readFileSync(join(root, "project", "dupslug.md"), "utf-8")).toContain("kafka retention on prod is 7 days");
   });
 });
 

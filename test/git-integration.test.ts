@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,6 +77,42 @@ describe.skipIf(!gitAvailable)("remember/forget land real git commits (k9q)", ()
     expect(existsSync(memoryFilePath(root, "project", "survives-index-failure"))).toBe(true);
     // The commit landed BEFORE the reindex attempt — the fact is never stranded uncommitted.
     expect(git(root, "log", "-1", "--format=%s").stdout.trim()).toBe("remember: survives-index-failure");
+    expect(git(root, "status", "--porcelain").stdout.trim()).toBe("");
+  });
+
+  // The retype relocation (ovo) is the only write that stages a path it just DELETED.
+  // The engine-level test asserts the pathspecs handed to a fake runner; only real git
+  // proves the commit actually records the move and leaves a clean tree.
+  test("retype records the move as one commit: old path deleted, new path added", async () => {
+    await remember(store, root, { fact: "The remote aton is gitlab", type: "feedback", as: "aton-remote" });
+    const res = await remember(store, root, { fact: "The remote aton is gitlab", replace: "aton-remote", type: "project" });
+
+    expect(res.wrote).toBe(true);
+    expect(res.synced).toBe(true);
+    expect(git(root, "log", "-1", "--format=%s").stdout.trim()).toBe("remember: aton-remote");
+    // One commit carrying both sides of the move (git renders it as a rename once it
+    // detects one, so assert the resulting TREE rather than the diff's status letters).
+    const tracked = git(root, "ls-tree", "-r", "HEAD", "--name-only").stdout;
+    expect(tracked).toContain("project/aton-remote.md");
+    expect(tracked).not.toContain("feedback/aton-remote.md"); // deletion committed, not just local
+    expect(git(root, "status", "--porcelain").stdout.trim()).toBe(""); // nothing left dangling
+  });
+
+  // The deleted old path is a pathspec that matches neither the worktree nor the index when
+  // the fact was never committed (adopted out-of-band, or written while git was failing).
+  // Staging every pathspec in one `git add` call makes that abort the WHOLE add, so the new
+  // file silently never gets committed while the result still claims synced.
+  test("retype still commits when the old file was untracked", async () => {
+    await mkdir(join(root, "feedback"), { recursive: true });
+    await writeFile(join(root, "feedback", "adopted.md"),
+      "---\nname: adopted\ndescription: d\ntype: feedback\ntags: []\nproject: global\ncreated: 2020-01-01\npinned: false\n---\n\nadopted out of band\n");
+    expect(git(root, "status", "--porcelain").stdout.trim()).toContain("?? feedback/"); // never committed
+
+    const res = await remember(store, root, { fact: "adopted out of band, revised", replace: "adopted", type: "project" });
+
+    expect(res.wrote).toBe(true);
+    expect(git(root, "log", "-1", "--format=%s").stdout.trim()).toBe("remember: adopted");
+    expect(git(root, "show", "--name-status", "HEAD").stdout).toContain("project/adopted.md");
     expect(git(root, "status", "--porcelain").stdout.trim()).toBe("");
   });
 });

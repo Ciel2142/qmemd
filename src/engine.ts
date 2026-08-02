@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
 import { MEMORY_COLLECTION } from "./store.js";
 import { gitCommit, gitPush, type GitDeps, type GitCommitResult, type GitPushResult } from "./git.js";
 import { type QMDStore, Maintenance } from "@tobilu/qmd";
@@ -1531,10 +1531,40 @@ export async function remember(
   // happens to already carry that slug — a coincidental collision would silently replace an
   // unrelated victim and, if the victim was retired, birth the successor with its superseded_by.
   // The supersede block below rejects such a collision outright.
+  // Non-null only when --replace was given an explicit --type DIFFERENT from the fact's
+  // current one: a retype request, which relocates the file (write new, unlink old, both
+  // paths in one commit) rather than silently discarding the requested type.
+  let retypedFrom: FullFact | null = null;
   let existing: FullFact | null = null;
   if (input.replace || input.force) {
     existing = getFact(root, slug);
-    if (existing) type = existing.type;
+    if (existing) {
+      // --replace names an existing fact, so an explicit --type on it means "this fact is
+      // now that type" — the only first-class retype path there is (qp-replace-ignores-type-ovo).
+      // Silently keeping the old type was a no-op on the one field with a session-token
+      // consequence: recallSession injects every `user`/`feedback` fact into EVERY session,
+      // while `project`/`reference` fall into the sliced pool, so a caller retyping to get a
+      // rule out of the unconditional snapshot appeared to succeed and changed nothing.
+      // --type omitted still inherits (q65). --force is deliberately NOT a retype: its slug
+      // collision is incidental (the slug comes from the fact text or --as, not from naming an
+      // existing fact), so it keeps relocating into the existing folder instead (s5f).
+      if (input.replace && input.type !== undefined && input.type !== existing.type) {
+        // The retype skips every dedup tier (the block below is gated on !input.replace), so
+        // nothing else stops the write from landing on a DIFFERENT fact that already holds the
+        // destination slug — and getFact resolves the FIRST hit in MEMORY_TYPES order, so the
+        // shadowed copy is exactly the one at risk. Such a corpus already violates global slug
+        // uniqueness, but it is reachable without hand-editing (two machines each write the slug
+        // under a different type; a pull merges both). Refuse rather than silently overwrite,
+        // mirroring the supersede collision guard (kyd). Path-free: MCP surfaces it verbatim,
+        // HTTP maps it to 400.
+        if (existsSync(memoryFilePath(root, input.type, slug))) {
+          throw new ClientError(`cannot retype '${slug}' to '${input.type}': a different fact already occupies that type under the same slug — forget one of them first`);
+        }
+        retypedFrom = existing;
+      } else {
+        type = existing.type;
+      }
+    }
   }
 
   // A --replace naming a slug that does not exist is a user error (a mistyped target). Without
@@ -1749,6 +1779,15 @@ export async function remember(
   // one-sided forward link that doctor --fix completes — never a lost fact.
   let supersedeWarning: string | undefined;
   const commitPaths: string[] = [`${type}/${slug}.md`];
+
+  // Retype relocation (ovo): drop the copy under the old type now that the new one is on
+  // disk. Written-then-unlinked, never the reverse — a failure here leaves a readable
+  // shadow copy rather than no copy at all. Its path rides the same commit so git records
+  // the move as one change; gitCommit stages with `add -A`, which picks up the deletion.
+  if (retypedFrom) {
+    unlinkSync(retypedFrom.path);
+    commitPaths.push(`${retypedFrom.type}/${slug}.md`);
+  }
   if (supersedeTarget) {
     try {
       const raw = readFileSync(supersedeTarget.path, "utf-8");
@@ -1792,6 +1831,15 @@ export async function remember(
   let indexed = true;
   try {
     await reindexMemory(store); // lex-index now; vec built lazily on first hybrid recall
+    // A retype VACATES <oldType>/<slug>.md, so it owes the same reclaim forget() and
+    // applyMerge() run after their deletions (2dh) — without it every relocation leaks an
+    // active=0 tombstone plus the orphaned content/vector rows behind it.
+    if (retypedFrom) {
+      const maint = new Maintenance(store.internal);
+      maint.deleteInactiveDocs();
+      maint.cleanupOrphanedContent();
+      maint.cleanupOrphanedVectors();
+    }
   } catch (e) {
     // Surface the index lag via indexed:false (qmemd-32x) so callers can warn.
     indexed = false;

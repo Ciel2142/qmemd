@@ -416,6 +416,23 @@ describe("CLI remember --replace inherits metadata (q65)", () => {
     expect(entry).toBeDefined();
     expect(entry!.tags).toEqual([]); // explicit empty cleared the tags
   });
+
+  // End-to-end guard for the retype path (qp-replace-ignores-type-ovo): the reporter's
+  // repro went through this surface, and only here can a CLI-side `--type` plumbing
+  // regression be caught — engine tests call remember() with the field already set.
+  test("--replace --type relocates the fact and reports the new type", async () => {
+    const first = runCli(["remember", "In the diadoc repo the remote aton is gitlab", "--type", "feedback", "--as", "ovoretype", "--project", "diadoc"], root);
+    expect(first.status).toBe(0);
+    const upd = runCli(["remember", "In the diadoc repo the remote aton is gitlab", "--replace", "ovoretype", "--type", "project"], root);
+    expect(upd.status).toBe(0);
+    expect(upd.stdout).toContain("(project)");                                  // reported type follows the request
+    expect(existsSync(join(root, "project", "ovoretype.md"))).toBe(true);
+    expect(existsSync(join(root, "feedback", "ovoretype.md"))).toBe(false);     // no unreachable shadow copy
+    const listed = runCli(["list", "--json"], root);
+    const entry = (JSON.parse(listed.stdout) as { slug: string; type: string; project: string }[]).find(e => e.slug === "ovoretype");
+    expect(entry!.type).toBe("project");
+    expect(entry!.project).toBe("diadoc"); // q65 inherit survives the move
+  });
 });
 
 function runCliEnv(args: string[], root: string, extraEnv: Record<string, string>) {

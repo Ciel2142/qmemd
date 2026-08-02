@@ -166,7 +166,9 @@ describe("git helpers (unit, fake runner)", () => {
     const run: GitRun = (args) => { calls.push(args); return args[0] === "diff" ? 1 : 0; }; // diff: dirty
     const res = gitCommit("/repo", "remember: b (supersedes a)", ["project/b.md", "project/a.md"], { run });
     expect(res).toEqual({ ok: true, committed: true });
-    expect(calls).toContainEqual(["add", "-A", "--", "project/b.md", "project/a.md"]);
+    // Staged one pathspec per call, so an unmatched path can't abort the others (ovo).
+    expect(calls).toContainEqual(["add", "-A", "--", "project/b.md"]);
+    expect(calls).toContainEqual(["add", "-A", "--", "project/a.md"]);
     expect(calls).toContainEqual(["diff", "--cached", "--quiet", "--", "project/b.md", "project/a.md"]);
     expect(calls).toContainEqual(["commit", "-m", "remember: b (supersedes a)", "--", "project/b.md", "project/a.md"]);
   });
