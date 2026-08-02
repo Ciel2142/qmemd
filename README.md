@@ -347,14 +347,39 @@ qmemd mcp uninstall-service        # remove the generated unit files
 
 qmemd mcp --http --daemon          # dev-only: unsupervised background process (dies on SIGTERM, no restart)
 qmemd mcp stop                     # stop the --daemon process
-curl localhost:8182/health         # {"status":"ok","uptime":N}
+qmemd mcp token                    # print the daemon's auth token (mints it if the daemon hasn't started)
+curl localhost:8182/health         # {"status":"ok","uptime":N} — the one route that needs no token
+```
+
+### Authentication
+
+The daemon binds loopback and rejects non-loopback `Host` and cross-origin
+`Origin` headers, but that only covers the *browser* threat model: any other
+process on the machine sends a loopback Host and no Origin, so it could read the
+whole corpus. Every route therefore requires a shared secret — the one exemption
+is `GET /health`, which returns a hash of the memory root and no fact data, and
+which the CLI must probe before it has any reason to authenticate.
+
+The token is 32 random bytes, minted on first start into
+`${XDG_CACHE_HOME:-~/.cache}/qmemd/daemon-token` with mode `0600`. It never
+appears in a unit file, an environment dump, or a URL. The `qmemd` CLI reads that
+file itself, so warm-daemon delegation needs no configuration; other clients send
+it as the `x-qmemd-token` header:
+
+```bash
+curl -H "x-qmemd-token: $(qmemd mcp token)" localhost:8182/list
 ```
 
 Point Claude Code at it (replaces the stdio registration — use one or the other):
 
 ```bash
-claude mcp add --transport http qmemd http://localhost:8182/mcp
+claude mcp add --transport http qmemd http://localhost:8182/mcp \
+  --header "x-qmemd-token: $(qmemd mcp token)"
 ```
+
+Without the header the daemon answers `401`. A `qmemd recall` whose delegation is
+rejected falls back to the local cold path rather than failing — the same
+degradation as an unreachable daemon.
 
 REST endpoints (localhost, JSON):
 

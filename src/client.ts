@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { memoryFilePath, assertSafeSlug, MEMORY_TYPES, type MemoryType, type Platform, type RecallResult, type RecallHit } from "./engine.js";
+import { DAEMON_TOKEN_HEADER, readDaemonToken } from "./token.js";
 
 /**
  * Warm-daemon recall delegation (qmemd-vuk). Every `qmemd recall` runs in a cold node
@@ -70,8 +71,13 @@ export async function tryDaemonRecall(
 ): Promise<RecallResult | null> {
   const port = opts.port ?? daemonPort();
   const base = `http://127.0.0.1:${port}`;
+  // Daemon token (mio). Absent (no daemon ever started under this XDG_CACHE_HOME) means an
+  // empty header: the daemon answers 401, !res.ok returns null, and the caller takes the
+  // local cold path — the same graceful degradation as an unreachable daemon.
+  const auth = { [DAEMON_TOKEN_HEADER]: readDaemonToken() ?? "" };
   try {
     const health = await fetch(`${base}/health`, {
+      headers: auth,
       signal: AbortSignal.timeout(opts.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS),
     });
     if (!health.ok) return null;
@@ -94,7 +100,7 @@ export async function tryDaemonRecall(
 
     const res = await fetch(`${base}/recall`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(opts.recallTimeoutMs ?? DEFAULT_RECALL_TIMEOUT_MS),
     });

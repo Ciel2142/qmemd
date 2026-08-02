@@ -9,6 +9,7 @@ import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capabil
 import { runBeacon, runWriteBeacon } from "../beacon.js";
 import { gitPullFfOnly, sessionSyncWarning } from "../git.js";
 import { memoryRoot, cacheDir, daemonPaths, systemdUserDir, qmemdConfigDir, launchAgentsDir, macLogsDir } from "../paths.js";
+import { readOrCreateDaemonToken } from "../token.js";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, openSync, closeSync } from "node:fs";
@@ -207,6 +208,7 @@ function printUsage(): void {
   console.log("  qmemd mcp install-service [--port N] [--print] - generate a systemd/launchd service (recommended for a durable daemon)");
   console.log("  qmemd mcp uninstall-service             - remove the generated service files");
   console.log("  qmemd mcp stop                         - stop the HTTP daemon");
+  console.log("  qmemd mcp token                        - print the HTTP daemon's auth token (for other MCP/REST clients)");
   console.log("  qmemd embed [--force] | status | reindex");
 }
 
@@ -571,9 +573,17 @@ async function main() {
       break;
     }
     case "mcp": {
-      const sub = rest[0]; // "stop" | undefined
+      const sub = rest[0]; // "stop" | "token" | "install-service" | "uninstall-service" | undefined
       const { pidPath, logPath } = daemonPaths();
 
+      if (sub === "token") {
+        // The HTTP daemon authenticates every route but GET /health (mio). The qmemd CLI
+        // reads the token file itself; this prints it for OTHER clients — e.g. an MCP
+        // client registered against http://localhost:<port>/mcp, which must send it as a
+        // header. Minted here if the daemon has not started yet, so config comes first.
+        console.log(readOrCreateDaemonToken());
+        break;
+      }
       if (sub === "stop") {
         if (!existsSync(pidPath)) { console.log("Not running (no PID file)."); break; }
         const pid = parseInt(readFileSync(pidPath, "utf-8").trim(), 10);
@@ -634,7 +644,7 @@ async function main() {
       }
       if (sub !== undefined) {
         console.error(`Unknown subcommand: ${sub}`);
-        console.error("Usage: qmemd mcp [--http] [--port N] [--daemon]\n       qmemd mcp install-service [--port N] [--print]\n       qmemd mcp uninstall-service\n       qmemd mcp stop");
+        console.error("Usage: qmemd mcp [--http] [--port N] [--daemon]\n       qmemd mcp install-service [--port N] [--print]\n       qmemd mcp uninstall-service\n       qmemd mcp stop\n       qmemd mcp token");
         process.exit(1);
       }
 

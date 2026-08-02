@@ -1,8 +1,11 @@
-import { describe, test, expect, afterEach } from "vitest";
+import { describe, test, expect, afterEach, beforeEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { tryDaemonRecall, daemonPort, rootHash } from "../src/client.js";
 import { memoryFilePath } from "../src/engine.js";
+import { DAEMON_TOKEN_HEADER, readDaemonToken, readOrCreateDaemonToken } from "../src/token.js";
 
 // Warm-daemon recall delegation client (qmemd-vuk). The client is a thin HTTP mapper, so
 // these tests run it against a stub node server with full response control — no qmd store,
@@ -15,6 +18,8 @@ const ROOT = "/tmp/qmemd-client-test-root";
 type StubBehavior = {
   health?: (res: import("node:http").ServerResponse) => void;
   recall?: (body: unknown, res: import("node:http").ServerResponse) => void;
+  /** Observe every inbound request (headers, method) before routing. */
+  onRequest?: (req: import("node:http").IncomingMessage) => void;
 };
 
 let servers: Server[] = [];
@@ -27,6 +32,7 @@ afterEach(async () => {
 async function startStub(behavior: StubBehavior = {}) {
   const state = { healthCalls: 0, recallCalls: 0, lastRecallBody: undefined as unknown };
   const server = createServer(async (req, res) => {
+    behavior.onRequest?.(req);
     if (req.url === "/health" && req.method === "GET") {
       state.healthCalls++;
       if (behavior.health) { behavior.health(res); return; }
@@ -271,5 +277,48 @@ describe("tryDaemonRecall: hostile-response hardening", () => {
       },
     });
     expect(await tryDaemonRecall(ROOT, { query: "q" }, { port })).toBeNull();
+  });
+});
+
+/**
+ * Token plumbing (qp-http-daemon-no-auth-mio). The daemon now rejects an unauthenticated
+ * request, so the client must present the minted token — and when there is no token to
+ * present (no daemon ever started under this XDG_CACHE_HOME), delegation must degrade to
+ * the local cold path instead of erroring.
+ */
+describe("tryDaemonRecall: daemon token", () => {
+  const origCache = process.env.XDG_CACHE_HOME;
+  let cache: string;
+
+  beforeEach(async () => {
+    cache = await mkdtemp(join(tmpdir(), "qmemd-client-cache-"));
+    process.env.XDG_CACHE_HOME = cache;
+  });
+  afterEach(async () => {
+    if (origCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = origCache;
+    await rm(cache, { recursive: true, force: true });
+  });
+
+  test("sends the minted token on BOTH the health probe and the recall POST", async () => {
+    const token = readOrCreateDaemonToken();
+    const seen: Array<string | undefined> = [];
+    const { port } = await startStub({
+      health: (res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ status: "ok", uptime: 1, rootHash: rootHash(ROOT) })); },
+      recall: (_body, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ hits: [] })); },
+      onRequest: (req) => { seen.push(req.headers[DAEMON_TOKEN_HEADER] as string | undefined); },
+    });
+    const res = await tryDaemonRecall(ROOT, { query: "anything" }, { port });
+    expect(res).not.toBeNull();
+    expect(seen).toEqual([token, token]);
+  });
+
+  test("no token file -> empty header, 401 from a real guard, caller takes the local path", async () => {
+    const { port } = await startStub({
+      health: (res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ status: "ok", uptime: 1, rootHash: rootHash(ROOT) })); },
+      // Stand in for the real guard: reject anything without a non-empty token.
+      recall: (_body, res) => { res.writeHead(401, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); },
+    });
+    expect(readDaemonToken()).toBeNull(); // nothing minted under this cache dir
+    expect(await tryDaemonRecall(ROOT, { query: "anything" }, { port })).toBeNull();
   });
 });

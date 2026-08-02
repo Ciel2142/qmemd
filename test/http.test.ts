@@ -9,6 +9,7 @@ import {
 } from "../src/mcp/server.js";
 import { rootHash } from "../src/client.js";
 import { memoryRoot } from "../src/paths.js";
+import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../src/token.js";
 
 /**
  * Raw HTTP request with full header control — node:http lets us set a spoofed `Host`
@@ -18,7 +19,9 @@ import { memoryRoot } from "../src/paths.js";
 function rawRequest(port: number, opts: { method: string; path: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
-      { hostname: "127.0.0.1", port, path: opts.path, method: opts.method, headers: opts.headers },
+      // Token by default (mio) so the guard under test is the one the case names; an
+      // explicit header in opts still wins, and the auth cases below use rawFetch.
+      { hostname: "127.0.0.1", port, path: opts.path, method: opts.method, headers: { [DAEMON_TOKEN_HEADER]: token, ...opts.headers } },
       (res) => {
         let data = "";
         res.on("data", (c) => { data += c; });
@@ -34,22 +37,40 @@ function rawRequest(port: number, opts: { method: string; path: string; headers?
 let handle: HttpServerHandle;
 let baseUrl: string;
 let memRoot: string;
+let cacheRoot: string;
+let token: string;
 const origMem = process.env.QMD_MEMORY_DIR;
 const origDb = process.env.QMEMD_DB;
+const origCache = process.env.XDG_CACHE_HOME;
+
+/**
+ * Every request in this file needs the daemon token (qp-http-daemon-no-auth-mio), so
+ * shadow the global fetch once at module scope rather than editing several hundred call
+ * sites. `rawFetch` stays available for the deliberately-unauthenticated tests below.
+ */
+const rawFetch = globalThis.fetch;
+function fetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  return rawFetch(input, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), [DAEMON_TOKEN_HEADER]: token } });
+}
 
 beforeAll(async () => {
   memRoot = await mkdtemp(join(tmpdir(), "qmemd-http-"));
+  cacheRoot = await mkdtemp(join(tmpdir(), "qmemd-http-cache-"));
   process.env.QMD_MEMORY_DIR = memRoot;
   process.env.QMEMD_DB = join(memRoot, ".idx", "i.sqlite");
+  process.env.XDG_CACHE_HOME = cacheRoot; // keep the minted token out of the real ~/.cache
   handle = await startMcpHttpServer(0, { quiet: true }); // OS-assigned ephemeral port
   baseUrl = `http://localhost:${handle.port}`;
+  token = readDaemonToken()!;
 });
 
 afterAll(async () => {
   await handle.stop();
   if (origMem === undefined) delete process.env.QMD_MEMORY_DIR; else process.env.QMD_MEMORY_DIR = origMem;
   if (origDb === undefined) delete process.env.QMEMD_DB; else process.env.QMEMD_DB = origDb;
+  if (origCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = origCache;
   await rm(memRoot, { recursive: true, force: true });
+  await rm(cacheRoot, { recursive: true, force: true });
 });
 
 describe("HTTP server: health & routing", () => {
@@ -519,6 +540,74 @@ describe("HTTP server: localhost guard, end-to-end (qmemd-1z9)", () => {
       headers: { Host: `localhost:${handle.port}`, Origin: `http://localhost:${handle.port}` },
     });
     expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * Daemon authentication (qp-http-daemon-no-auth-mio). REPRODUCED against the live
+ * qmemd-mcp.service before this landed: `curl -s 'http://127.0.0.1:8182/list?limit=2'`
+ * returned fact contents with no credential. The loopback/Origin/content-type chain
+ * cannot close it — /list and /get are GETs (no content-type gate), a non-browser client
+ * sends no Origin (allowed by design), and the Host is genuinely loopback. Only a shared
+ * secret separates "this machine's qmemd CLI" from "any other process on this machine".
+ */
+describe("HTTP server: daemon token auth (mio)", () => {
+  test("GET /list with no token -> 401, no corpus in the body", async () => {
+    const res = await rawFetch(`${baseUrl}/list?limit=2`);
+    expect(res.status).toBe(401);
+    const body = await res.text();
+    expect(body).not.toContain("slug");
+  });
+
+  test("GET /get with no token -> 401", async () => {
+    const res = await rawFetch(`${baseUrl}/get?slug=anything`);
+    expect(res.status).toBe(401);
+  });
+
+  test("POST /recall with no token -> 401", async () => {
+    const res = await rawFetch(`${baseUrl}/recall`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: "anything" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("POST /remember with no token -> 401 (no unauthenticated writes either)", async () => {
+    const res = await rawFetch(`${baseUrl}/remember`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fact: "unauthenticated write marker", type: "project" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("POST /mcp with no token -> 401 (the MCP surface exposes the same reads)", async () => {
+    const res = await rawFetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("a wrong token -> 401", async () => {
+    const res = await rawFetch(`${baseUrl}/list?limit=2`, { headers: { [DAEMON_TOKEN_HEADER]: "0".repeat(64) } });
+    expect(res.status).toBe(401);
+  });
+
+  test("the minted token -> 200", async () => {
+    const res = await rawFetch(`${baseUrl}/list?limit=2`, { headers: { [DAEMON_TOKEN_HEADER]: token } });
+    expect(res.status).toBe(200);
+  });
+
+  test("GET /health stays open: the CLI probes identity BEFORE it can authenticate", async () => {
+    const res = await rawFetch(`${baseUrl}/health`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("ok");
+  });
+
+  test("the token file is 0600 and holds 64 hex chars", async () => {
+    const { statSync } = await import("node:fs");
+    const { daemonTokenPath } = await import("../src/token.js");
+    expect((statSync(daemonTokenPath()).mode & 0o777).toString(8)).toBe("600");
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 

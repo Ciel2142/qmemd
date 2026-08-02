@@ -7,6 +7,7 @@ import { remember, recallQueryWithStatus, recallSession, forget as forgetFact, m
 import { memoryRoot } from "../paths.js";
 import { gitPullFfOnly, sessionSyncWarning, type GitDeps } from "../git.js";
 import { rootHash } from "../client.js";
+import { DAEMON_TOKEN_HEADER, readOrCreateDaemonToken, tokenMatches } from "../token.js";
 import { shouldAutoResolve, autoRecallMode, resolveExplicitMode, type RecallMode } from "../capability.js";
 import { basename } from "node:path";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -581,6 +582,9 @@ export async function startMcpHttpServer(
   const root = memoryRoot();
   const quiet = options.quiet ?? false;
   const startTime = Date.now();
+  // Minted on first start, 0600 under cacheDir() (mio). Read once: the daemon owns the
+  // value for its lifetime, so a token file deleted underneath it does not open the door.
+  const token = readOrCreateDaemonToken();
 
   // qmemd's tools are independent calls on the shared store — no session continuity is needed,
   // so the MCP transport runs STATELESS. The WebStandard stateless transport cannot be reused
@@ -639,6 +643,16 @@ export async function startMcpHttpServer(
       try { url = new URL(nodeReq.url || "/", `http://localhost:${port}`); }
       catch { sendJson(nodeRes, 400, { error: "invalid request target" }); return; }
       const pathname = url.pathname;
+
+      // Daemon token (qp-http-daemon-no-auth-mio): the guards above are the BROWSER threat
+      // model — they do not stop another local process, which sends a loopback Host, no
+      // Origin, and (on /list, /get) no body at all. Every route needs the shared secret;
+      // GET /health is the one exemption, because the CLI probes root identity there before
+      // it has any reason to authenticate, and it returns a hash, never fact data.
+      if (!(pathname === "/health" && method === "GET") && !tokenMatches(token, nodeReq.headers[DAEMON_TOKEN_HEADER])) {
+        sendJson(nodeRes, 401, { error: `unauthorized: missing or invalid ${DAEMON_TOKEN_HEADER}` });
+        return;
+      }
 
       if (pathname === "/health" && method === "GET") {
         // rootHash (qmemd-vuk): identity of the served memory root, as a sha256 so no

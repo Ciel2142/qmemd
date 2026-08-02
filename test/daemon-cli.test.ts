@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { cleanEnv } from "./support/env.js";
@@ -84,5 +84,35 @@ describe.skipIf(!!process.env.CI)("qmemd mcp --http --daemon lifecycle", () => {
     const stop = runCli(["mcp", "stop"], cache, mem);
     expect(stop.status).toBe(0);
     expect(stop.stdout).toMatch(/stopped/i);
+  });
+});
+
+/**
+ * `qmemd mcp token` (qp-http-daemon-no-auth-mio). The daemon authenticates every route but
+ * GET /health; the qmemd CLI reads the token file itself, so this verb exists for OTHER
+ * clients — an MCP client registered against http://localhost:<port>/mcp must send it as a
+ * header. It mints the token when the daemon has not started yet, so a user can configure
+ * the client before the first start.
+ */
+describe("qmemd mcp token", () => {
+  let cache: string, mem: string;
+  beforeEach(async () => {
+    cache = await mkdtemp(join(tmpdir(), "qmemd-token-cache-"));
+    mem = await mkdtemp(join(tmpdir(), "qmemd-token-mem-"));
+  });
+  afterEach(async () => {
+    await rm(cache, { recursive: true, force: true });
+    await rm(mem, { recursive: true, force: true });
+  });
+
+  test("prints a 64-hex token, mints it 0600 when absent, and is stable across calls", () => {
+    const first = runCli(["mcp", "token"], cache, mem);
+    expect(first.status).toBe(0);
+    const token = first.stdout.trim();
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect((statSync(join(cache, "qmemd", "daemon-token")).mode & 0o777).toString(8)).toBe("600");
+
+    const second = runCli(["mcp", "token"], cache, mem);
+    expect(second.stdout.trim()).toBe(token); // a new value would lock out every configured client
   });
 });
