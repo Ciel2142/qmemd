@@ -3894,6 +3894,30 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
       errSpy.mockRestore();
     }
   });
+
+  test("a LIVE Tier-2 row that contradicts surfaces the authority comparison for that row's own fact (vkn)", async () => {
+    const { remember } = await import("../src/engine.js");
+    // The Tier-2 conflict branch is the only place authorityComparison is built from a fact the
+    // index named rather than one the disk scan found, and every other vkn test reaches it
+    // through Tier-2.5 — so nothing pinned it: deleting the attachment here broke no test.
+    // The row is LIVE (not a ghost), so Tier-2 blocks, and the comparison must describe the very
+    // file the block reports: existing = the user fact behind qmd://memory/user/cache-ttl.md.
+    await mkdir(join(root, "user"), { recursive: true });
+    await writeFile(join(root, "user", "cache-ttl.md"),
+      "---\nname: cache-ttl\ndescription: The cache TTL is 60 seconds\ntype: user\ntags: []\nproject: global\ncreated: 2026-01-01\npinned: false\nsource: obs 2026-06-01\n---\n\nThe cache TTL is 60 seconds\n");
+    const res = await remember(ghostTopHitStore("qmd://memory/user/cache-ttl.md"), root, {
+      fact: "The cache TTL is 120 seconds", type: "project", source: "obs 2026-06-08",
+    });
+    expect(res.wrote).toBe(false);
+    expect(res.disposition).toBe("conflict");
+    expect(res.duplicateOf).toBe("cache-ttl");
+    const cmp = res.authorityComparison;
+    expect(cmp).toBeDefined();
+    expect(cmp!.incoming).toEqual({ type: "project", tier: 1, source: "obs 2026-06-08" });
+    expect(cmp!.existing.type).toBe("user");          // read from the row's file, not the input
+    expect(cmp!.existing.source).toBe("obs 2026-06-01");
+    expect(cmp!.verdict).toBe("existing-higher");
+  });
 });
 
 describe("lexDedupQuery (qp-xfx)", () => {
