@@ -1082,26 +1082,51 @@ async function reindexMemory(store: QMDStore): Promise<void> {
   await store.update({ collections: [MEMORY_COLLECTION] });
 }
 
-/** Build the near-duplicate preview (the matched fact's description + a capped, ellipsised
- *  body) for a blocked remember, so the decider can see what it collided with (qmemd-cs0).
- *  Best-effort: returns {} when the file is missing/unreadable — the block still reports
- *  duplicateOf. Filesystem only, mirrors the recall body cap; never returns a path. */
+/** The near-duplicate preview for a fact already in hand: the matched fact's description + a
+ *  capped, ellipsised body, so the decider can see what it collided with (qmemd-cs0). Pure —
+ *  mirrors the recall body cap, never returns a path. */
+function factPreview(f: FullFact): Pick<RememberResult, "duplicateDescription" | "duplicateBody"> {
+  const full = f.body.trim();
+  const capped = truncateToBytes(full, RECALL_BODY_CAP);
+  // truncateToBytes returns a strict prefix when it cut — a shorter result means bytes
+  // were dropped, so append the ellipsis exactly once (mirrors recallQuery).
+  const body = capped.length < full.length ? capped + "…" : capped;
+  return { duplicateDescription: f.frontmatter.description, duplicateBody: body || undefined };
+}
+
+/** factPreview for a fact named only by slug. Best-effort: returns {} when the file is
+ *  missing/unreadable — the block still reports duplicateOf. Filesystem only. */
 function duplicatePreview(root: string, slug: string): Pick<RememberResult, "duplicateDescription" | "duplicateBody"> {
   try {
     const f = getFact(root, slug);
-    if (!f) return {};
-    const full = f.body.trim();
-    const capped = truncateToBytes(full, RECALL_BODY_CAP);
-    // truncateToBytes returns a strict prefix when it cut — a shorter result means bytes
-    // were dropped, so append the ellipsis exactly once (mirrors recallQuery).
-    const body = capped.length < full.length ? capped + "…" : capped;
-    return { duplicateDescription: f.frontmatter.description, duplicateBody: body || undefined };
+    return f ? factPreview(f) : {};
   } catch { return {}; }
 }
 
-/** Build the conflict authority comparison (qmemd-vkn): tier both facts by type, surface the
- *  colliding fact's raw source + created. Best-effort — returns undefined when the colliding file
- *  is unreadable (mirrors duplicatePreview), so a conflict is never blocked on this lookup. */
+/** The conflict authority comparison for a fact already in hand (qmemd-vkn): tier both facts by
+ *  type, surface the colliding fact's raw source + created. Pure. */
+function authorityComparisonOf(
+  incomingType: MemoryType,
+  incomingSource: string | undefined,
+  existing: FullFact,
+): AuthorityComparison {
+  const incomingTier = authorityTier(incomingType);
+  const existingType = existing.frontmatter.type;
+  const existingTier = authorityTier(existingType);
+  const verdict =
+    incomingTier > existingTier ? "incoming-higher" :
+    incomingTier < existingTier ? "existing-higher" :
+    "equal";
+  return {
+    incoming: { type: incomingType, tier: incomingTier, source: incomingSource },
+    existing: { type: existingType, tier: existingTier, source: existing.frontmatter.source, created: existing.frontmatter.created },
+    verdict,
+  };
+}
+
+/** authorityComparisonOf for a fact named only by slug. Best-effort — returns undefined when the
+ *  colliding file is unreadable (mirrors duplicatePreview), so a conflict is never blocked on
+ *  this lookup. */
 function buildAuthorityComparison(
   root: string,
   incomingType: MemoryType,
@@ -1110,19 +1135,7 @@ function buildAuthorityComparison(
 ): AuthorityComparison | undefined {
   try {
     const existing = getFact(root, existingSlug);
-    if (!existing) return undefined;
-    const incomingTier = authorityTier(incomingType);
-    const existingType = existing.frontmatter.type;
-    const existingTier = authorityTier(existingType);
-    const verdict =
-      incomingTier > existingTier ? "incoming-higher" :
-      incomingTier < existingTier ? "existing-higher" :
-      "equal";
-    return {
-      incoming: { type: incomingType, tier: incomingTier, source: incomingSource },
-      existing: { type: existingType, tier: existingTier, source: existing.frontmatter.source, created: existing.frontmatter.created },
-      verdict,
-    };
+    return existing ? authorityComparisonOf(incomingType, incomingSource, existing) : undefined;
   } catch { return undefined; }
 }
 
@@ -1655,33 +1668,40 @@ export async function remember(
         // "…JDK 21" vs "…JDK 25", where the i5y AND-query assumption does not hold and Tier-2
         // fires before Tier-2.5 can classify (qmemd-5td). Classify here too instead of assuming
         // "duplicate", mirroring Tier-2.5, so an FTS-caught conflict SURFACES with its authority
-        // comparison rather than being silently swallowed as a dup. Fall back to "duplicate" if
-        // the matched fact is unreadable — wrap the lookup best-effort (mirrors duplicatePreview),
-        // so a parse error on the matched file never aborts this write either.
-        // GHOST vs unreadable (qp-ghost-index-dedup-block-uss): getFact returning null WITHOUT
-        // throwing means no folder holds the slug at all — the index outlived the file. That is
-        // reachable without hand-editing: `recall --session` git-pulls a deletion made on another
-        // machine (nothing reindexes on pull), and forget()'s reindex failure is caught-and-logged,
-        // leaving the doc active. Blocking on such a row withheld the write FOREVER — the blocked
-        // path writes nothing, so nothing ever reindexes the ghost away, and duplicateOf pointed at
-        // a slug the operator cannot even `show`. Drop the candidate and fall through to the
-        // Tier-2.5 disk scan, which reads real files and is immune to index rot (same treatment
-        // the malformed row gets below). A THROW is different — a real file is there, we just
-        // cannot classify it — so that keeps blocking as "duplicate".
+        // comparison rather than being silently swallowed as a dup.
+        // Resolve the candidate by the ROW'S OWN PATH, not by slug (qp-ghost-index-dedup-block-uss
+        // + qp-t16). The row names one specific <type>/<slug>.md, and that file is the only thing
+        // its BM25 score was computed from. A slug-keyed getFact scans every type folder, which
+        // broke two ways: an unrelated fact sharing the slug under another type made a real ghost
+        // look live and withheld the write forever, and when the row's type segment was merely
+        // stale the block reported the row's type/path — a path that does not exist — while the
+        // preview showed a different file. Reading dupPath makes both impossible: null means the
+        // row is a ghost, and a hit is by construction the fact the reported type/path names.
+        // A ghost is reachable without hand-editing: `recall --session` git-pulls a deletion made
+        // on another machine (nothing reindexes on pull), and forget()'s reindex failure is
+        // caught-and-logged, leaving the doc active. Blocking on such a row withheld the write
+        // FOREVER — the blocked path writes nothing, so nothing ever reindexes the ghost away, and
+        // duplicateOf pointed at a slug the operator cannot even `show`. Drop the candidate and
+        // fall through to the Tier-2.5 disk scan, which reads real files and is immune to index
+        // rot (the same treatment the malformed row gets below); if the fact really did move
+        // folders, that scan finds it and blocks with its true type and path. A THROW is
+        // different — a real file is there, we just cannot classify it — so that keeps blocking as
+        // "duplicate", the pre-existing best-effort behavior (mirrors duplicatePreview).
         let existing: FullFact | null = null;
         let unreadable = false;
-        try { existing = getFact(root, dupSlug); } catch { unreadable = true; }
+        try { existing = readFactAt(root, dupType, dupSlug); } catch { unreadable = true; }
         if (existing || unreadable) {
           const disposition: RememberDisposition = existing
             ? classifyNearMatch(`${slug} ${firstLine(input.fact)}`, `${existing.frontmatter.name} ${firstLine(existing.body)}`)
             : "duplicate";
           // No write happened, so nothing is newly unindexed (qmemd-32x). Surface the
           // matched fact so the decider isn't blocked blind (qmemd-cs0).
-          return { wrote: false, slug: dupSlug, path: dupPath, type: dupType, duplicateOf: dupSlug, disposition, indexed: true, synced: true, dedupSkipped, ...duplicatePreview(root, dupSlug),
-            ...(disposition === "conflict" ? { authorityComparison: buildAuthorityComparison(root, type, input.source, dupSlug) } : {}) };
+          return { wrote: false, slug: dupSlug, path: dupPath, type: dupType, duplicateOf: dupSlug, disposition, indexed: true, synced: true, dedupSkipped, ...(existing ? factPreview(existing) : {}),
+            ...(disposition === "conflict" && existing ? { authorityComparison: authorityComparisonOf(type, input.source, existing) } : {}) };
         }
-        // Self-healing is implicit: if the write lands, the reindex that follows it drops the
-        // ghost row. A Tier-2.5 block leaves the row in place — `qmemd reindex` clears it.
+        // Self-healing is implicit: if the write lands, the reindex that follows it sweeps the
+        // ghost row (qmd deactivates active paths it no longer finds on disk, and the FTS row goes
+        // with it). A Tier-2.5 block leaves the row in place — `qmemd reindex` clears it.
         console.error(`[qmemd] remember: skipping ghost Tier-2 index hit '${dupType}/${dupSlug}' (indexed but no such fact on disk) — run qmemd reindex`);
       } else {
         console.error(`[qmemd] remember: skipping malformed Tier-2 index hit '${top.filepath}' (not a <memory-type>/<slug>.md path) — run qmemd reindex`);
@@ -2516,17 +2536,26 @@ export interface FullFact {
   path: string;
 }
 
+/** Read the fact stored at one exact `<type>/<slug>.md` path. Unlike getFact — which resolves a
+ *  slug across EVERY type folder — this answers the question a stale index row actually poses:
+ *  "is the file THIS row names still there?". Returns null when it is not (a ghost); throws only
+ *  when the file exists but cannot be read (EISDIR/EACCES), which callers treat as
+ *  unreadable-but-present. Filesystem only — no Store, no model. */
+function readFactAt(root: string, type: MemoryType, slug: string): FullFact | null {
+  const path = memoryFilePath(root, type, slug);
+  if (!existsSync(path)) return null;
+  const parsed = parseMemory(readFileSync(path, "utf-8"));
+  return { slug, type, frontmatter: parsed.frontmatter, body: parsed.body, path };
+}
+
 /** Fetch one fact in full by slug, scanning every type folder (the same cross-type
  *  search forget() does). Returns null when no folder holds the slug. Filesystem
  *  only — no Store, no model (bgf). */
 export function getFact(root: string, slug: string): FullFact | null {
   assertSafeSlug(slug); // reject traversal/newline before any fs touch (qmemd-fd8)
   for (const type of MEMORY_TYPES) {
-    const path = memoryFilePath(root, type, slug);
-    if (existsSync(path)) {
-      const parsed = parseMemory(readFileSync(path, "utf-8"));
-      return { slug, type, frontmatter: parsed.frontmatter, body: parsed.body, path };
-    }
+    const fact = readFactAt(root, type, slug);
+    if (fact) return fact;
   }
   return null;
 }

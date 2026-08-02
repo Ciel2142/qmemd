@@ -3846,6 +3846,52 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
     expect(res.disposition).toBe("duplicate");
     expect(res.duplicateOf).toBe("unreadable-fact");
   });
+
+  test("a shadow fact under another type does not resurrect the ghost block (B1)", async () => {
+    const { remember, getFact } = await import("../src/engine.js");
+    // The index row names project/foo, whose file is GONE. An UNRELATED fact happens to hold
+    // the same slug under user/. Resolving the candidate by slug finds that stranger, blocks
+    // the write forever, and previews the wrong fact — the exact qp-ghost-index-dedup-block-uss
+    // failure. The candidate must be resolved by the ROW's own path.
+    await mkdir(join(root, "user"), { recursive: true });
+    await writeFile(join(root, "user", "foo.md"),
+      "---\nname: foo\ndescription: Totally unrelated user preference\ntype: user\ntags: []\nproject: global\ncreated: 2026-01-01\npinned: false\n---\n\nTotally unrelated user preference about tabs\n");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await remember(ghostTopHitStore("qmd://memory/project/foo.md"), root, {
+        fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project",
+      });
+      expect(res.wrote).toBe(true);
+      expect(res.duplicateOf).toBeUndefined();
+      expect(getFact(root, res.slug)).not.toBeNull();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a stale type segment never reports a type/path the fact does not have (qp-t16)", async () => {
+    const { remember } = await import("../src/engine.js");
+    // The row says project/<slug>; the fact actually lives under reference/ (a retype that was
+    // committed on another machine and pulled here without a reindex). The row's file is gone,
+    // so this is a ghost: fall through to the Tier-2.5 disk scan, which finds the real file and
+    // blocks with ITS type and path. Reporting the row's project/... path — which does not
+    // exist — while the preview shows the reference/ file's body is the bug.
+    await mkdir(join(root, "reference"), { recursive: true });
+    await writeFile(join(root, "reference", "redpanda-broker-runs-on-the-lab-pi-server.md"),
+      "---\nname: redpanda-broker-runs-on-the-lab-pi-server\ndescription: Redpanda broker runs on the lab pi server\ntype: reference\ntags: []\nproject: global\ncreated: 2026-01-01\npinned: false\n---\n\nRedpanda broker runs on the lab pi server\n");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await remember(ghostTopHitStore("qmd://memory/project/redpanda-broker-runs-on-the-lab-pi-server.md"), root, {
+        fact: "Redpanda broker runs on lab pi node", type: "project",
+      });
+      expect(res.wrote).toBe(false);
+      expect(res.duplicateOf).toBe("redpanda-broker-runs-on-the-lab-pi-server");
+      expect(res.type).toBe("reference");            // the fact's real type, not the row's
+      expect(existsSync(res.path!)).toBe(true);      // never a path that does not exist
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
 
 describe("completenessFooter (40h)", () => {
