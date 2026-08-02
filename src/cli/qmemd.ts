@@ -12,12 +12,18 @@ import { memoryRoot, cacheDir, daemonPaths, systemdUserDir, qmemdConfigDir, laun
 import { readOrCreateDaemonToken } from "../token.js";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { serviceArtifacts, captureDaemonEnv, writeArtifacts, removeArtifacts } from "../service.js";
 import { auditMemory, fixMemory, type FactReport } from "../doctor.js";
 import { dedupReport, mergeProposal, buildMergeCommands, DEDUP_REPORT_DICE, type DedupReport, type MergeProposal } from "../dedup.js";
 
 const g = "\x1b[32m", y = "\x1b[33m", d = "\x1b[2m", r = "\x1b[0m", cy = "\x1b[36m";
+
+// Real shipped version, read from package.json the same way the MCP server does (qmemd-8ez):
+// a literal here would drift on every bump. createRequire resolves two dirs up in both the
+// src-via-tsx and dist-via-node layouts.
+const VERSION: string = (createRequire(import.meta.url)("../../package.json") as { version: string }).version;
 
 /**
  * Validate a CLI --type value against the closed MemoryType enum (qmemd-jzz).
@@ -232,11 +238,17 @@ async function main() {
       // --help threw ERR_PARSE_ARGS_UNKNOWN_OPTION before dispatch and the top-level
       // catch dumped a raw stack trace (qmemd-3ix). Route it to printUsage, exit 0.
       help: { type: "boolean", short: "h" },
+      // Same class as --help (qmemd-3ix), and worse: README tells every new npm consumer to
+      // run `qmemd --version` to verify the install, and an undeclared flag threw
+      // ERR_PARSE_ARGS_UNKNOWN_OPTION whose top-level catch printed a raw stack AND exited 0
+      // — an install check reads success while the user sees a crash (n25.1, from 5ks item 1).
+      version: { type: "boolean", short: "v" },
       supersedes: { type: "string" },
       "review-by": { type: "string" }, ttl: { type: "string" },
     },
   });
   const [verb, ...rest] = positionals;
+  if (values.version) { console.log(VERSION); return; }
   if (values.help) { printUsage(); return; }
   const root = memoryRoot();
 

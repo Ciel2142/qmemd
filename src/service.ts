@@ -83,6 +83,17 @@ function envFileBody(env: Array<[string, string]>): string {
   return [...header, ...lines].join("\n") + "\n";
 }
 
+/**
+ * Quote a path for a systemd unit line, only when it needs it. systemd splits ExecStart on
+ * whitespace, so an npm prefix or HOME with a space produced a unit that silently ran the
+ * wrong argv (nud.1, carved from qp-infra-hardening-minors-pik). Left bare otherwise so the
+ * generated unit stays readable and unchanged for ordinary paths.
+ */
+function unitQuote(value: string): string {
+  if (!/[\s"'\\]/.test(value)) return value;
+  return `"${value.replace(/(["\\])/g, "\\$1")}"`;
+}
+
 function linuxArtifacts(opts: ServiceOpts): ServiceArtifacts {
   const { port, exec, env, dirs } = opts;
   const envPath = join(dirs.qmemdConfig, "daemon.env");
@@ -96,8 +107,8 @@ function linuxArtifacts(opts: ServiceOpts): ServiceArtifacts {
     "[Service]",
     "Type=simple",
     "WorkingDirectory=%h",
-    `EnvironmentFile=${envPath}`,
-    `ExecStart=${exec.bin} ${exec.entry} mcp --http --port ${port}`,
+    `EnvironmentFile=${unitQuote(envPath)}`,
+    `ExecStart=${unitQuote(exec.bin)} ${unitQuote(exec.entry)} mcp --http --port ${port}`,
     "Restart=always",
     "RestartSec=2",
     "",

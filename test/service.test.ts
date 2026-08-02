@@ -87,6 +87,26 @@ describe("serviceArtifacts linux", () => {
     expect(unit).toContain("WantedBy=default.target");
   });
 
+  // qp-epic-daemon-handshake-auth-nud.1 (carved from pik item 1): the unit interpolated
+  // bin/entry/EnvironmentFile raw. systemd splits ExecStart on whitespace, so an npm prefix
+  // or HOME containing a space produced a unit that silently ran the wrong argv — and the
+  // daemon-token work interpolates one more path into this same generator.
+  test("a path containing a space is quoted in ExecStart and EnvironmentFile", () => {
+    const spaced = serviceArtifacts("linux", {
+      ...OPTS,
+      exec: { bin: "/opt/my tools/bun", entry: "/app/my app/dist/cli/qmemd.js" },
+      dirs: { ...OPTS.dirs, qmemdConfig: "/c/my config" },
+    });
+    const unit = spaced.files[0].content;
+    expect(unit).toContain('ExecStart="/opt/my tools/bun" "/app/my app/dist/cli/qmemd.js" mcp --http --port 8182');
+    expect(unit).toContain('EnvironmentFile="' + join("/c/my config", "daemon.env") + '"');
+  });
+
+  test("a path containing a double quote is escaped, not left to split the word", () => {
+    const odd = serviceArtifacts("linux", { ...OPTS, exec: { bin: '/opt/we"ird/bun', entry: "/app/x.js" } });
+    expect(odd.files[0].content).toContain('ExecStart="/opt/we\\"ird/bun" /app/x.js mcp --http --port 8182');
+  });
+
   test("daemon.env carries the pairs and never QMD_EMBED_MODEL", () => {
     const envFile = a.files[1].content;
     expect(envFile).toContain("QMD_MEMORY_DIR=/mem");

@@ -1341,3 +1341,27 @@ describe("dedup --apply (qmemd-3fb)", () => {
     expect(out.stderr).toMatch(/invalid plan/);
   });
 });
+
+/**
+ * n25.1 (carved from qp-readme-docs-drift-batch-5ks item 1): `--version` was undeclared, so
+ * parseArgs threw ERR_PARSE_ARGS_UNKNOWN_OPTION, the top-level catch printed a raw stack —
+ * and the process still exited 0. README:112 tells every new npm consumer to run exactly
+ * this to verify their install, so an install check read success while the user saw a crash.
+ */
+describe("CLI --version (n25.1)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-version-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  test("prints the package version, exits 0, and dumps no stack", () => {
+    const pkg = JSON.parse(readFileSync(resolve(__dirname, "..", "package.json"), "utf-8")) as { version: string };
+    const res = runCli(["--version"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout.trim()).toBe(pkg.version);
+    expect(res.stderr).not.toContain("ERR_PARSE_ARGS_UNKNOWN_OPTION");
+  });
+
+  test("-v is the same", () => {
+    expect(runCli(["-v"], root).stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+});
