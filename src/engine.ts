@@ -1658,17 +1658,34 @@ export async function remember(
         // comparison rather than being silently swallowed as a dup. Fall back to "duplicate" if
         // the matched fact is unreadable — wrap the lookup best-effort (mirrors duplicatePreview),
         // so a parse error on the matched file never aborts this write either.
+        // GHOST vs unreadable (qp-ghost-index-dedup-block-uss): getFact returning null WITHOUT
+        // throwing means no folder holds the slug at all — the index outlived the file. That is
+        // reachable without hand-editing: `recall --session` git-pulls a deletion made on another
+        // machine (nothing reindexes on pull), and forget()'s reindex failure is caught-and-logged,
+        // leaving the doc active. Blocking on such a row withheld the write FOREVER — the blocked
+        // path writes nothing, so nothing ever reindexes the ghost away, and duplicateOf pointed at
+        // a slug the operator cannot even `show`. Drop the candidate and fall through to the
+        // Tier-2.5 disk scan, which reads real files and is immune to index rot (same treatment
+        // the malformed row gets below). A THROW is different — a real file is there, we just
+        // cannot classify it — so that keeps blocking as "duplicate".
         let existing: FullFact | null = null;
-        try { existing = getFact(root, dupSlug); } catch { existing = null; }
-        const disposition: RememberDisposition = existing
-          ? classifyNearMatch(`${slug} ${firstLine(input.fact)}`, `${existing.frontmatter.name} ${firstLine(existing.body)}`)
-          : "duplicate";
-        // No write happened, so nothing is newly unindexed (qmemd-32x). Surface the
-        // matched fact so the decider isn't blocked blind (qmemd-cs0).
-        return { wrote: false, slug: dupSlug, path: dupPath, type: dupType, duplicateOf: dupSlug, disposition, indexed: true, synced: true, dedupSkipped, ...duplicatePreview(root, dupSlug),
-          ...(disposition === "conflict" ? { authorityComparison: buildAuthorityComparison(root, type, input.source, dupSlug) } : {}) };
+        let unreadable = false;
+        try { existing = getFact(root, dupSlug); } catch { unreadable = true; }
+        if (existing || unreadable) {
+          const disposition: RememberDisposition = existing
+            ? classifyNearMatch(`${slug} ${firstLine(input.fact)}`, `${existing.frontmatter.name} ${firstLine(existing.body)}`)
+            : "duplicate";
+          // No write happened, so nothing is newly unindexed (qmemd-32x). Surface the
+          // matched fact so the decider isn't blocked blind (qmemd-cs0).
+          return { wrote: false, slug: dupSlug, path: dupPath, type: dupType, duplicateOf: dupSlug, disposition, indexed: true, synced: true, dedupSkipped, ...duplicatePreview(root, dupSlug),
+            ...(disposition === "conflict" ? { authorityComparison: buildAuthorityComparison(root, type, input.source, dupSlug) } : {}) };
+        }
+        // Self-healing is implicit: if the write lands, the reindex that follows it drops the
+        // ghost row. A Tier-2.5 block leaves the row in place — `qmemd reindex` clears it.
+        console.error(`[qmemd] remember: skipping ghost Tier-2 index hit '${dupType}/${dupSlug}' (indexed but no such fact on disk) — run qmemd reindex`);
+      } else {
+        console.error(`[qmemd] remember: skipping malformed Tier-2 index hit '${top.filepath}' (not a <memory-type>/<slug>.md path) — run qmemd reindex`);
       }
-      console.error(`[qmemd] remember: skipping malformed Tier-2 index hit '${top.filepath}' (not a <memory-type>/<slug>.md path) — run qmemd reindex`);
     }
 
     // Tier 2.5: model-free near-duplicate pre-pass (qmemd-i5y) + contradiction classifier

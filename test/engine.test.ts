@@ -3782,6 +3782,72 @@ describe("Tier-2 dedup skips a malformed index row (qp-tier2-malformed-row-abort
   });
 });
 
+describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-tier2-ghost-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  // The index can outlive the file: `recall --session` git-pulls a deletion made on another
+  // machine (nothing reindexes on pull), and forget()'s reindex failure is caught-and-logged,
+  // leaving the doc active. That stale row then wins Tier-2 for an unrelated remember — getFact
+  // returns null, and the "duplicate" fallback blocked the write against a fact that does not
+  // exist. Permanently: the blocked path writes nothing, so nothing ever reindexes it away.
+  function ghostTopHitStore(filepath: string) {
+    return {
+      async searchLex() { return [{ filepath, title: "", score: 1 }]; },
+      async update() { return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0 }; },
+    } as unknown as QMDStore;
+  }
+
+  test("a well-formed top lex hit whose file is gone does not block the write", async () => {
+    const { remember, getFact } = await import("../src/engine.js");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await remember(ghostTopHitStore("qmd://memory/project/vanished-fact.md"), root, {
+        fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project",
+      });
+      expect(res.wrote).toBe(true);
+      expect(res.duplicateOf).toBeUndefined();
+      expect(getFact(root, res.slug)).not.toBeNull();
+      expect(errSpy.mock.calls.flat().join("\n")).toMatch(/ghost/i);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("the ghost falls through to Tier-2.5, which still blocks a REAL on-disk near-dup", async () => {
+    const { remember } = await import("../src/engine.js");
+    await mkdir(join(root, "project"), { recursive: true });
+    await writeFile(join(root, "project", "redpanda-broker-runs-on-the-lab-pi-server.md"),
+      "---\nname: redpanda-broker-runs-on-the-lab-pi-server\ndescription: Redpanda broker runs on the lab pi server\ntype: project\ntags: []\nproject: global\ncreated: 2026-01-01\npinned: false\n---\n\nRedpanda broker runs on the lab pi server\n");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await remember(ghostTopHitStore("qmd://memory/project/vanished-fact.md"), root, {
+        fact: "Redpanda broker runs on lab pi node", type: "project",
+      });
+      // Dropping the ghost must not weaken dedup: the disk scan is immune to index rot.
+      expect(res.wrote).toBe(false);
+      expect(res.duplicateOf).toBe("redpanda-broker-runs-on-the-lab-pi-server");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a matched fact that EXISTS but is unreadable still blocks (best-effort duplicate fallback)", async () => {
+    const { remember } = await import("../src/engine.js");
+    // A directory at the fact's path: existsSync passes, readFileSync throws EISDIR. This is the
+    // case the "duplicate" fallback is actually for — something IS there, we just can't classify
+    // it — and it must keep blocking. Only the nothing-is-there ghost may fall through.
+    await mkdir(join(root, "project", "unreadable-fact.md"), { recursive: true });
+    const res = await remember(ghostTopHitStore("qmd://memory/project/unreadable-fact.md"), root, {
+      fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project",
+    });
+    expect(res.wrote).toBe(false);
+    expect(res.disposition).toBe("duplicate");
+    expect(res.duplicateOf).toBe("unreadable-fact");
+  });
+});
+
 describe("completenessFooter (40h)", () => {
   test("returns null when nothing is hidden (40h footer)", async () => {
     const { completenessFooter } = await import("../src/engine.js");
