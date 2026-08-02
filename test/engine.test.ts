@@ -3896,6 +3896,36 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
   });
 });
 
+describe("lexDedupQuery (qp-xfx)", () => {
+  test("flattens intra-token punctuation the FTS5 tokenizer split on", async () => {
+    const { lexDedupQuery } = await import("../src/engine.js");
+    expect(lexDedupQuery("the night shift starts at 22:00 sharp")).toBe("the night shift starts at 22 00 sharp");
+    expect(lexDedupQuery("dashboard at https://pi.local/grafana")).toBe("dashboard at https pi local grafana");
+    expect(lexDedupQuery("broker on host:9092 with key=value and user@host")).toBe("broker on host 9092 with key value and user host");
+  });
+
+  test("neutralises a leading dash, which qmd parses as FTS5 negation", async () => {
+    const { lexDedupQuery } = await import("../src/engine.js");
+    // "--force" reached buildFTS5Query as NOT "force"*, so a fact quoting a CLI flag excluded
+    // the very document it came from.
+    expect(lexDedupQuery("pass the --force flag")).toBe("pass the force flag");
+  });
+
+  test("keeps the characters qmd's own sanitizer keeps, and CJK letters", async () => {
+    const { lexDedupQuery } = await import("../src/engine.js");
+    expect(lexDedupQuery("don't touch some_var")).toBe("don't touch some_var");
+    expect(lexDedupQuery("日本語テスト")).toBe("日本語テスト");
+  });
+
+  test("collapses a punctuation-only fact to the empty string", async () => {
+    const { lexDedupQuery } = await import("../src/engine.js");
+    // qmd's buildFTS5Query returns null for this and searchFTS returns [], so Tier-2 simply
+    // finds nothing and the write falls through to the Tier-2.5 disk scan. No guard needed.
+    expect(lexDedupQuery("...")).toBe("");
+    expect(lexDedupQuery("   ")).toBe("");
+  });
+});
+
 describe("completenessFooter (40h)", () => {
   test("returns null when nothing is hidden (40h footer)", async () => {
     const { completenessFooter } = await import("../src/engine.js");

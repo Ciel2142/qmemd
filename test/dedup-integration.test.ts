@@ -50,4 +50,27 @@ describe("dedup against a real qmd index", () => {
     const after = await store.searchLex("Redpanda broker runs on lab pi", { limit: 10, collection: "memory" });
     expect(after.map(r => r.filepath)).toEqual([expect.stringContaining(`project/${second.slug}.md`)]);
   });
+
+  test("a byte-identical URL fact is blocked even under a different --as slug", async () => {
+    const fact = "Metrics live at https://grafana.pi.local:3000/d/abc";
+    const first = await remember(store, root, { fact, type: "project" });
+    expect(first.wrote).toBe(true);
+    // Tier-1 misses (different slug). Tier-2 used to miss too, because the URL was searched as
+    // one concatenated token. Tier-2.5 also misses: its slug+firstLine token sets diverge once
+    // --as swaps the slug in (measured dice 0.7778 vs the 0.82 floor), so the identical fact was
+    // written twice.
+    const second = await remember(store, root, { fact, type: "project", as: "ops-note" });
+    expect(second.wrote).toBe(false);
+    expect(second.disposition).toBe("duplicate");
+    expect(second.duplicateOf).toBe(first.slug);
+  });
+
+  test("a fact quoting a CLI flag matches itself through the index (negation leg)", async () => {
+    const { lexDedupQuery } = await import("../src/engine.js");
+    const fact = "Use --force to bypass the dedup guard on remember";
+    await remember(store, root, { fact, type: "project" });
+    // Raw: the leading dash became FTS5 negation (NOT "force"*), so the fact excluded itself.
+    expect(await store.searchLex(fact, { limit: 5, collection: "memory" })).toHaveLength(0);
+    expect(await store.searchLex(lexDedupQuery(fact), { limit: 5, collection: "memory" })).toHaveLength(1);
+  });
 });

@@ -238,6 +238,27 @@ export function normalizeForHash(text: string): string {
 }
 
 /**
+ * Flatten a fact into tokens the lex index actually holds, for the DEDUP search only.
+ *
+ * qmd's buildFTS5Query sends each plain term through sanitizeFTS5Term —
+ * `term.replace(/[^\p{L}\p{N}'_]/gu, '')` emitted as `"<sanitized>"*` — which DELETES
+ * intra-token punctuation, while the FTS5 tokenizer that built the index SPLIT the text on
+ * that same punctuation. So "pi.local" is searched as pilocal*, which cannot match the
+ * document it came from and CAN match an unrelated one containing the literal token pilocal.
+ * A leading '-' is separately parsed as negation, so a fact quoting `--force` searched for
+ * NOT "force"* and excluded itself. Measured: a doc containing host:9092 / key=value /
+ * user@host / a/b returns ZERO hits when queried with those exact strings (qp-xfx).
+ *
+ * Dedup feeds MACHINE text — the fact body — not a user query, so it must not be interpreted
+ * as a query DSL at all: no negation, no phrase syntax, just tokens. recallQuery deliberately
+ * does NOT use this; a user query legitimately carries -negation and "phrases", and the real
+ * fix for the recall/hybrid path is upstream in qmd's sanitizer.
+ */
+export function lexDedupQuery(text: string): string {
+  return text.replace(/[^\p{L}\p{N}'_]+/gu, " ").trim();
+}
+
+/**
  * Deterministic fallback slug for text that slugify() reduces to "" (a fact with
  * no ASCII alphanumerics, e.g. all-CJK or all-Cyrillic). Without this, the path
  * collapses to "<root>/<type>/.md" — a hidden dotfile that the indexer skips
@@ -1647,7 +1668,11 @@ export async function remember(
     // Tier 2: FTS near-duplicate check (different phrasing, same meaning).
     // BM25 IDF is near-zero for tiny collections so threshold is intentionally
     // very small — any positive hit counts.
-    const hits = await store.searchLex(normalizeForHash(input.fact), { limit: 1, collection: MEMORY_COLLECTION });
+    // lexDedupQuery, not the raw text: qmd concatenates across intra-token punctuation and reads
+    // a leading '-' as negation, so a fact carrying a URL, host:port, HH:MM or a CLI flag could
+    // not match its own indexed copy (qp-xfx). Wrapped at the call site on purpose — rebinding
+    // `query` would leak into tokenizeForDedup, which is deliberately punctuation-atomic.
+    const hits = await store.searchLex(lexDedupQuery(normalizeForHash(input.fact)), { limit: 1, collection: MEMORY_COLLECTION });
     const top = hits[0];
     if (top !== undefined && top.score > DEDUP_SCORE_FTS) {
       // searchFTS returns a virtual "qmd://memory/<type>/<slug>.md" path; resolve it back to a
