@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanEnv } from "./support/env.js";
 
 const CLI = resolve(__dirname, "..", "src", "cli", "qmemd.ts");
 const TSX = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
@@ -14,7 +15,7 @@ function runCli(args: string[], cfg: string, mem: string) {
     // HOME must be sandboxed too: on darwin the CLI derives launchAgentsDir()/macLogsDir()
     // from homedir() (real $HOME), ignoring XDG_CONFIG_HOME — without this, install/uninstall
     // would clobber and delete the real ~/Library/LaunchAgents/io.qmemd.mcp.plist (qmemd-djw).
-    env: { ...process.env, HOME: cfg, XDG_CONFIG_HOME: cfg, QMD_MEMORY_DIR: mem, QMEMD_DB: join(mem, ".idx", "i.sqlite") },
+    env: cleanEnv({ HOME: cfg, XDG_CONFIG_HOME: cfg, QMD_MEMORY_DIR: mem, QMEMD_DB: join(mem, ".idx", "i.sqlite") }),
   });
 }
 

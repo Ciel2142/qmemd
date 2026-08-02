@@ -3,8 +3,9 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { serializeMemory, type MemoryFrontmatter } from "../src/engine.js";
+import { cleanEnv } from "./support/env.js";
 
 // End-to-end CLI guard for qmemd-jzz: an unvalidated --type was cast straight to
 // MemoryType and became a path segment (join(root, type) + mkdirSync), so
@@ -18,7 +19,7 @@ const TSX = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
 function runCli(args: string[], root: string) {
   return spawnSync(TSX, [CLI, ...args], {
     encoding: "utf-8",
-    env: { ...process.env, QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite") },
+    env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite") }),
   });
 }
 
@@ -81,6 +82,50 @@ describe("CLI recall --session emits the SessionStart envelope (banner fix, b6j)
     const res = runCli(["recall", "--session"], root);
     expect(res.status).toBe(0);
     expect(res.stdout.trim()).toBe("");
+  });
+});
+
+// a1r: every spawn helper here used to spread process.env verbatim, so a maintainer
+// host exporting QMEMD_*/QMD_* silently reconfigured the child — up to and including
+// QMEMD_RECALL_MODE=hybrid, which takes the delegation gate (cli/qmemd.ts:378) and
+// answers from the LIVE daemon's corpus instead of this fixture. The suite must be
+// hermetic: a test that wants a knob sets it explicitly.
+describe("spawned CLI is hermetic against host qmemd env (a1r)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-hermetic-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  test("a host QMEMD_SESSION_BUDGET does not reach the child", () => {
+    const prev = process.env.QMEMD_SESSION_BUDGET;
+    process.env.QMEMD_SESSION_BUDGET = "1"; // would truncate the snapshot to nothing
+    try {
+      expect(runCli(["remember", "Caveman likes terse output", "--type", "user"], root).status).toBe(0);
+      const res = runCli(["recall", "--session"], root);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("Caveman likes terse output");
+    } finally {
+      if (prev === undefined) delete process.env.QMEMD_SESSION_BUDGET; else process.env.QMEMD_SESSION_BUDGET = prev;
+    }
+  });
+
+  test("a host QMEMD_SESSION_PROJECT_LIMIT does not reach the child", () => {
+    const prev = process.env.QMEMD_SESSION_PROJECT_LIMIT;
+    process.env.QMEMD_SESSION_PROJECT_LIMIT = "1"; // would slice the snapshot to one project fact
+    try {
+      // The snapshot scopes project facts to basename(cwd); the child inherits this
+      // process's cwd (the repo root), so write them under that project name.
+      const proj = basename(process.cwd());
+      for (const fact of ["antwerp depot ships widgets", "brussels depot ships gears", "ghent depot ships bolts"]) {
+        expect(runCli(["remember", fact, "--type", "project", "--project", proj], root).status).toBe(0);
+      }
+      const res = runCli(["recall", "--session"], root);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("antwerp");
+      expect(res.stdout).toContain("brussels");
+      expect(res.stdout).toContain("ghent");
+    } finally {
+      if (prev === undefined) delete process.env.QMEMD_SESSION_PROJECT_LIMIT; else process.env.QMEMD_SESSION_PROJECT_LIMIT = prev;
+    }
   });
 });
 
@@ -438,7 +483,7 @@ describe("CLI remember --replace inherits metadata (q65)", () => {
 function runCliEnv(args: string[], root: string, extraEnv: Record<string, string>) {
   return spawnSync(TSX, [CLI, ...args], {
     encoding: "utf-8",
-    env: { ...process.env, QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), ...extraEnv },
+    env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), ...extraEnv }),
   });
 }
 
@@ -474,13 +519,12 @@ function runHook(stdin: string, root: string, cache: string, everyN?: string) {
   return spawnSync(TSX, [CLI, "hook", "beacon"], {
     encoding: "utf-8",
     input: stdin,
-    env: {
-      ...process.env,
+    env: cleanEnv({
       QMD_MEMORY_DIR: root,
       QMEMD_DB: join(root, ".idx", "i.sqlite"),
       XDG_CACHE_HOME: cache,
       ...(everyN ? { QMEMD_BEACON_EVERY: everyN } : {}),
-    },
+    }),
   });
 }
 
@@ -488,14 +532,13 @@ function runWriteHook(stdin: string, root: string, cache: string, opts: { on?: b
   return spawnSync(TSX, [CLI, "hook", "write-beacon"], {
     encoding: "utf-8",
     input: stdin,
-    env: {
-      ...process.env,
+    env: cleanEnv({
       QMD_MEMORY_DIR: root,
       QMEMD_DB: join(root, ".idx", "i.sqlite"),
       XDG_CACHE_HOME: cache,
-      QMEMD_WRITE_BEACON: opts.on ? "1" : "", // explicit so host env never leaks in
+      QMEMD_WRITE_BEACON: opts.on ? "1" : "",
       ...(opts.min ? { QMEMD_WRITE_BEACON_MIN: opts.min } : {}),
-    },
+    }),
   });
 }
 
@@ -1213,7 +1256,7 @@ describe("CLI recall project scoping (qmemd-due)", () => {
   function runCliIn(args: string[], cwd: string) {
     return spawnSync(TSX, [CLI, ...args], {
       encoding: "utf-8", cwd,
-      env: { ...process.env, QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite") },
+      env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite") }),
     });
   }
   let cwdAlpha: string;
@@ -1261,7 +1304,7 @@ describe("dedup --apply (qmemd-3fb)", () => {
   const applyStdin = (input: string) =>
     spawnSync(TSX, [CLI, "dedup", "--apply", "-"], {
       encoding: "utf-8", input,
-      env: { ...process.env, QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite") },
+      env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite") }),
     });
 
   test("applies a folded plan from stdin: keeper rewritten, others gone", async () => {

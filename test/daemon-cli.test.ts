@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanEnv } from "./support/env.js";
 
 const CLI = resolve(__dirname, "..", "src", "cli", "qmemd.ts");
 const TSX = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
@@ -11,7 +12,7 @@ const TSX = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
 function runCli(args: string[], cache: string, mem: string) {
   return spawnSync(TSX, [CLI, ...args], {
     encoding: "utf-8",
-    env: { ...process.env, XDG_CACHE_HOME: cache, QMD_MEMORY_DIR: mem, QMEMD_DB: join(mem, ".idx", "i.sqlite") },
+    env: cleanEnv({ XDG_CACHE_HOME: cache, QMD_MEMORY_DIR: mem, QMEMD_DB: join(mem, ".idx", "i.sqlite") }),
   });
 }
 

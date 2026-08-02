@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer, type Server } from "node:http";
 import { rootHash } from "../src/client.js";
+import { cleanEnv } from "./support/env.js";
 
 // CLI wiring for warm-daemon recall delegation (qmemd-vuk): a HYBRID `qmemd recall`
 // probes the daemon and serves its answer without opening the local store (no cold
@@ -26,12 +27,11 @@ const state = { healthCalls: 0, recallCalls: 0 };
 function runCli(args: string[], port: number): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const p = spawn(TSX, [CLI, ...args], {
-      env: {
-        ...process.env,
+      env: cleanEnv({
         QMD_MEMORY_DIR: root,
         QMEMD_DB: join(root, ".idx", "i.sqlite"),
         QMEMD_HTTP_PORT: String(port),
-      },
+      }),
     });
     let stdout = "", stderr = "";
     p.stdout.on("data", (c) => { stdout += c; });
