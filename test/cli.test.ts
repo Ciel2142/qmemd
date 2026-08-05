@@ -110,7 +110,7 @@ describe("spawned CLI is hermetic against host qmemd env (a1r)", () => {
 
   test("a host QMEMD_SESSION_PROJECT_LIMIT does not reach the child", () => {
     const prev = process.env.QMEMD_SESSION_PROJECT_LIMIT;
-    process.env.QMEMD_SESSION_PROJECT_LIMIT = "1"; // would slice the snapshot to one project fact
+    process.env.QMEMD_SESSION_PROJECT_LIMIT = "1"; // would slice one project fact INTO the pinned-only snapshot
     try {
       // The snapshot scopes project facts to basename(cwd); the child inherits this
       // process's cwd (the repo root), so write them under that project name.
@@ -120,9 +120,13 @@ describe("spawned CLI is hermetic against host qmemd env (a1r)", () => {
       }
       const res = runCli(["recall", "--session"], root);
       expect(res.status).toBe(0);
-      expect(res.stdout).toContain("antwerp");
-      expect(res.stdout).toContain("brussels");
-      expect(res.stdout).toContain("ghent");
+      // The child runs the pinned-only default (projectLimit 0): all three facts are in
+      // scope, none is emitted, and the footer says so. A leaked host limit of 1 would
+      // instead emit one fact and read "(1 shown, 2 more)".
+      expect(res.stdout).toContain("(0 shown, 3 more)");
+      expect(res.stdout).not.toContain("antwerp");
+      expect(res.stdout).not.toContain("brussels");
+      expect(res.stdout).not.toContain("ghent");
     } finally {
       if (prev === undefined) delete process.env.QMEMD_SESSION_PROJECT_LIMIT; else process.env.QMEMD_SESSION_PROJECT_LIMIT = prev;
     }

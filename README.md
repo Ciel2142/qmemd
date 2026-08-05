@@ -139,7 +139,7 @@ Not found? The fix depends on **how** you installed:
 | `QMEMD_HTTP_PORT` | `8182` | Port for `qmemd mcp --http` / the installed service (CLI `--port` wins) |
 | `QMEMD_BEACON_EVERY` | `20` | Re-fire cadence of the PreToolUse memory-presence beacon (every N Bash calls; a repo pivot always fires) |
 | `QMEMD_SESSION_BUDGET` | `2000` | Byte cap on the session snapshot (`recall --session` and the MCP/REST session paths); invalid values fall back to the default |
-| `QMEMD_SESSION_PROJECT_LIMIT` | `5` | Max recent project/reference facts in the session snapshot; invalid values fall back to the default |
+| `QMEMD_SESSION_PROJECT_LIMIT` | `0` | Recent unpinned project/reference facts in the session snapshot. `0` (the default) makes the snapshot pinned-only; set `5` to restore the recency-sliced lanes. Invalid values fall back to the default |
 | `QMEMD_TTL_<TYPE>` | `project` 90d · `reference` 180d · `user`/`feedback` durable | Per-type default review window applied when a fact has no explicit `review_by` (e.g. `QMEMD_TTL_PROJECT=180d`, or `never`); an unparseable value falls back to the built-in default. Surfaces via `qmemd stale` — never auto-expires |
 | `XDG_CACHE_HOME` | `~/.cache` | Base for the default `QMEMD_DB` plus beacon/daemon state under `<cache>/qmemd/` |
 
@@ -173,7 +173,7 @@ else needs backing up — deleting `$QMEMD_DB` is always safe.
 ```bash
 qmemd remember "<fact>" [--type user|feedback|project|reference] [--tags a,b] [--platforms linux,macos] [--pin] [--as slug] [--replace slug] [--supersedes slug] [--source S] [--ttl 90d|--review-by YYYY-MM-DD] [--force]
 qmemd recall "<query>" [--lex] [--type T] [--platform P|--all-platforms] [--limit N] [--min-score N] [--full|--skim] [--json]
-qmemd recall --session          # start-of-session snapshot (user/feedback/pinned + recent project + reference facts)
+qmemd recall --session          # start-of-session snapshot (user + feedback + pinned facts, plus a coverage footer)
 qmemd show <slug>               # print one fact in full (frontmatter + body)  (alias: qmemd get <slug>)
 qmemd list [--type T] [--tag t] [--project p] [--platform P] [--json]   # browse the corpus (model-free)
 qmemd tags [--project p] [--json]  # tag(count) overview for a project (model-free)

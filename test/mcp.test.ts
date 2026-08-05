@@ -144,10 +144,11 @@ describe("MCP server tools (in-process)", () => {
   });
 
   test("recall session honors an explicit project param, surfacing that project's facts (3nq)", async () => {
-    // A project-scoped, non-pinned fact only surfaces when the snapshot is taken
-    // for that project. The MCP session previously passed empty opts (project
-    // defaulted to "global"), so project facts never appeared (qmemd-3nq).
-    await client.callTool({ name: "remember", arguments: { fact: "Alpha scoped deployment note", type: "project", project: "alpha-proj", as: "alpha-note" } });
+    // A project-scoped fact only surfaces when the snapshot is taken for that project.
+    // The MCP session previously passed empty opts (project defaulted to "global"), so
+    // project facts never appeared (qmemd-3nq). Pinned because the snapshot's project lane
+    // is pinned-only by default — this test is about SCOPE routing, not the lane.
+    await client.callTool({ name: "remember", arguments: { fact: "Alpha scoped deployment note", type: "project", project: "alpha-proj", as: "alpha-note", pin: true } });
 
     // Default snapshot (cwd basename, not "alpha-proj") must NOT include it.
     const def = await client.callTool({ name: "recall", arguments: { session: true } });
@@ -614,7 +615,7 @@ describe("daemon (HTTP) session snapshot scope + sync (wdf)", () => {
     // A non-pinned project fact scoped to the cwd basename: surfaces under the stdio default
     // (basename cwd) but must NOT under the daemon default ('global').
     await connect(buildMemoryServer(fakeStore, root, { sessionDefaultProject: "global" }));
-    await client.callTool({ name: "remember", arguments: { fact: "Daemon scope cwd-only fact", type: "project", project: cwdProj, as: "cwd-scoped" } });
+    await client.callTool({ name: "remember", arguments: { fact: "Daemon scope cwd-only fact", type: "project", project: cwdProj, as: "cwd-scoped", pin: true } });
 
     const def = await client.callTool({ name: "recall", arguments: { session: true } });
     expect((def.content as { text: string }[])[0].text).not.toContain("Daemon scope cwd-only fact");

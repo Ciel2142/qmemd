@@ -41,7 +41,10 @@ describe("e15 supersession-retirement", () => {
       const a = await remember(store, root, { fact: "gamma cache eviction is LRU", type: "project", project: "p1", pinned: true });
       const b = await remember(store, root, { fact: "gamma cache eviction is LFU now", type: "project", project: "p1", supersedes: a.slug });
       expect(b.supersededSlug).toBe(a.slug);  // supersession was acted on
-      const snap = await recallSession(root, { project: "p1" });
+      // projectLimit 5 opts into the recency-sliced lane (the default is pinned-only), so the
+      // unpinned successor is visible and the retired-but-pinned predecessor's absence is
+      // attributable to retirement rather than to the lane being off.
+      const snap = await recallSession(root, { project: "p1", projectLimit: 5 });
       expect(snap).not.toContain("LRU");      // retired fact's content absent
       expect(snap).toContain("LFU");          // successor present (in-scope project slice)
     } finally {

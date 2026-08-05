@@ -607,7 +607,14 @@ export function countUnreadableFacts(root: string): number {
 
 /** Filesystem-only session snapshot. No Store, no model — instant and deterministic. */
 export async function recallSession(root: string, opts: SessionOptions = {}): Promise<string> {
-  const projectLimit = opts.projectLimit ?? sessionEnvInt("QMEMD_SESSION_PROJECT_LIMIT") ?? 5;
+  // Default 0 (was 5): the recency-sliced project/reference lanes are OFF, so pinning is the
+  // only way a project/reference fact reaches session start. Those lanes selected by `updated`
+  // date, not by relevance — on a large corpus they inject whatever happened to be written
+  // last, while the pinned block is the curated lane. Set QMEMD_SESSION_PROJECT_LIMIT=5 (or
+  // pass projectLimit) to bring the slice back. The lanes' code stays because the coverage
+  // footer's `shown` count reads from it; at 0 the footer just reports "0 shown, N more", so
+  // the hidden corpus is still announced (the qmemd-e3i anti-silent-omission contract).
+  const projectLimit = opts.projectLimit ?? sessionEnvInt("QMEMD_SESSION_PROJECT_LIMIT") ?? 0;
   const budget = opts.budgetBytes ?? sessionEnvInt("QMEMD_SESSION_BUDGET") ?? 2000;
   const curProject = opts.project ?? "global";
   const plat = opts.platform ?? currentPlatform();
@@ -671,7 +678,11 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
   // as a footer below so a corrupt fact does not silently vanish from the snapshot (qmemd-e5h).
   // Empty ONLY when there is nothing readable AND nothing unreadable to warn about — an
   // all-unreadable corpus must still speak up (returning "" here is the silence e5h fixes).
-  if (users.length + feedback.length + pinned.length + projects.length + references.length === 0 && unreadable === 0 && platformHiddenUF === 0) return "";
+  // Counted on the IN-SCOPE lists, not the slices: with projectLimit 0 (the pinned-only
+  // default) the slices are always empty, so counting them would return "" for a corpus of
+  // hundreds of unpinned facts — the exact silent omission the e3i footer exists to prevent.
+  // A lane with in-scope facts and no shown ones still owes its "(0 shown, N more)" footer.
+  if (users.length + feedback.length + pinned.length + projectsInScope.length + referencesInScope.length === 0 && unreadable === 0 && platformHiddenUF === 0) return "";
 
   const HEADER = "## Memory (qmd)";
   // The header is the floor of any non-empty snapshot; if it alone can't fit the
@@ -829,9 +840,16 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
     // The reservation above guarantees room for a bounded line, but budget-dropped facts
     // can push the full histogram past the reserve, so emit the longest highest-count tag
     // prefix that fits rather than dropping the whole hint (qmemd-a1d).
+    // Cap the tag COUNT, not just the bytes: with the sliced lanes off, `unshown` is the whole
+    // in-scope corpus, so a fit-to-budget-only loop grew this line to 3.6 KB of single-count
+    // tags — it simply absorbed the bytes the project/reference lanes used to spend. Twelve
+    // tags plus a "(+N more)" remainder, matching the beacon's overview. Still shrunk further
+    // when even that does not fit.
+    const HIST_MAX_TAGS = 12;
     const hist = tagHistogram(unshown.map(m => m.frontmatter.tags));
-    for (let n = hist.length; n > 0; n--) {
-      const line = `Unshown tags: ${formatTagHistogram(hist.slice(0, n))}`;
+    for (let n = Math.min(hist.length, HIST_MAX_TAGS); n > 0; n--) {
+      const dropped = hist.length - n;
+      const line = `Unshown tags: ${formatTagHistogram(hist.slice(0, n))}${dropped > 0 ? ` (+${dropped} more)` : ""}`;
       if (fits(line)) { lines.push(line); break; }
     }
   }

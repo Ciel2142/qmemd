@@ -4,13 +4,13 @@ Durable knowledge lives in **qmemd memory** (knowledge lane); work/issue state l
 
 **Remember** (`remember` MCP tool, or `qmemd remember "<fact>" --type <type>`) when: the user states a durable preference (`type: user`), gives guidance/correction on how to work (`type: feedback`), I discover a non-obvious gotcha or a repo/system fact not in code/git (`type: project`), or hit a reference worth keeping — URL/dashboard/discovery (`type: reference`).
 
-**Recall** (`recall` MCP tool, or `qmemd recall "<topic>"`) — do **not** assume the session-start snapshot already handed you the relevant facts; it is **partial** (recent project/reference facts are sliced). Pull explicitly at these concrete moments:
+**Recall** (`recall` MCP tool, or `qmemd recall "<topic>"`) — do **not** assume the session-start snapshot already handed you the relevant facts; it is **partial** (only **pinned** project/reference facts are injected). Pull explicitly at these concrete moments:
 - **Before diagnosing any build/env/tooling error** — the cause and fix may already be documented.
 - **On first touch of a repo/system/tool this session** — the trigger is *first touch*, including a mid-session sub-issue pivot, not "session start".
 - **When a user instruction names a mechanism you're about to implement** — recall it before designing.
 - **When the user references past context.**
 
-The snapshot injects every user + feedback fact (complete) but only the **most recent** project/reference facts for the current project + global (sliced) — recall project/reference explicitly. Pinned facts surface only **in scope**, not everywhere; use `project: global` to pin globally. A trailing footer (`N project facts … (M shown, K more)`) means more exist — `recall`/`qmemd list` to see them. An empty/footer-less snapshot is not proof no relevant facts exist.
+The snapshot injects every user + feedback fact (complete) but only **pinned** project/reference facts — every unpinned one is withheld, so recall project/reference explicitly. Pinned facts surface only **in scope** (current project + `global`), not everywhere; use `project: global` to pin globally. A trailing footer (`N project facts in scope for <project> = R repo + G global (0 shown, K more)`) counts what was withheld — `recall`/`qmemd list` to see it. An empty/footer-less snapshot is not proof no relevant facts exist. To bring back the five most recent unpinned project/reference facts, set `QMEMD_SESSION_PROJECT_LIMIT=5`.
 
 **Recall is project-scoped by default** (qmemd-due): a `recall` query returns only current-project + `global` facts. To search across all projects, pass `--cross-project` (CLI) / `cross_project:true` (MCP); foreign hits come back labeled. A thin or empty result may be a **scoping** effect, not a true miss — widen before concluding a fact isn't stored.
 

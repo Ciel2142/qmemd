@@ -679,11 +679,20 @@ describe("recallSession", () => {
       expect(Buffer.byteLength(out, "utf-8")).toBeGreaterThan(300);
     });
 
-    test("invalid QMEMD_SESSION_PROJECT_LIMIT falls back to the 5 default", async () => {
+    test("invalid QMEMD_SESSION_PROJECT_LIMIT falls back to the pinned-only default", async () => {
       await seedProject("p1", "2026-06-01");
-      process.env.QMEMD_SESSION_PROJECT_LIMIT = "0";
+      process.env.QMEMD_SESSION_PROJECT_LIMIT = "-3";
       const out = await recallSession(root, { project: "demo" });
-      // limit falls back to 5 (not 0): the project fact still surfaces
+      // Falls back to 0, not to a garbage limit: no project line, but the footer still
+      // announces the fact so the omission is never silent.
+      expect(out).not.toContain("Project fact p1");
+      expect(out).toContain("(0 shown, 1 more)");
+    });
+
+    test("QMEMD_SESSION_PROJECT_LIMIT restores the sliced lanes on top of the pinned-only default", async () => {
+      await seedProject("p1", "2026-06-01");
+      process.env.QMEMD_SESSION_PROJECT_LIMIT = "5";
+      const out = await recallSession(root, { project: "demo" });
       expect(out).toContain("Project fact p1");
     });
   });
@@ -693,7 +702,7 @@ describe("recallSession", () => {
     await writeFile(join(root, "reference", "useful-url.md"), serializeMemory(
       { name: "useful-url", description: "Grafana dashboard URL", type: "reference", tags: [], project: "global", created: "2026-06-01", pinned: false },
       "https://grafana.example/d/abc"));
-    const out = await recallSession(root, { project: "global" });
+    const out = await recallSession(root, { project: "global", projectLimit: 5 });
     expect(out).toContain("Grafana dashboard URL");
     expect(out).toContain("reference:global");
   });
@@ -788,7 +797,7 @@ describe("recallSession", () => {
 
   test("surfaces unshown project count when in-scope facts exceed projectLimit (e3i)", async () => {
     for (let i = 0; i < 14; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, []);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
     expect(out).toContain("14 project facts in scope for alpha = 14 repo + 0 global (5 shown, 9 more)");
     expect(out).toContain("qmemd list --type project --project alpha");
   });
@@ -803,7 +812,7 @@ describe("recallSession", () => {
     for (let i = 0; i < 4; i++) await write(`own-${i}`, "alpha", `2026-06-2${i}`);
     for (let i = 0; i < 10; i++) await write(`glob-${i}`, "global", `2026-06-0${i}`);
     await write("foreign-0", "beta", "2026-06-28"); // out of scope: neither counted nor shown
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
     expect(out).toContain("14 project facts in scope for alpha = 4 repo + 10 global (5 shown, 9 more)");
     expect(out).not.toContain("foreign-0");
   });
@@ -816,14 +825,63 @@ describe("recallSession", () => {
       await writeFile(join(root, "project", `g-${i}.md`), serializeMemory(
         { name: `g-${i}`, description: `Global fact ${i}`, type: "project", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false }, "body"));
     }
-    const out = await recallSession(root, { project: "global", budgetBytes: 4000 });
+    const out = await recallSession(root, { project: "global", budgetBytes: 4000, projectLimit: 5 });
     expect(out).toContain("8 project facts in scope for global (5 shown, 3 more)");
     expect(out).not.toContain("repo +");
   });
 
-  test("no unshown footer when in-scope facts fit within projectLimit (e3i)", async () => {
+  // Pinned-only default: the recency-sliced lanes are OFF (projectLimit 0), so pinning is
+  // the only route a project/reference fact takes to session start. The footer must still
+  // announce everything it withheld — silence is the failure the e3i footer exists to stop.
+  test("the default snapshot emits user, feedback and pinned lanes only", async () => {
+    await mkdir(join(root, "project"), { recursive: true });
+    await mkdir(join(root, "user"), { recursive: true });
+    await writeFile(join(root, "user", "pref.md"), serializeMemory(
+      { name: "pref", description: "A standing preference", type: "user", tags: [], project: "global", created: "2026-06-01", pinned: false }, "prefer tabs"));
+    await writeFile(join(root, "project", "pinned-fact.md"), serializeMemory(
+      { name: "pinned-fact", description: "Pinned project fact", type: "project", tags: [], project: "alpha", created: "2026-06-01", pinned: true }, "body"));
+    for (let i = 0; i < 6; i++) await writeProject(root, i, `2026-06-1${i}`, ["jdk"]);
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
+    expect(out).toContain("prefer tabs");                 // user lane untouched
+    expect(out).toContain("[pinned:project] Pinned project fact"); // pinned lane untouched
+    expect(out).not.toContain("[project:alpha]");         // sliced lane off
+    expect(out).not.toContain("Project fact 0");
+  });
+
+  test("the footer accounts for every withheld fact under the pinned-only default", async () => {
+    await mkdir(join(root, "project"), { recursive: true });
+    for (let i = 0; i < 4; i++) await writeProject(root, i, `2026-06-1${i}`, ["jdk"]);
+    await writeFile(join(root, "project", "g-0.md"), serializeMemory(
+      { name: "g-0", description: "Global fact", type: "project", tags: ["infra"], project: "global", created: "2026-06-01", pinned: false }, "body"));
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
+    expect(out).toContain("5 project facts in scope for alpha = 4 repo + 1 global (0 shown, 5 more)");
+    expect(out).toContain("Unshown tags: jdk(4) infra(1)");
+  });
+
+  test("the unshown-tag histogram is capped at 12 tags plus a remainder, not the budget", async () => {
+    // With the sliced lanes off, `unshown` is the whole in-scope corpus; a fit-to-budget-only
+    // histogram just absorbs the bytes those lanes used to spend (3.6 KB observed on a real
+    // corpus). Cap the tag count and name the remainder.
+    for (let i = 0; i < 20; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, [`tag${String(i).padStart(2, "0")}`]);
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 8000 });
+    const hist = out.split("\n").find(l => l.startsWith("Unshown tags:"))!;
+    expect(hist).toBeDefined();
+    expect(hist.match(/\w+\(\d+\)/g)!.length).toBe(12);
+    expect(hist).toContain("(+8 more)");
+  });
+
+  test("a corpus of only unpinned project facts still emits its footer, never ''", async () => {
+    // The empty-snapshot guard counts the IN-SCOPE lists, not the (now always empty) slices;
+    // counting slices would return "" and hide the whole corpus.
     for (let i = 0; i < 3; i++) await writeProject(root, i, `2026-06-0${i + 1}`, []);
     const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
+    expect(out).not.toBe("");
+    expect(out).toContain("3 project facts in scope for alpha = 3 repo + 0 global (0 shown, 3 more)");
+  });
+
+  test("no unshown footer when in-scope facts fit within projectLimit (e3i)", async () => {
+    for (let i = 0; i < 3; i++) await writeProject(root, i, `2026-06-0${i + 1}`, []);
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
     expect(out).not.toContain("shown,");
     expect(out).not.toContain("Unshown tags:");
   });
@@ -834,13 +892,13 @@ describe("recallSession", () => {
     for (let i = 0; i < 4; i++) await writeProject(root, 100 + i, `2026-06-0${i + 1}`, ["security"]);
     for (let i = 0; i < 3; i++) await writeProject(root, 200 + i, `2026-06-1${i}`, ["jdk"]);
     for (let i = 0; i < 2; i++) await writeProject(root, 300 + i, `2026-05-2${i}`, ["crypto"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
     expect(out).toContain("Unshown tags: security(4) jdk(3) crypto(2)");
   });
 
   test("unshown footer is dropped (not overflowed) when the budget has no room (e3i)", async () => {
     for (let i = 0; i < 14; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, ["jdk"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 100 });
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 100, projectLimit: 5 });
     expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(100);
     expect(out).not.toContain("more)");
     expect(out).not.toContain("Unshown tags:");
@@ -852,7 +910,7 @@ describe("recallSession", () => {
     // it must not orphan itself above a missing count footer.
     for (let i = 0; i < 5; i++) await writeProject(root, i, `2026-06-1${i}`, []);
     await writeProject(root, 99, "2026-06-01", ["security"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 50 });
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 50, projectLimit: 5 });
     expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(50);
     expect(out).not.toContain("Unshown tags:");
     // General invariant: a histogram is only meaningful beneath its count footer.
@@ -870,7 +928,7 @@ describe("recallSession", () => {
         { name: `p-${i}`, description: longDesc, type: "project", tags: [], project: "alpha", created: `2026-06-0${i + 1}`, pinned: false },
         "body"));
     }
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 1100 });
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 1100, projectLimit: 5 });
     const m = out.match(/\((\d+) shown, (\d+) more\)/);
     expect(m).not.toBeNull();
     const shown = Number(m![1]), more = Number(m![2]);
@@ -886,7 +944,7 @@ describe("recallSession", () => {
         { name: `r-${i}`, description: `Ref ${i}`, type: "reference", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false },
         "body"));
     }
-    const out = await recallSession(root, { project: "global", budgetBytes: 4000 });
+    const out = await recallSession(root, { project: "global", budgetBytes: 4000, projectLimit: 5 });
     expect(out).toContain("8 reference facts in scope for global (5 shown, 3 more)");
     expect(out).toContain("qmemd list --type reference --project global");
   });
@@ -1022,7 +1080,7 @@ describe("recallSession supersession + recency (bri)", () => {
     await writeFile(join(root, "feedback", "old-guidance.md"), serializeMemory(
       { name: "old-guidance", description: "old-guidance description", type: "feedback", tags: [], project: "global", created: "2026-01-01", pinned: false, supersededBy: "live" },
       "old-guidance body"));
-    const snap = await recallSession(root, { project: "global" });
+    const snap = await recallSession(root, { project: "global", projectLimit: 5 });
     expect(snap).toContain("live description");
     expect(snap).not.toContain("retired description");
     expect(snap).not.toContain("retired-pin description");
@@ -1040,7 +1098,7 @@ describe("recallSession supersession + recency (bri)", () => {
     await writeFile(join(root, "project", "v3.md"), serializeMemory(
       { name: "v3", description: "v3 description", type: "project", tags: [], project: "global", created: "2026-01-03", pinned: false, supersedes: "v2" },
       "v3 body"));
-    const snap = await recallSession(root, { project: "global" });
+    const snap = await recallSession(root, { project: "global", projectLimit: 5 });
     expect(snap).toContain("v3 description");
     expect(snap).not.toContain("v1 description");
     expect(snap).not.toContain("v2 description");
@@ -3246,10 +3304,10 @@ describe("recallSession platform gate (core fix)", () => {
   test("a [macos] fact is hidden on linux, shown on mac; cross-platform always shows", async () => {
     await put("project", "mac-only", { platforms: ["macos"] });
     await put("project", "everywhere", { platforms: [] });
-    const onLinux = await recallSession(root, { project: "global", platform: "linux" });
+    const onLinux = await recallSession(root, { project: "global", platform: "linux", projectLimit: 5 });
     expect(onLinux).not.toContain("mac-only");
     expect(onLinux).toContain("everywhere");
-    const onMac = await recallSession(root, { project: "global", platform: "macos" });
+    const onMac = await recallSession(root, { project: "global", platform: "macos", projectLimit: 5 });
     expect(onMac).toContain("mac-only");
     expect(onMac).toContain("everywhere");
   });
@@ -3266,7 +3324,7 @@ describe("recallSession platform gate (core fix)", () => {
 
   test("current === all (exotic host) disables the gate — everything shows", async () => {
     await put("project", "mac-only", { platforms: ["macos"] });
-    const out = await recallSession(root, { project: "global", platform: "all" });
+    const out = await recallSession(root, { project: "global", platform: "all", projectLimit: 5 });
     expect(out).toContain("mac-only");
   });
 
@@ -3276,10 +3334,10 @@ describe("recallSession platform gate (core fix)", () => {
     for (let i = 0; i < 4; i++) await put("project", `p${i}`, { created: `2026-06-0${i + 1}` });
     await put("project", "m0", { platforms: ["macos"], created: "2026-06-07" });
     await put("project", "m1", { platforms: ["macos"], created: "2026-06-08" });
-    const onLinux = await recallSession(root, { project: "global", platform: "linux" });
+    const onLinux = await recallSession(root, { project: "global", platform: "linux", projectLimit: 5 });
     expect(onLinux).not.toContain("more) — qmemd list"); // 4 in scope ≤ 5 → no footer
     // On mac all 6 are in scope (> 5) → the footer fires and counts 6.
-    const onMac = await recallSession(root, { project: "global", platform: "macos" });
+    const onMac = await recallSession(root, { project: "global", platform: "macos", projectLimit: 5 });
     expect(onMac).toContain("6 project facts in scope for global");
   });
 

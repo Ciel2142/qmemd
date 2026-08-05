@@ -621,7 +621,7 @@ describe("HTTP server: daemon session scope (wdf)", () => {
     const cwdProj = basename(process.cwd());
     await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: J,
-      body: JSON.stringify({ fact: "REST daemon scope cwd-only fact", type: "project", project: cwdProj, as: "rest-cwd-scoped" }),
+      body: JSON.stringify({ fact: "REST daemon scope cwd-only fact", type: "project", project: cwdProj, as: "rest-cwd-scoped", pin: true }),
     });
 
     const def = await fetch(`${baseUrl}/recall`, { method: "POST", headers: J, body: JSON.stringify({ session: true }) });
