@@ -694,8 +694,18 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
   // facts than the count promised (qmemd-b1a). Omit on an exotic host (plat === "all"): no
   // filtering happened and "all" is not a real platform token.
   const platSuffix = plat === "all" ? "" : ` --platform ${plat}`;
-  const footerLine = (label: "project" | "reference", total: number, shown: number, hidden: number): string =>
-    `${total} ${label} facts for ${curProject} (${shown} shown, ${hidden} more) — qmemd list --type ${label} --project ${curProject}${platSuffix}`;
+  // qp-62p: `total` is the SCOPE count — current project + `global` (inProject above) — but
+  // "N project facts for <project>" read as per-project, so a global-heavy corpus made the
+  // repo look like it owned hundreds of facts (417 "for qmemd-public" = 14 repo + 403 global).
+  // Name the scope and split the lanes, the way the beacon already does. When curProject IS
+  // "global" the repo lane is empty by definition, so the split is omitted rather than
+  // rendered as a confusing "0 repo + N global".
+  // The split sits OUTSIDE the "(N shown, M more)" group so that group stays the stable,
+  // greppable shape it has always been.
+  const splitPart = (repo: number, glob: number): string =>
+    curProject === "global" ? "" : ` = ${repo} repo + ${glob} global`;
+  const footerLine = (label: "project" | "reference", total: number, shown: number, hidden: number, repo: number, glob: number): string =>
+    `${total} ${label} facts in scope for ${curProject}${splitPart(repo, glob)} (${shown} shown, ${hidden} more) — qmemd list --type ${label} --project ${curProject}${platSuffix}`;
   // The platform-hidden user/feedback signal (qmemd-b1a). plat is concrete here whenever
   // platformHiddenUF > 0 (a fact can only be hidden when the host gate is active, i.e. not "all").
   const platformHiddenLine = platformHiddenUF > 0
@@ -704,7 +714,8 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
   let reserve = 0;
   const reserveFooter = (label: "project" | "reference", inScopeList: ParsedMemory[]) => {
     if (inScopeList.length <= projectLimit) return; // gap only via budget-drop → best-effort, not reserved
-    reserve += Buffer.byteLength(footerLine(label, inScopeList.length, projectLimit, inScopeList.length), "utf-8") + 1 /* the "\n" join() inserts before the footer */;
+    // Worst-case digit widths: each lane of the qp-62p split is bounded by the in-scope total.
+    reserve += Buffer.byteLength(footerLine(label, inScopeList.length, projectLimit, inScopeList.length, inScopeList.length, inScopeList.length), "utf-8") + 1 /* the "\n" join() inserts before the footer */;
   };
   reserveFooter("project", projectsInScope);
   reserveFooter("reference", referencesInScope);
@@ -719,7 +730,7 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
   if (reserve > 0) {
     const reserveDropFooter = (label: "project" | "reference", inScopeList: ParsedMemory[]) => {
       if (inScopeList.length === 0 || inScopeList.length > projectLimit) return; // empty ⇒ no footer; overflow ⇒ already reserved
-      reserve += Buffer.byteLength(footerLine(label, inScopeList.length, projectLimit, inScopeList.length), "utf-8") + 1 /* the "\n" join() inserts before the footer */;
+      reserve += Buffer.byteLength(footerLine(label, inScopeList.length, projectLimit, inScopeList.length, inScopeList.length, inScopeList.length), "utf-8") + 1 /* the "\n" join() inserts before the footer */;
     };
     reserveDropFooter("project", projectsInScope);
     reserveDropFooter("reference", referencesInScope);
@@ -801,7 +812,10 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
     const shown = sliced.length - dropped.length; // emitted, not merely attempted
     const hidden = inScopeList.length - shown;
     if (hidden <= 0) return;
-    const line = footerLine(label, inScopeList.length, shown, hidden);
+    // qp-62p: split the scope total by lane. `inProject` admits exactly two projects, so the
+    // non-repo remainder is the `global` lane.
+    const repo = inScopeList.filter(m => m.frontmatter.project === curProject).length;
+    const line = footerLine(label, inScopeList.length, shown, hidden, repo, inScopeList.length - repo);
     if (!fits(line)) return; // no room: drop the footer AND its histogram contribution (no orphan "Unshown tags:")
     lines.push(line);
     // The hidden set = facts beyond the slice + sliced facts the budget dropped.

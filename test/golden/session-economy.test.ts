@@ -92,8 +92,9 @@ describe("session-economy (MF-4): byte budget + truncation", () => {
 
     // (b) The e3i countFooter fires when facts are hidden — either by the
     //     projectLimit slice (10 > 5) or by budget-drop within the slice.
-    //     Format (engine.ts:600): "<N> project facts for <project> (<M> shown, <K> more)"
-    //     With curProject="global" (default when no project opt is passed).
-    expect(out).toMatch(/\d+ project facts for global \(\d+ shown, \d+ more\)/);
+    //     Format: "<N> project facts in scope for <project> (<M> shown, <K> more)"
+    //     With curProject="global" (default when no project opt is passed) the repo/global
+    //     split is omitted — the repo lane is empty by definition (qp-62p).
+    expect(out).toMatch(/\d+ project facts in scope for global \(\d+ shown, \d+ more\)/);
   });
 });

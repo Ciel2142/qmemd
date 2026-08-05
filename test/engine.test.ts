@@ -789,8 +789,36 @@ describe("recallSession", () => {
   test("surfaces unshown project count when in-scope facts exceed projectLimit (e3i)", async () => {
     for (let i = 0; i < 14; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, []);
     const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
-    expect(out).toContain("14 project facts for alpha (5 shown, 9 more)");
+    expect(out).toContain("14 project facts in scope for alpha = 14 repo + 0 global (5 shown, 9 more)");
     expect(out).toContain("qmemd list --type project --project alpha");
+  });
+
+  // qp-62p — the footer counts the SCOPE (current project + global, `inProject`), so a
+  // global-heavy corpus made the repo look like it owned hundreds of facts. Split the count.
+  test("footer splits the in-scope count into repo vs global lanes (qp-62p)", async () => {
+    await mkdir(join(root, "project"), { recursive: true });
+    const write = async (name: string, project: string, created: string) =>
+      writeFile(join(root, "project", `${name}.md`), serializeMemory(
+        { name, description: `Fact ${name}`, type: "project", tags: [], project, created, pinned: false }, "body"));
+    for (let i = 0; i < 4; i++) await write(`own-${i}`, "alpha", `2026-06-2${i}`);
+    for (let i = 0; i < 10; i++) await write(`glob-${i}`, "global", `2026-06-0${i}`);
+    await write("foreign-0", "beta", "2026-06-28"); // out of scope: neither counted nor shown
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
+    expect(out).toContain("14 project facts in scope for alpha = 4 repo + 10 global (5 shown, 9 more)");
+    expect(out).not.toContain("foreign-0");
+  });
+
+  // The repo lane is empty by definition when the current project IS global — the split
+  // would read "0 repo + N global", so it is omitted there.
+  test("footer omits the repo/global split when the current project is global (qp-62p)", async () => {
+    await mkdir(join(root, "project"), { recursive: true });
+    for (let i = 0; i < 8; i++) {
+      await writeFile(join(root, "project", `g-${i}.md`), serializeMemory(
+        { name: `g-${i}`, description: `Global fact ${i}`, type: "project", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false }, "body"));
+    }
+    const out = await recallSession(root, { project: "global", budgetBytes: 4000 });
+    expect(out).toContain("8 project facts in scope for global (5 shown, 3 more)");
+    expect(out).not.toContain("repo +");
   });
 
   test("no unshown footer when in-scope facts fit within projectLimit (e3i)", async () => {
@@ -859,7 +887,7 @@ describe("recallSession", () => {
         "body"));
     }
     const out = await recallSession(root, { project: "global", budgetBytes: 4000 });
-    expect(out).toContain("8 reference facts for global (5 shown, 3 more)");
+    expect(out).toContain("8 reference facts in scope for global (5 shown, 3 more)");
     expect(out).toContain("qmemd list --type reference --project global");
   });
 
@@ -965,8 +993,8 @@ describe("recallSession", () => {
     const out = await recallSession(root, { project: "alpha", budgetBytes: 2000 });
     // Both lanes fire a footer: project via slice-overflow, reference via budget-drop. The
     // reference lane has only 2 facts, so its footer can ONLY be a budget-drop footer.
-    expect(out).toMatch(/\d+ project facts for alpha \(\d+ shown, \d+ more\)/);
-    expect(out).toMatch(/\d+ reference facts for alpha \(\d+ shown, \d+ more\)/);
+    expect(out).toMatch(/\d+ project facts in scope for alpha = \d+ repo \+ \d+ global \(\d+ shown, \d+ more\)/);
+    expect(out).toMatch(/\d+ reference facts in scope for alpha = \d+ repo \+ \d+ global \(\d+ shown, \d+ more\)/);
     // The topic hint must survive the second footer -- the bug dropped it here.
     expect(out).toMatch(/Unshown tags:/);
     // ...without ever exceeding the hard cap.
@@ -3252,7 +3280,7 @@ describe("recallSession platform gate (core fix)", () => {
     expect(onLinux).not.toContain("more) — qmemd list"); // 4 in scope ≤ 5 → no footer
     // On mac all 6 are in scope (> 5) → the footer fires and counts 6.
     const onMac = await recallSession(root, { project: "global", platform: "macos" });
-    expect(onMac).toContain("6 project facts for global");
+    expect(onMac).toContain("6 project facts in scope for global");
   });
 
   test("hidden user/feedback facts emit a platform-hidden signal, not silence (qmemd-b1a)", async () => {
@@ -3284,7 +3312,7 @@ describe("recallSession platform gate (core fix)", () => {
     // --platform, else running it shows MORE facts than the count promised.
     for (let i = 0; i < 7; i++) await put("project", `p${i}`, { created: `2026-06-0${i + 1}` });
     const onLinux = await recallSession(root, { project: "global", platform: "linux" });
-    expect(onLinux).toContain("7 project facts for global");
+    expect(onLinux).toContain("7 project facts in scope for global");
     expect(onLinux).toContain("qmemd list --type project --project global --platform linux");
   });
 
@@ -3293,7 +3321,7 @@ describe("recallSession platform gate (core fix)", () => {
     // not append a bogus `--platform all` (not a real platform token).
     for (let i = 0; i < 7; i++) await put("project", `p${i}`, { created: `2026-06-0${i + 1}` });
     const out = await recallSession(root, { project: "global", platform: "all" });
-    expect(out).toContain("7 project facts for global");
+    expect(out).toContain("7 project facts in scope for global");
     expect(out).not.toContain("--platform");
   });
 });
