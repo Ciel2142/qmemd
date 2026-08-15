@@ -599,10 +599,11 @@ describe("CLI hook beacon e2e (tfu)", () => {
     expect(second.stdout).toContain("beta");
   });
 
-  // qmemd-1jt: `parseInt(...) || 20` coerced QMEMD_BEACON_EVERY=0 to 20 — the opposite of
-  // the stated intent (0 = fire on every call). 0 must behave like every-call; a
-  // non-numeric value falls back to the default silently (hook path stays fail-open).
-  test("QMEMD_BEACON_EVERY=0 fires on every call, not silently every 20 (qmemd-1jt)", () => {
+  // qmemd-1jt: `parseInt(...) || <default>` coerced QMEMD_BEACON_EVERY=0 to the default —
+  // the opposite of the stated intent (0 = fire on every call). 0 must behave like
+  // every-call; a non-numeric value falls back to the default silently (hook path stays
+  // fail-open).
+  test("QMEMD_BEACON_EVERY=0 fires on every call, not silently at the default cadence (qmemd-1jt)", () => {
     const first = runHook(evt(), root, cache, "0");
     expect(first.status).toBe(0);
     expect(first.stdout).toContain("beta");
@@ -617,7 +618,7 @@ describe("CLI hook beacon e2e (tfu)", () => {
     expect(first.stdout).toContain("beta");   // pivot fire unaffected
     const second = runHook(evt(), root, cache, "abc");
     expect(second.status).toBe(0);
-    expect(second.stdout.trim()).toBe("");           // default cooldown (20) applies
+    expect(second.stdout.trim()).toBe("");           // default cooldown (40) applies
   });
 });
 

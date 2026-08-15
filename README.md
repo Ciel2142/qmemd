@@ -137,7 +137,7 @@ Not found? The fix depends on **how** you installed:
 | `QMEMD_EMBED_MODEL` | `embeddinggemma-300M` (Q8 GGUF) | Embedding model for hybrid recall — independent of qmd's own `QMD_EMBED_MODEL`; pinned to the index via a sidecar marker, mismatches warn at open |
 | `QMEMD_EMBED_TIMEOUT_MS` | `6000` | Bound on the lazy embed barrier in hybrid recall; on timeout recall fails open to lexical search (flagged `degraded`) |
 | `QMEMD_HTTP_PORT` | `8182` | Port for `qmemd mcp --http` / the installed service (CLI `--port` wins) |
-| `QMEMD_BEACON_EVERY` | `20` | Re-fire cadence of the PreToolUse memory-presence beacon (every N Bash calls; a repo pivot always fires) |
+| `QMEMD_BEACON_EVERY` | `40` | Re-fire cadence of the PreToolUse memory-presence beacon (every N Bash calls; a repo pivot always fires) |
 | `QMEMD_SESSION_BUDGET` | `2000` | Byte cap on the session snapshot (`recall --session` and the MCP/REST session paths); invalid values fall back to the default |
 | `QMEMD_SESSION_PROJECT_LIMIT` | `0` | Recent unpinned project/reference facts in the session snapshot. `0` (the default) makes the snapshot pinned-only; set `5` to restore the recency-sliced lanes. Invalid values fall back to the default |
 | `QMEMD_TTL_<TYPE>` | `project` 90d · `reference` 180d · `user`/`feedback` durable | Per-type default review window applied when a fact has no explicit `review_by` (e.g. `QMEMD_TTL_PROJECT=180d`, or `never`); an unparseable value falls back to the built-in default. Surfaces via `qmemd stale` — never auto-expires |

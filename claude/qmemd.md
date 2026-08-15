@@ -23,5 +23,5 @@ line injected before a Bash command, qmemd is telling you it holds R project/ref
 scoped to this repo plus G global ones (each scope's top tags listed on its own line, capped).
 Treat it as a prompt to `recall` the relevant `tag` (e.g.
 `qmemd recall "<repo> build"`) **before** diagnosing — especially build/toolchain errors. The
-beacon is throttled (re-fires only on a repo pivot or every ~20 Bash calls) and never blocks the
+beacon is throttled (re-fires only on a repo pivot or every ~40 Bash calls) and never blocks the
 command. `qmemd tags [--project p]` prints the same overview on demand.

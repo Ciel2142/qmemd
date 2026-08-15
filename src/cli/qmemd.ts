@@ -528,9 +528,9 @@ async function main() {
       if (sub === "beacon") {
         try {
           const stdinText = await readStdin();
-          // 0 = fire on every call (clamped to 1); non-numeric/negative → 20 silently (qmemd-1jt).
-          const rawEvery = parseInt(process.env.QMEMD_BEACON_EVERY ?? "20", 10);
-          const everyN = Number.isInteger(rawEvery) && rawEvery >= 0 ? Math.max(1, rawEvery) : 20;
+          // 0 = fire on every call (clamped to 1); non-numeric/negative → 40 silently (qmemd-1jt).
+          const rawEvery = parseInt(process.env.QMEMD_BEACON_EVERY ?? "40", 10);
+          const everyN = Number.isInteger(rawEvery) && rawEvery >= 0 ? Math.max(1, rawEvery) : 40;
           const ctx = runBeacon(stdinText, { memoryRoot: root, cacheDir: cacheDir(), everyN });
           if (ctx) {
             process.stdout.write(JSON.stringify({
