@@ -31,6 +31,22 @@ const REQUIRED_ASSETS = [
 const die = (msg) => { console.error(`✗ clean-room smoke: ${msg}`); process.exit(1); };
 const ok = (msg) => console.log(`✓ ${msg}`);
 
+// `npm pack --json` reports an ARRAY of packed packages through npm 11 and an OBJECT keyed by
+// package name from npm 12 on — release CI installs `npm@latest`, so it saw the object shape and
+// `[0].filename` threw (run 32007206789). Accept both, and surface the raw stdout on anything else.
+function packedTarballFilename(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error(`npm pack --json did not emit JSON:\n${stdout}`);
+  }
+  const entries = Array.isArray(parsed) ? parsed : Object.values(parsed ?? {});
+  const filename = entries.find((e) => e && typeof e.filename === "string")?.filename;
+  if (!filename) throw new Error(`npm pack --json reported no packed filename:\n${stdout}`);
+  return filename.replace(/^.*\//, "");
+}
+
 // Spawn `qmemd mcp`, send one `initialize` request, resolve with the response. Kills the server as
 // soon as it answers; rejects on timeout (the cold-start failure mode this smoke exists to catch).
 function mcpInitialize(binJs, env, timeoutMs) {
@@ -70,7 +86,7 @@ async function main() {
     // 1) pack
     const pack = spawnSync("npm", ["pack", "--json", "--pack-destination", work], { cwd: ROOT, encoding: "utf8" });
     if (pack.status !== 0) die(`npm pack failed:\n${pack.stderr}`);
-    const tarball = join(work, JSON.parse(pack.stdout)[0].filename.replace(/^.*\//, ""));
+    const tarball = join(work, packedTarballFilename(pack.stdout));
     if (!existsSync(tarball)) die(`packed tarball not found: ${tarball}`);
     ok(`packed ${tarball.replace(work + "/", "")}`);
 
@@ -114,4 +130,6 @@ async function main() {
   }
 }
 
-main().catch((e) => die(e.message || String(e)));
+if (require.main === module) main().catch((e) => die(e.message || String(e)));
+
+module.exports = { packedTarballFilename };
