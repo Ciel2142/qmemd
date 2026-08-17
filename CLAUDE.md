@@ -52,7 +52,7 @@ br close <id>           # Complete work
 Official runtime is **Node ≥ 22**; **Bun** also works (`bun.lock`, runtime-neutral code). The package is ESM (`"type": "module"`) and TypeScript `strict`.
 
 ```bash
-npm install              # install deps (or `bun install`; @tobilu/qmd@2.5.3 from npm registry — see README; qmemd-u0f)
+npm install              # install deps (or `bun install`; @tobilu/qmd@2.8.3 from npm registry — see README; qmemd-u0f)
 npm run build            # tsc -p tsconfig.json → dist/  (the `qmemd` bin runs dist, so rebuild after src changes)
 npm test                 # vitest run --reporter=verbose  (no model load — lex/filesystem paths only)
 npm run qmemd -- <verb>  # run the CLI from source via tsx, e.g. npm run qmemd -- recall --session
@@ -60,7 +60,7 @@ npm run qmemd -- <verb>  # run the CLI from source via tsx, e.g. npm run qmemd -
 
 ## Architecture Overview
 
-qmemd is a durable **memory engine over markdown facts**, backed by the `@tobilu/qmd` search SDK (qmd ≥2.5.3 ships no `remember/recall/forget`).
+qmemd is a durable **memory engine over markdown facts**, backed by the `@tobilu/qmd` search SDK (qmd ≥2.5.3 ships no `remember/recall/forget`; pinned at 2.8.3).
 
 Each fact is a markdown file at `$QMD_MEMORY_DIR/<type>/<slug>.md` with YAML frontmatter (`name/description/type/tags/project/platforms/created` + `pinned` always present; optional fields `supersedes`/`review_by`/`source` etc. in engine.ts). Every write is git-committed (pushed if upstream set), lex-indexed into `$QMEMD_DB` (never qmd's own index), then embedded lazily on the first hybrid recall. Session-snapshot paths (`recall --session`, `session:true`) git-pull --ff-only first.
 

@@ -1985,7 +1985,7 @@ export interface RecallHit {
  */
 export const DEFAULT_MIN_SCORE = 0.575;
 
-/** qmd's default rerank-candidate pool size (RERANK_CANDIDATE_LIMIT, @tobilu/qmd 2.5.3
+/** qmd's default rerank-candidate pool size (RERANK_CANDIDATE_LIMIT, @tobilu/qmd 2.8.3
  *  store.ts): hybridQuery slices the RRF fusion pool to this many rows BEFORE reranking, so a
  *  store.search that omits candidateLimit returns at most 40 rows for ANY limit. qmemd must
  *  request a candidateLimit >= the pool it fetches, or a corpus past 40 is silently truncated

@@ -21,14 +21,14 @@
   "distractorFloorPrecision": 1,
   "provenance": {
     "embedModel": "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf",
-    "qmdVersion": "2.5.3",
+    "qmdVersion": "2.8.3",
     "runs": 5,
     "k": 5,
     "tolerance": 0.07,
-    "node": "v24.14.0",
+    "node": "v26.7.0",
     "platform": "linux",
     "arch": "x64",
-    "gitSha": "12021fb",
-    "date": "2026-06-28T22:59:09.611Z"
+    "gitSha": "c586752",
+    "date": "2026-08-17T07:31:27.780Z"
   }
 }

@@ -35,11 +35,11 @@ npx @ciel2142/qmemd recall "<topic>"  # or run without installing
 
 ## Install (dev)
 
-`qmemd` depends on [`@tobilu/qmd`](https://www.npmjs.com/package/@tobilu/qmd) `2.5.3` from the npm registry, so a clean clone installs standalone.
+`qmemd` depends on [`@tobilu/qmd`](https://www.npmjs.com/package/@tobilu/qmd) `2.8.3` from the npm registry, so a clean clone installs standalone.
 
 ```bash
 # In this repo (Node ≥ 22 is the official runtime; Bun also works):
-npm install              # or: bun install — resolves @tobilu/qmd@2.5.3 from the registry
+npm install              # or: bun install — resolves @tobilu/qmd@2.8.3 from the registry
 npm run build            # tsc -p tsconfig.json → dist/
 
 # Put qmemd itself on PATH:

@@ -50,7 +50,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@tobilu/qmd": "2.5.3",
+    "@tobilu/qmd": "2.8.3",
     "zod": "^3.23.0"
   },
   "devDependencies": {
