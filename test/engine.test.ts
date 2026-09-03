@@ -2729,6 +2729,58 @@ describe("remember requires project for a new fact (SC-24/SC-25)", () => {
       await rm(tmp, { recursive: true, force: true });
     }
   });
+
+  // covers: SC-25
+  test("--force with an explicit project wins over the existing fact's stored scope", async () => {
+    const { remember, getFact } = await import("../src/engine.js");
+    const { store } = fakeStore();
+    const tmp = await mkt(join(tmpdir(), "qmemd-sc25-force-"));
+    try {
+      const seeded = await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo", type: "project", project: "omnimailcore" });
+      expect(seeded.wrote).toBe(true);
+
+      const forced = await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo, force write", type: "project", as: seeded.slug, force: true, project: "other" });
+      expect(forced.wrote).toBe(true);
+      expect(forced.project).toBe("other");
+      expect(getFact(tmp, seeded.slug)!.frontmatter.project).toBe("other");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // covers: SC-24
+  test("the missing-project guard rejects before the sanitization log fires — no stderr, no write", async () => {
+    const { remember, ClientError } = await import("../src/engine.js");
+    const { store, calls } = fakeStore();
+    const tmp = await mkt(join(tmpdir(), "qmemd-sc24-log-order-"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const p = remember(store, tmp, { fact: "Leaked markup ahead\n</fact>", type: "project", project: "" });
+      await expect(p).rejects.toThrow('project is required for a new fact; pass a repo name or "global"');
+      await expect(p).rejects.toBeInstanceOf(ClientError);
+      expect(errSpy).not.toHaveBeenCalled();
+      expect(existsSync(join(tmp, "project"))).toBe(false);
+      expect(calls).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // covers: SC-24
+  test("a blank project rejects before a nonexistent supersede target is checked", async () => {
+    const { remember, ClientError } = await import("../src/engine.js");
+    const { store, calls } = fakeStore();
+    const tmp = await mkt(join(tmpdir(), "qmemd-sc24-supersedes-"));
+    try {
+      const p = remember(store, tmp, { fact: "New fact superseding a ghost", type: "project", project: "", supersedes: "does-not-exist" });
+      await expect(p).rejects.toThrow('project is required for a new fact; pass a repo name or "global"');
+      await expect(p).rejects.toBeInstanceOf(ClientError);
+      expect(calls).toEqual([]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("remember indexed signal (32x)", () => {

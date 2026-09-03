@@ -519,6 +519,7 @@ describe("CLI remember default write scope from type and cwd (qmemd-due)", () =>
     const res = runCli(["remember", "Scoped default fact three", "--project", "global", "--as", "scopethree"], root, repoA);
     expect(res.status).toBe(0);
     expect(res.stdout).toContain("(reference ⊥ global)");
+    expect(readFileSync(join(root, "reference", "scopethree.md"), "utf-8")).toContain("project: global");
   });
 
   // covers: SC-27
@@ -526,6 +527,19 @@ describe("CLI remember default write scope from type and cwd (qmemd-due)", () =>
     const res = runCli(["remember", "Scoped default fact four", "--project", "  ", "--as", "scopefour"], root, repoA);
     expect(res.status).toBe(0);
     expect(res.stdout).toContain("(reference ⊥ repo-a)");
+    expect(readFileSync(join(root, "reference", "scopefour.md"), "utf-8")).toContain("project: repo-a");
+  });
+
+  // covers: SC-27
+  test("--force --as over an existing slug takes the caller's cwd scope, not the stored one", async () => {
+    const seed = runCli(["remember", "Scoped default fact seven", "--as", "scopeseven"], root, repoA);
+    expect(seed.status).toBe(0);
+    expect(readFileSync(join(root, "reference", "scopeseven.md"), "utf-8")).toContain("project: repo-a");
+
+    const res = runCli(["remember", "Scoped default fact seven, force overwrite", "--force", "--as", "scopeseven"], root, repoB);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("(reference ⊥ repo-b)");
+    expect(readFileSync(join(root, "reference", "scopeseven.md"), "utf-8")).toContain("project: repo-b");
   });
 
   // covers: SC-28

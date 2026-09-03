@@ -1561,7 +1561,6 @@ export async function remember(
   // always recoverable; ride a short path-free warning back on the result.
   let sanitizedWarning: string | undefined;
   if (leakedTokens.length > 0) {
-    console.error(`[qmemd] remember '${slug}': stripped leaked tool-call markup (${leakedTokens.join(", ")}) from the fact body before storing — pre-strip raw fact follows for recovery:\n${originalFact}`);
     sanitizedWarning = `stripped leaked tool-call/template markup (${leakedTokens.join(", ")}) from the fact body before storing`;
   }
   if (input.supersedes !== undefined) {
@@ -1650,13 +1649,16 @@ export async function remember(
     throw new ClientError(`no fact named '${slug}' to replace`);
   }
 
-  // CLI/stdio MCP resolve project before calling remember() (qmemd-due wave); REST passes
-  // body.project verbatim and relies on this guard to reject a missing one. Must precede
-  // dedup and every write (SC-24). Blank + existing (replace/force over a live slug)
-  // inherits the stored scope instead of re-homing it (SC-25); blank + no existing has
-  // nothing to inherit and is a caller error.
+  // CLI/stdio MCP resolve project before calling remember() (qmemd-due wave); REST rejects
+  // a missing project with its own guard (Missing required field: project) before ever
+  // calling remember(). Must precede dedup, the sanitization log, and every write (SC-24).
+  // Blank + existing (replace/force over a live slug) inherits the stored scope instead of
+  // re-homing it (SC-25); blank + no existing has nothing to inherit and is a caller error.
   if (isBlankProject(input.project) && !existing) {
     throw new ClientError('project is required for a new fact; pass a repo name or "global"');
+  }
+  if (leakedTokens.length > 0) {
+    console.error(`[qmemd] remember '${slug}': stripped leaked tool-call markup (${leakedTokens.join(", ")}) from the fact body before storing — pre-strip raw fact follows for recovery:\n${originalFact}`);
   }
   const project = isBlankProject(input.project) ? existing!.frontmatter.project : input.project!;
 

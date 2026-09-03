@@ -220,7 +220,7 @@ A freshly remembered fact is lex-searchable immediately. Vector (semantic) recal
 
 `qmemd mcp` is a **stdio** MCP server by default. It exposes six tools: `remember`, `recall`, `forget`, `reviewed`, `get`, and `list`, with the same semantics as the CLI verbs (the MCP `get` tool ↔ the CLI `show` verb; `remember` takes the same `supersedes`/`platforms`/`ttl`/`reviewBy` parameters). `recall` carries a truncated body preview per hit; `get` returns one fact's full body by slug; `list` browses by type/tag/project; `reviewed` resets a fact's staleness clock (forward-sets `review_by`, accepting the same `ttl`/`reviewBy`).
 
-Over stdio, `remember`'s `project` is optional and scopes to the current repo when omitted (`project`/`reference` → cwd basename; `user`/`feedback` → `global`); pass `project: "global"` for something true in every repo. `replace` keeps the fact's stored scope rather than re-homing it. The shared HTTP daemon (below) has no cwd to fall back to, so it requires `project` explicitly.
+Over stdio, `remember`'s `project` is optional and scopes to the current repo when omitted (`project`/`reference` → cwd basename; `user`/`feedback` → `global`); pass `project: "global"` for something true in every repo. A cwd at the filesystem root has no basename, so it falls back to `global` too. `replace` keeps the fact's stored scope rather than re-homing it. The shared HTTP daemon (below) has no cwd to fall back to, so it requires `project` explicitly.
 
 **Breaking changes:** the daemon `remember` tool (`--http`) now requires `project` — a call that omitted it used to default to `global` and now fails validation. Pass the repo basename or `global` explicitly.
 
