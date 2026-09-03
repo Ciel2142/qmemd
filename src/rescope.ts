@@ -117,7 +117,7 @@ export function planRescope(root: string, opts: RescopeOptions = {}): RescopePla
   return { known, rows, unmatched, version: 1 };
 }
 
-const PROJECT_LINE_RE = /^(project\s*:\s*)(.*?)(\r?)$/i;
+const PROJECT_LINE_RE = /^(project[ \t]*:[ \t]*)(.*?)(\r?)$/i;
 const TYPE_LINE_RE = /^type\s*:/i;
 
 export function setProjectLine(content: string, value: string): string {

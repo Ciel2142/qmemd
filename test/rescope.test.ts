@@ -196,6 +196,27 @@ describe("setProjectLine — surgical project: rewrite (w2-rescope)", () => {
     expect(out).toBe("---\r\nname: n\r\nProject:   widget\r\ntype: project\r\n---\r\n\r\nbody\r\n");
   });
 
+  // covers: SC-38, INV-3
+  test("a blank CRLF value: the \\r is not swallowed into the pre-colon spacing capture", () => {
+    const crlf = "---\r\nname: n\r\nproject:\r\ntype: project\r\n---\r\n\r\nbody\r\n";
+    const out = setProjectLine(crlf, "widget");
+    expect(out).toBe("---\r\nname: n\r\nproject:widget\r\ntype: project\r\n---\r\n\r\nbody\r\n");
+  });
+
+  // covers: SC-38, INV-3
+  test("a blank LF value with no space after the colon", () => {
+    const content = ["---", "name: n", "project:", "type: project", "---", "", "body", ""].join("\n");
+    const out = setProjectLine(content, "widget");
+    expect(out).toBe(["---", "name: n", "project:widget", "type: project", "---", "", "body", ""].join("\n"));
+  });
+
+  // covers: SC-38, INV-3
+  test("a blank LF value with trailing spaces: the value is inserted after the preserved spacing", () => {
+    const content = ["---", "name: n", "project:   ", "type: project", "---", "", "body", ""].join("\n");
+    const out = setProjectLine(content, "widget");
+    expect(out).toBe(["---", "name: n", "project:   widget", "type: project", "---", "", "body", ""].join("\n"));
+  });
+
   // covers: SC-40
   test("inserts project: <value> directly after the first type: line when no project: line exists", () => {
     const content = ["---", "name: n", "type: project", "tags: []", "---", "", "body", ""].join("\n");
