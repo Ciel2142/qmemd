@@ -184,6 +184,7 @@ qmemd reindex                   # rebuild the lex index from the memory dir (aft
 qmemd embed [--force]           # (re-)embed the memory collection
 qmemd status                    # show store status as JSON
 qmemd doctor [--fix] [--json]   # audit frontmatter integrity; --fix repairs mechanical issues (writes .bak, model-free)
+qmemd rescope [--known a,b] [--alias old=new]... [--json] [--apply [plan.json|-]]   # migrate global project/reference facts to their inferred project (dry run by default, model-free)
 qmemd mcp                       # start the stdio MCP server (--http for the daemon; install-service for a durable unit)
 ```
 
@@ -207,6 +208,14 @@ qmemd reviewed redpanda-acl-convention --ttl never          # decided permanent:
 ```
 
 Over MCP the `reviewed` tool mirrors the CLI — `{ slug, ttl?, reviewBy? }`, same semantics (see [MCP server](#mcp-server)).
+
+### Rescope existing facts
+
+`qmemd rescope` migrates global `project`/`reference` facts to the project their slug or tags actually belong to — `user`/`feedback` facts are never touched. Dry run is the default: it prints one `<slug> | <from> | <to> | <reason>` row per match in plan order, then a `<to>: N` count per target project (highest count first), then `N unmatched`; the corpus is only scanned, never opened for writes. Review the plan, then either edit it with `--json` (prints the plan as JSON) or apply it.
+
+`--apply` runs the freshly computed plan; `--apply plan.json` or `--apply -` (stdin) applies a plan you reviewed or edited first. Every apply is all-or-nothing in one commit (`rescope: N facts`) — either every matched fact moves or none do. Use `--known a,b` to add extra project names to match beyond what's already in the corpus, and repeatable `--alias old=new` to route facts scoped `old` to `new` instead (and add `new` to the known set).
+
+To undo an apply: `git revert <commit>` inside `$QMD_MEMORY_DIR`, then `qmemd reindex`.
 
 `recall` returns a truncated body preview per hit (≤500 bytes; pass `--full` for the whole body). `show <slug>` prints one fact in full, and `list` browses the corpus by type/tag/project without loading the model.
 

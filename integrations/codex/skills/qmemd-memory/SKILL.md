@@ -48,6 +48,7 @@ qmemd reviewed <slug> [--ttl <N>d|w|m|y|never] [--review-by DATE]  # re-verified
 qmemd forget <slug>
 qmemd reindex                                 # re-index after hand-editing a fact file (lex; no model)
 qmemd doctor [--fix] [--json]                 # audit frontmatter integrity after a hand-edit; --fix repairs mechanical issues (writes .bak; no model)
+qmemd rescope [--known a,b] [--alias old=new]... [--json] [--apply [plan.json|-]]  # migrate global project/reference facts to their inferred project (dry run by default; no model)
 ```
 Prefer the MCP tools (`remember`/`recall`/`forget`/`reviewed`/`get`/`list`) when the qmemd MCP server is running; the CLI commands above work identically otherwise (the MCP `get` tool ↔ the CLI `show` verb, which also accepts `get` as an alias).
 
