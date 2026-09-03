@@ -444,6 +444,11 @@ describe("runBeacon orchestration (w3)", () => {
     const out = runBeacon(evt("zebra run"), deps());            // call 41: 41-1 = 40 → forced rebuild
     expect(out).toContain("(jdk)");
     expect(marker()!.mapBuiltAtCall).toBe(41);
+
+    // A fingerprint-driven rebuild on a non-forced call does not reset the cadence (R-3).
+    await writeFact(root, "project", "orangutan", { project: "beta", tags: ["orangutan"] });
+    expect(runBeacon(evt("orangutan run"), deps())).toContain("(orangutan)");
+    expect(marker()!.mapBuiltAtCall).toBe(41);
   });
 
   // Write-beacon accounting (qmemd-yl3): runBeacon records per-repo work + captures on

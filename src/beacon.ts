@@ -260,12 +260,6 @@ export interface WriteBeaconDeps {
   threshold: number;
 }
 
-/** loadOrBuildTokenMap does not report whether it rebuilt; the cache file is rewritten
- *  (temp-then-rename) only on a build, so its mtime is the signal for mapBuiltAtCall. */
-function mapFileStamp(path: string): number {
-  try { return statSync(path).mtimeMs; } catch { return -1; }
-}
-
 /** Orchestrate one PreToolUse event → beacon text or null (silent). Pure of process IO except
  *  the marker, the map cache, and the event log. Never throws on bad input — returns null
  *  (fail-open, INV-4). Two blocks can print on one call: the once-per-repo pivot and the
@@ -326,9 +320,10 @@ export function runBeacon(stdinText: string, deps: BeaconDeps): string | null {
       if (tokens.length > 0) {
         const mapPath = mapCachePath(deps.cacheDir, deps.memoryRoot, repo);
         const force = pivoted || state.callCount - state.mapBuiltAtCall >= MAP_REBUILD_EVERY_N_CALLS;
-        const stamp = mapFileStamp(mapPath);
         const map = loadOrBuildTokenMap(mapPath, deps.memoryRoot, repo, force);
-        if (mapFileStamp(mapPath) !== stamp) state = { ...state, mapBuiltAtCall: state.callCount };
+        // Only a forced build resets the cadence (R-3): loadOrBuildTokenMap reports no rebuild
+        // flag, so a fingerprint-driven one costs at most one redundant force within 40 calls.
+        if (force) state = { ...state, mapBuiltAtCall: state.callCount };
         const hits = matchCommand(tokens, map, new Set(state.surfacedSlugs));
         if (hits.length > 0) {
           const slugs = hits.map(h => h.slug);
