@@ -1136,7 +1136,7 @@ export function stripLeakedMarkup(text: string): string {
   return out;
 }
 
-async function reindexMemory(store: QMDStore): Promise<void> {
+export async function reindexMemory(store: QMDStore): Promise<void> {
   await store.update({ collections: [MEMORY_COLLECTION] });
 }
 
@@ -1512,7 +1512,7 @@ function scanFacts(root: string): ScanResult {
  * synced is false only when an op that should have worked failed; the benign no-ops
  * (no repo / no upstream / nothing to commit) leave it true so callers stay silent.
  */
-function syncOutcome(commit: GitCommitResult, push: GitPushResult): { synced: boolean; syncWarning?: string } {
+export function syncOutcome(commit: GitCommitResult, push: GitPushResult): { synced: boolean; syncWarning?: string } {
   if (!commit.ok) {
     return { synced: false, syncWarning: `git commit failed (${commit.reason}) — fact saved locally but NOT committed; the cross-machine source of truth will not see it` };
   }

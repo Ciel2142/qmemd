@@ -1,7 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { planRescope } from "../src/rescope.js";
+import { planRescope, applyRescope, setProjectLine, isRescopePlan, type RescopePlan, type RescopeRow } from "../src/rescope.js";
 import { serializeMemory, type MemoryFrontmatter, type MemoryType } from "../src/engine.js";
+import type { QMDStore } from "@tobilu/qmd";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -164,5 +166,369 @@ describe("planRescope — planner (w2-rescope)", () => {
 
     const row = plan.rows.find((r) => r.slug === "widget-noproject");
     expect(row).toEqual({ slug: "widget-noproject", type: "project", from: "global", to: "widget", reason: "slug-prefix" });
+  });
+});
+
+describe("setProjectLine — surgical project: rewrite (w2-rescope)", () => {
+  // covers: SC-38
+  test("replaces the value on the first project: line inside the fences, leaving every other line untouched", () => {
+    const content = ["---", "name: n", "project: global", "type: project", "---", "", "body", ""].join("\n");
+    const out = setProjectLine(content, "widget");
+    expect(out).toBe(["---", "name: n", "project: widget", "type: project", "---", "", "body", ""].join("\n"));
+  });
+
+  // covers: SC-38
+  test("a body line reading project: other is not the first project: line inside the fences and stays untouched", () => {
+    const content = ["---", "name: n", "type: project", "---", "", "body mentions project: other in prose", ""].join("\n");
+    const out = setProjectLine(content, "widget");
+    expect(out).toBe(["---", "name: n", "type: project", "project: widget", "---", "", "body mentions project: other in prose", ""].join("\n"));
+  });
+
+  // covers: SC-40
+  test("inserts project: <value> directly after the first type: line when no project: line exists", () => {
+    const content = ["---", "name: n", "type: project", "tags: []", "---", "", "body", ""].join("\n");
+    const out = setProjectLine(content, "widget");
+    expect(out).toBe(["---", "name: n", "type: project", "project: widget", "tags: []", "---", "", "body", ""].join("\n"));
+  });
+
+  // covers: SC-40
+  test("inserts project: <value> right after the opening fence when neither project: nor type: exists", () => {
+    const content = ["---", "name: n", "tags: []", "---", "", "body", ""].join("\n");
+    const out = setProjectLine(content, "widget");
+    expect(out).toBe(["---", "project: widget", "name: n", "tags: []", "---", "", "body", ""].join("\n"));
+  });
+
+  // covers: SC-38
+  test("content with no byte-0 fence is returned unchanged", () => {
+    const content = "no frontmatter here\nproject: other\n";
+    expect(setProjectLine(content, "widget")).toBe(content);
+  });
+});
+
+describe("isRescopePlan — shape check for a plan read from a file (w2-rescope)", () => {
+  const validRow: RescopeRow = { slug: "s", type: "project", from: "global", to: "widget", reason: "slug-prefix" };
+  const validPlan: RescopePlan = { known: ["widget"], rows: [validRow], unmatched: 0, version: 1 };
+
+  // covers: SC-42
+  test("accepts a well-formed plan", () => {
+    expect(isRescopePlan(validPlan)).toBe(true);
+  });
+
+  // covers: SC-42
+  test("rejects non-object, null, and array values", () => {
+    for (const v of [null, undefined, "plan", 42, [], [validRow]]) {
+      expect(isRescopePlan(v)).toBe(false);
+    }
+  });
+
+  // covers: SC-42
+  test("rejects a plan missing a required field or with a wrong-typed field", () => {
+    expect(isRescopePlan({ ...validPlan, rows: "not-an-array" })).toBe(false);
+    expect(isRescopePlan({ ...validPlan, known: [1, 2] })).toBe(false);
+    expect(isRescopePlan({ ...validPlan, unmatched: "0" })).toBe(false);
+    expect(isRescopePlan({ ...validPlan, version: 2 })).toBe(false);
+    const { known: _known, ...noKnown } = validPlan;
+    expect(isRescopePlan(noKnown)).toBe(false);
+  });
+
+  // covers: SC-42
+  test("rejects a row with a malformed field (missing key, non-string slug, bad reason)", () => {
+    const { slug: _slug, ...rowNoSlug } = validRow;
+    expect(isRescopePlan({ ...validPlan, rows: [rowNoSlug] })).toBe(false);
+    expect(isRescopePlan({ ...validPlan, rows: [{ ...validRow, slug: 5 }] })).toBe(false);
+    expect(isRescopePlan({ ...validPlan, rows: [{ ...validRow, reason: "bogus" }] })).toBe(false);
+  });
+});
+
+function fakeStore(opts: { updateThrows?: boolean } = {}): { store: QMDStore; calls: unknown[] } {
+  const calls: unknown[] = [];
+  const store = {
+    async searchLex() { return []; },
+    async update(args: unknown) {
+      calls.push(args);
+      if (opts.updateThrows) throw new Error("SQLITE_BUSY");
+    },
+  } as unknown as QMDStore;
+  return { store, calls };
+}
+
+function fakeGit(opts: { commitStatus?: number } = {}): { run: (args: string[], cwd: string) => number; calls: string[][] } {
+  const calls: string[][] = [];
+  const run = (args: string[]): number => {
+    calls.push(args);
+    if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return 0;
+    if (args[0] === "rev-parse") return 0; // upstream present
+    if (args[0] === "diff") return 1; // changes staged
+    if (args[0] === "commit") return opts.commitStatus ?? 0;
+    return 0; // push, add
+  };
+  return { run, calls };
+}
+
+describe("applyRescope — apply (w2-rescope)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-rescope-apply-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  // covers: SC-37
+  test("a 3-row plan where row 2's slug has no file on disk: only row 2 is rejected, but nothing is applied", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "c", { project: "global" });
+    const before = { a: readFileSync(join(root, "project", "a.md"), "utf-8"), c: readFileSync(join(root, "project", "c.md"), "utf-8") };
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "missing", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "c", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+    const { run, calls: gitCalls } = fakeGit();
+
+    const res = await applyRescope(store, root, plan, { run });
+
+    expect(res.rejected).toEqual([rows[1]]);
+    expect(res.applied).toBe(0);
+    expect(readFileSync(join(root, "project", "a.md"), "utf-8")).toBe(before.a);
+    expect(readFileSync(join(root, "project", "c.md"), "utf-8")).toBe(before.c);
+    expect(gitCalls.filter((a) => a[0] === "commit")).toHaveLength(0);
+    expect(calls).toEqual([]);
+  });
+
+  // covers: SC-37
+  test("a row whose disk project no longer equals its plan from is rejected as stale, blocking the whole apply", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "somethingelse" });
+    await writeFact(root, "c", { project: "global" });
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "b", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "c", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+
+    const res = await applyRescope(store, root, plan);
+
+    expect(res.rejected).toEqual([rows[1]]);
+    expect(res.applied).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  // covers: SC-37
+  test("the same type/slug appearing twice in the plan rejects the duplicate and blocks the whole apply", async () => {
+    await writeFact(root, "a", { project: "global" });
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+
+    const res = await applyRescope(store, root, plan);
+
+    expect(res.applied).toBe(0);
+    expect(res.rejected).toEqual([rows[1]]);
+    expect(readFileSync(join(root, "project", "a.md"), "utf-8")).toContain("project: global");
+    expect(calls).toEqual([]);
+  });
+
+  // covers: SC-37
+  test("a fenceless fact file cannot be rewritten honestly and is rejected in phase 1", async () => {
+    await mkdir(join(root, "project"), { recursive: true });
+    await writeFile(join(root, "project", "no-fences.md"), "no frontmatter at all\nproject: other\n");
+    const rows: RescopeRow[] = [{ slug: "no-fences", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+
+    const res = await applyRescope(store, root, plan);
+
+    expect(res.applied).toBe(0);
+    expect(res.rejected).toEqual(rows);
+    expect(readFileSync(join(root, "project", "no-fences.md"), "utf-8")).toBe("no frontmatter at all\nproject: other\n");
+    expect(calls).toEqual([]);
+  });
+
+  // covers: SC-37
+  test("re-applying an already-applied plan rejects every row (disk project now equals to, not from)", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "global" });
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "b", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store } = fakeStore();
+    const { run } = fakeGit();
+
+    const first = await applyRescope(store, root, plan, { run });
+    expect(first.applied).toBe(2);
+    expect(first.rejected).toEqual([]);
+
+    const second = await applyRescope(store, root, plan, { run });
+    expect(second.applied).toBe(0);
+    expect(second.rejected).toEqual(rows);
+  });
+
+  // covers: SC-38, INV-3
+  test("apply changes only the project: value; tags, supersedes, pinned, and a multi-paragraph body stay byte-identical", async () => {
+    await writeFact(root, "widget-anchor", {
+      project: "global",
+      tags: ["needs quoting: yes", "plain"],
+      pinned: true,
+      supersededBy: "widget-newer",
+    });
+    const dir = join(root, "project");
+    const before = readFileSync(join(dir, "widget-anchor.md"), "utf-8");
+    const rows: RescopeRow[] = [{ slug: "widget-anchor", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store } = fakeStore();
+
+    const res = await applyRescope(store, root, plan);
+
+    expect(res.applied).toBe(1);
+    const after = readFileSync(join(dir, "widget-anchor.md"), "utf-8");
+    const beforeLines = before.split("\n");
+    const afterLines = after.split("\n");
+    expect(afterLines.length).toBe(beforeLines.length);
+    for (let i = 0; i < beforeLines.length; i++) {
+      if (/^project\s*:/.test(beforeLines[i]!)) {
+        expect(afterLines[i]).toBe("project: widget");
+      } else {
+        expect(afterLines[i]).toBe(beforeLines[i]);
+      }
+    }
+    const entries = readdirSync(dir);
+    expect(entries.some((f) => f.endsWith(".bak"))).toBe(false);
+    expect(entries.some((f) => f.endsWith(".tmp"))).toBe(false);
+  });
+
+  // covers: SC-39
+  test("3 applied rows commit once with all three paths and rescope: 3 facts, push once, reindex once", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "global" });
+    await writeFact(root, "c", { project: "global" });
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "b", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "c", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+    const { run, calls: gitCalls } = fakeGit();
+
+    const res = await applyRescope(store, root, plan, { run });
+
+    expect(res.applied).toBe(3);
+    const commits = gitCalls.filter((a) => a[0] === "commit");
+    expect(commits).toHaveLength(1);
+    expect(commits[0]).toContain("rescope: 3 facts");
+    for (const s of ["a", "b", "c"]) expect(commits[0]).toContain(`project/${s}.md`);
+    expect(gitCalls.filter((a) => a[0] === "push")).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+    expect(res.synced).toBe(true);
+    expect(res.indexed).toBe(true);
+  });
+
+  // covers: SC-39
+  test("an empty plan performs no write, commit, push, or reindex", async () => {
+    const plan: RescopePlan = { known: [], rows: [], unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+    const { run, calls: gitCalls } = fakeGit();
+
+    const res = await applyRescope(store, root, plan, { run });
+
+    expect(res).toEqual({ applied: 0, rejected: [], synced: true, indexed: true });
+    expect(gitCalls).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  // covers: SC-39
+  test("a commit failure (exit 128) leaves files rewritten, synced:false with a warning, but still reindexes", async () => {
+    await writeFact(root, "a", { project: "global" });
+    const rows: RescopeRow[] = [{ slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+    const { run } = fakeGit({ commitStatus: 128 });
+
+    const res = await applyRescope(store, root, plan, { run });
+
+    expect(res.applied).toBe(1);
+    expect(readFileSync(join(root, "project", "a.md"), "utf-8")).toMatch(/project: widget/);
+    expect(res.synced).toBe(false);
+    expect(res.syncWarning).toBeTruthy();
+    expect(calls).toHaveLength(1);
+    expect(res.indexed).toBe(true);
+  });
+
+  // covers: SC-41
+  test("a reindex rejection surfaces indexed:false without throwing; files stay rewritten and committed", async () => {
+    await writeFact(root, "a", { project: "global" });
+    const rows: RescopeRow[] = [{ slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store } = fakeStore({ updateThrows: true });
+    const { run, calls: gitCalls } = fakeGit();
+
+    const res = await applyRescope(store, root, plan, { run });
+
+    expect(res.applied).toBe(1);
+    expect(res.indexed).toBe(false);
+    expect(readFileSync(join(root, "project", "a.md"), "utf-8")).toMatch(/project: widget/);
+    expect(gitCalls.filter((a) => a[0] === "commit")).toHaveLength(1);
+  });
+
+  // covers: SC-42
+  test("a plan row with a traversal slug or a newline slug rejects the whole plan and writes nothing outside <root>/<type>/", async () => {
+    await writeFact(root, "a", { project: "global" });
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "../../x", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "bad\nslug", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+
+    const res = await applyRescope(store, root, plan);
+
+    expect(res.applied).toBe(0);
+    expect(res.rejected).toEqual([rows[1], rows[2]]);
+    expect(readFileSync(join(root, "project", "a.md"), "utf-8")).toContain("project: global");
+    expect(existsSync(join(tmpdir(), "x.md"))).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  // covers: INV-2
+  test("a row targeting global, blank, or a user-type fact is rejected", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "global" });
+    await writeFact(root, "u", { project: "global", type: "user" });
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "Global", reason: "slug-prefix" },
+      { slug: "b", type: "project", from: "global", to: "", reason: "slug-prefix" },
+      { slug: "u", type: "user", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+
+    const res = await applyRescope(store, root, plan);
+
+    expect(res.applied).toBe(0);
+    expect(res.rejected).toEqual(rows);
+    expect(calls).toEqual([]);
+  });
+
+  // covers: SC-40
+  test("apply on a fact with no project: line inserts project: <to> right after the type: line", async () => {
+    await mkdir(join(root, "project"), { recursive: true });
+    const content = ["---", "name: widget-noproject", "description: fact", "type: project", "tags: []", "created: 2026-06-10", "pinned: false", "---", "", "body mentions project: other in prose", ""].join("\n");
+    await writeFile(join(root, "project", "widget-noproject.md"), content);
+    const rows: RescopeRow[] = [{ slug: "widget-noproject", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store } = fakeStore();
+
+    const res = await applyRescope(store, root, plan);
+
+    expect(res.applied).toBe(1);
+    const after = readFileSync(join(root, "project", "widget-noproject.md"), "utf-8");
+    expect(after).toBe(["---", "name: widget-noproject", "description: fact", "type: project", "project: widget", "tags: []", "created: 2026-06-10", "pinned: false", "---", "", "body mentions project: other in prose", ""].join("\n"));
   });
 });

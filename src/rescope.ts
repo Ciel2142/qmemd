@@ -1,4 +1,18 @@
-import { walkFactFiles, parseMemory, type MemoryType } from "./engine.js";
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import {
+  walkFactFiles,
+  parseMemory,
+  locateFences,
+  yamlScalar,
+  memoryFilePath,
+  assertSafeSlug,
+  syncOutcome,
+  reindexMemory,
+  MEMORY_TYPES,
+  type MemoryType,
+} from "./engine.js";
+import { gitCommit, gitPush, type GitDeps } from "./git.js";
+import type { QMDStore } from "@tobilu/qmd";
 
 export type RescopeReason = "slug-prefix" | "tag" | "alias";
 
@@ -102,4 +116,131 @@ export function planRescope(root: string, opts: RescopeOptions = {}): RescopePla
   }
 
   return { known, rows, unmatched, version: 1 };
+}
+
+export function setProjectLine(content: string, value: string): string {
+  const fences = locateFences(content);
+  if (!fences) return content;
+  const { open, close } = fences;
+  const lines = content.split("\n");
+  const projectRe = /^project\s*:/i;
+  for (let i = open + 1; i < close; i++) {
+    if (projectRe.test(lines[i]!)) {
+      lines[i] = `project: ${value}`;
+      return lines.join("\n");
+    }
+  }
+  const typeRe = /^type\s*:/i;
+  let insertAt = open + 1;
+  for (let i = open + 1; i < close; i++) {
+    if (typeRe.test(lines[i]!)) { insertAt = i + 1; break; }
+  }
+  lines.splice(insertAt, 0, `project: ${value}`);
+  return lines.join("\n");
+}
+
+const RESCOPE_REASONS: readonly RescopeReason[] = ["slug-prefix", "tag", "alias"];
+
+function isRescopeRow(v: unknown): v is RescopeRow {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as Record<string, unknown>;
+  return (
+    typeof r.slug === "string" &&
+    typeof r.type === "string" && (MEMORY_TYPES as string[]).includes(r.type) &&
+    typeof r.from === "string" &&
+    typeof r.to === "string" &&
+    typeof r.reason === "string" && (RESCOPE_REASONS as string[]).includes(r.reason)
+  );
+}
+
+export function isRescopePlan(v: unknown): v is RescopePlan {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const p = v as Record<string, unknown>;
+  return (
+    Array.isArray(p.known) && p.known.every((k) => typeof k === "string") &&
+    Array.isArray(p.rows) && p.rows.every(isRescopeRow) &&
+    typeof p.unmatched === "number" &&
+    p.version === 1
+  );
+}
+
+export interface RescopeApplyResult {
+  applied: number;
+  rejected: RescopeRow[];
+  synced: boolean;
+  syncWarning?: string;
+  indexed: boolean;
+}
+
+export async function applyRescope(
+  store: QMDStore,
+  root: string,
+  plan: RescopePlan,
+  git: GitDeps = {},
+): Promise<RescopeApplyResult> {
+  if (plan.rows.length === 0) {
+    return { applied: 0, rejected: [], synced: true, indexed: true };
+  }
+
+  const rejected: RescopeRow[] = [];
+  const seen = new Set<string>();
+  const valid: { row: RescopeRow; path: string; raw: string }[] = [];
+
+  for (const row of plan.rows) {
+    if (!ROW_TYPES.includes(row.type)) { rejected.push(row); continue; }
+    if (isGlobalOrBlank(row.to)) { rejected.push(row); continue; }
+    try {
+      assertSafeSlug(row.slug);
+    } catch {
+      rejected.push(row);
+      continue;
+    }
+    const key = `${row.type}/${row.slug}`;
+    if (seen.has(key)) { rejected.push(row); continue; }
+    const path = memoryFilePath(root, row.type, row.slug);
+    if (!existsSync(path)) { rejected.push(row); continue; }
+    const raw = readFileSync(path, "utf-8");
+    if (parseMemory(raw).frontmatter.project !== row.from) { rejected.push(row); continue; }
+    if (!locateFences(raw)) { rejected.push(row); continue; }
+    seen.add(key);
+    valid.push({ row, path, raw });
+  }
+
+  if (rejected.length > 0) {
+    return { applied: 0, rejected, synced: true, indexed: true };
+  }
+
+  const written: { path: string; content: string }[] = [];
+  let currentTmp: string | undefined;
+  try {
+    for (const v of valid) {
+      const rewritten = setProjectLine(v.raw, yamlScalar(v.row.to));
+      const tmpPath = `${v.path}.rescope-${process.pid}.tmp`;
+      currentTmp = tmpPath;
+      writeFileSync(tmpPath, rewritten);
+      renameSync(tmpPath, v.path);
+      currentTmp = undefined;
+      written.push({ path: v.path, content: v.raw });
+    }
+  } catch (e) {
+    for (const w of written) writeFileSync(w.path, w.content);
+    if (currentTmp && existsSync(currentTmp)) unlinkSync(currentTmp);
+    throw e;
+  }
+
+  const commitPaths = valid.map((v) => `${v.row.type}/${v.row.slug}.md`);
+  const commit = gitCommit(root, `rescope: ${valid.length} fact${valid.length === 1 ? "" : "s"}`, commitPaths, git);
+  const push = gitPush(root, git);
+  const { synced, syncWarning } = syncOutcome(commit, push);
+  if (syncWarning) console.error(`[qmemd] rescope: ${syncWarning}`);
+
+  let indexed = true;
+  try {
+    await reindexMemory(store);
+  } catch (e) {
+    indexed = false;
+    console.error(`[qmemd] rescope: reindex failed (rescope committed): ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  return { applied: valid.length, rejected: [], synced, syncWarning, indexed };
 }
