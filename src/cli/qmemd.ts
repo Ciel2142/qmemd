@@ -446,9 +446,19 @@ async function hookVerb(argv: string[]): Promise<void> {
     }
     const unitMs = { h: 3_600_000, d: 86_400_000, w: 604_800_000 }[m[2] as "h" | "d" | "w"];
     const since = new Date(Date.now() - Number(m[1]) * unitMs);
-    const { events, skipped } = readEvents(eventLogPath(cacheDir()), since.getTime());
-    const stats: HookStats = { ...computeStats(events, FOLLOWUP_WINDOW_MS, since), skipped };
-    console.log(values.json ? JSON.stringify(stats) : formatStats(stats));
+    if (Number.isNaN(since.getTime())) {
+      console.error(HOOK_STATS_USAGE);
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const { events, skipped } = readEvents(eventLogPath(cacheDir()), since.getTime());
+      const stats: HookStats = { ...computeStats(events, FOLLOWUP_WINDOW_MS, since), skipped };
+      console.log(values.json ? JSON.stringify(stats) : formatStats(stats));
+    } catch (e) {
+      console.error(`hook stats failed: ${errCode(e, "unexpected error")}`);
+      process.exitCode = 1;
+    }
     return;
   }
   console.error(HOOK_USAGE); // exit 0: a hook invocation never blocks on its argv (INV-4)

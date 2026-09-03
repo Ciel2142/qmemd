@@ -836,17 +836,29 @@ describe("CLI hook stats (w3 task 6)", () => {
   });
 
   // covers: SC-75
-  test("--since <N>h parses hours and excludes an event outside that window", async () => {
+  test("--since <N>h|d|w parses hours/days/weeks and excludes events outside each window", async () => {
     const base = Date.now();
     const iso = (deltaMs: number) => new Date(base - deltaMs).toISOString();
     await writeHookEvents(cache, [
       JSON.stringify({ v: 1, ts: iso(30 * 60_000), session: "s-recent", repo: "r", kind: "pivot", slugs: ["a"] }),
-      JSON.stringify({ v: 1, ts: iso(3 * 60 * 60_000), session: "s-old", repo: "r", kind: "pivot", slugs: ["b"] }),
+      JSON.stringify({ v: 1, ts: iso(3 * 60 * 60_000), session: "s-3h", repo: "r", kind: "pivot", slugs: ["b"] }),
+      JSON.stringify({ v: 1, ts: iso(3 * 24 * 60 * 60_000), session: "s-3d", repo: "r", kind: "pivot", slugs: ["c"] }),
+      JSON.stringify({ v: 1, ts: iso(10 * 24 * 60 * 60_000), session: "s-10d", repo: "r", kind: "pivot", slugs: ["d"] }),
     ]);
-    const wide = runStatsHook(["--json"], cache);
-    expect(JSON.parse(wide.stdout).byKind.pivot.fired).toBe(2);
-    const narrow = runStatsHook(["--since", "1h", "--json"], cache);
-    expect(JSON.parse(narrow.stdout).byKind.pivot.fired).toBe(1);
+    const fired = (args: string[]) => JSON.parse(runStatsHook([...args, "--json"], cache).stdout).byKind.pivot.fired;
+    expect(fired([])).toBe(3); // default 7d: recent + 3h + 3d, excludes 10d
+    expect(fired(["--since", "1h"])).toBe(1); // recent only
+    expect(fired(["--since", "2d"])).toBe(2); // recent + 3h, excludes 3d and 10d
+    expect(fired(["--since", "1w"])).toBe(3); // recent + 3h + 3d, excludes 10d
+  });
+
+  // covers: SC-76
+  test("an out-of-range --since (invalid Date) takes the same usage-error path, never a stack trace", () => {
+    const res = runStatsHook(["--since", "99999999999999999h"], cache);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("usage: qmemd hook stats [--since <N>d|<N>h|<N>w] [--json]");
+    expect(res.stderr).not.toContain("    at ");
+    expect(res.stdout.trim()).toBe("");
   });
 
   // covers: SC-75
