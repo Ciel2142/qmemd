@@ -1,11 +1,16 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { planRescope, applyRescope, setProjectLine, isRescopePlan, type RescopePlan, type RescopeRow } from "../src/rescope.js";
 import { serializeMemory, type MemoryFrontmatter, type MemoryType } from "../src/engine.js";
 import type { QMDStore } from "@tobilu/qmd";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+});
 
 interface FactOpts {
   type?: MemoryType;
@@ -178,10 +183,17 @@ describe("setProjectLine — surgical project: rewrite (w2-rescope)", () => {
   });
 
   // covers: SC-38
-  test("a body line reading project: other is not the first project: line inside the fences and stays untouched", () => {
-    const content = ["---", "name: n", "type: project", "---", "", "body mentions project: other in prose", ""].join("\n");
+  test("a body line that is itself `project: other` (outside the fences) is not mistaken for the frontmatter line", () => {
+    const content = ["---", "name: n", "type: project", "---", "", "project: other", ""].join("\n");
     const out = setProjectLine(content, "widget");
-    expect(out).toBe(["---", "name: n", "type: project", "project: widget", "---", "", "body mentions project: other in prose", ""].join("\n"));
+    expect(out).toBe(["---", "name: n", "type: project", "project: widget", "---", "", "project: other", ""].join("\n"));
+  });
+
+  // covers: SC-38
+  test("preserves the original key spelling, colon spacing, and CRLF line ending; only the value span changes", () => {
+    const crlf = "---\r\nname: n\r\nProject:   global\r\ntype: project\r\n---\r\n\r\nbody\r\n";
+    const out = setProjectLine(crlf, "widget");
+    expect(out).toBe("---\r\nname: n\r\nProject:   widget\r\ntype: project\r\n---\r\n\r\nbody\r\n");
   });
 
   // covers: SC-40
@@ -226,9 +238,15 @@ describe("isRescopePlan — shape check for a plan read from a file (w2-rescope)
     expect(isRescopePlan({ ...validPlan, rows: "not-an-array" })).toBe(false);
     expect(isRescopePlan({ ...validPlan, known: [1, 2] })).toBe(false);
     expect(isRescopePlan({ ...validPlan, unmatched: "0" })).toBe(false);
-    expect(isRescopePlan({ ...validPlan, version: 2 })).toBe(false);
     const { known: _known, ...noKnown } = validPlan;
     expect(isRescopePlan(noKnown)).toBe(false);
+  });
+
+  // covers: SC-42
+  test("plan.version is not validated: any version value, present or absent, is accepted", () => {
+    expect(isRescopePlan({ ...validPlan, version: 2 })).toBe(true);
+    const { version: _version, ...noVersion } = validPlan;
+    expect(isRescopePlan(noVersion)).toBe(true);
   });
 
   // covers: SC-42
@@ -237,6 +255,12 @@ describe("isRescopePlan — shape check for a plan read from a file (w2-rescope)
     expect(isRescopePlan({ ...validPlan, rows: [rowNoSlug] })).toBe(false);
     expect(isRescopePlan({ ...validPlan, rows: [{ ...validRow, slug: 5 }] })).toBe(false);
     expect(isRescopePlan({ ...validPlan, rows: [{ ...validRow, reason: "bogus" }] })).toBe(false);
+  });
+
+  // covers: SC-42
+  test("a row's type is not restricted to project/reference: an invalid or traversal-shaped type still passes the shape check, so phase 1 can reject it", () => {
+    expect(isRescopePlan({ ...validPlan, rows: [{ ...validRow, type: "user" }] })).toBe(true);
+    expect(isRescopePlan({ ...validPlan, rows: [{ ...validRow, type: "../../etc" }] })).toBe(true);
   });
 });
 
@@ -370,14 +394,22 @@ describe("applyRescope — apply (w2-rescope)", () => {
   });
 
   // covers: SC-38, INV-3
-  test("apply changes only the project: value; tags, supersedes, pinned, and a multi-paragraph body stay byte-identical", async () => {
-    await writeFact(root, "widget-anchor", {
-      project: "global",
-      tags: ["needs quoting: yes", "plain"],
-      pinned: true,
-      supersededBy: "widget-newer",
-    });
+  test("apply changes only the project: value; tags, supersedes, review_by, pinned, and a multi-paragraph body stay byte-identical", async () => {
     const dir = join(root, "project");
+    await mkdir(dir, { recursive: true });
+    const fm: MemoryFrontmatter = {
+      name: "widget-anchor",
+      description: "fact widget-anchor",
+      type: "project",
+      tags: ["needs quoting: yes", "plain"],
+      project: "global",
+      created: "2026-06-10",
+      pinned: true,
+      supersedes: "widget-older",
+      reviewBy: "2027-01-01",
+    };
+    const body = "First paragraph of the fact.\n\nSecond paragraph with more detail and a list:\n- one\n- two\n";
+    await writeFile(join(dir, "widget-anchor.md"), serializeMemory(fm, body));
     const before = readFileSync(join(dir, "widget-anchor.md"), "utf-8");
     const rows: RescopeRow[] = [{ slug: "widget-anchor", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
     const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
@@ -400,6 +432,64 @@ describe("applyRescope — apply (w2-rescope)", () => {
     const entries = readdirSync(dir);
     expect(entries.some((f) => f.endsWith(".bak"))).toBe(false);
     expect(entries.some((f) => f.endsWith(".tmp"))).toBe(false);
+  });
+
+  // covers: SC-37
+  test("a throw mid-write restores the already-written file from its pre-image and removes the in-flight temp file", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "global" });
+    const dir = join(root, "project");
+    const beforeA = readFileSync(join(dir, "a.md"), "utf-8");
+    const beforeB = readFileSync(join(dir, "b.md"), "utf-8");
+    await mkdir(join(dir, `b.md.rescope-${process.pid}.tmp`), { recursive: true });
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "b", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+
+    await expect(applyRescope(store, root, plan)).rejects.toThrow(/EISDIR/i);
+
+    expect(readFileSync(join(dir, "a.md"), "utf-8")).toBe(beforeA);
+    expect(readFileSync(join(dir, "b.md"), "utf-8")).toBe(beforeB);
+    expect(existsSync(join(dir, `a.md.rescope-${process.pid}.tmp`))).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  // covers: SC-37
+  test("a throw while restoring one pre-image does not abort restoring the rest, and the original phase-2 error still propagates", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "global" });
+    await writeFact(root, "c", { project: "global" });
+    const dir = join(root, "project");
+    const aPath = join(dir, "a.md");
+    const beforeB = readFileSync(join(dir, "b.md"), "utf-8");
+    const beforeC = readFileSync(join(dir, "c.md"), "utf-8");
+    await mkdir(join(dir, `c.md.rescope-${process.pid}.tmp`), { recursive: true });
+    const rows: RescopeRow[] = [
+      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "b", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+      { slug: "c", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
+    ];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+    const { writeFileSync: realWriteFileSync } = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(writeFileSync).mockImplementation((path, data, options) => {
+      if (path === aPath) throw new Error("simulated restore failure for a");
+      return realWriteFileSync(path as Parameters<typeof realWriteFileSync>[0], data as Parameters<typeof realWriteFileSync>[1], options as Parameters<typeof realWriteFileSync>[2]);
+    });
+
+    try {
+      await expect(applyRescope(store, root, plan)).rejects.toThrow(/EISDIR/i);
+
+      expect(readFileSync(join(dir, "b.md"), "utf-8")).toBe(beforeB); // restored despite a's restore throwing first
+      expect(readFileSync(join(dir, "c.md"), "utf-8")).toBe(beforeC); // c's forward write never landed
+      expect(readFileSync(aPath, "utf-8")).toContain("project: widget"); // a's own restore failed — stays rewritten
+      expect(calls).toEqual([]);
+    } finally {
+      vi.mocked(writeFileSync).mockImplementation(realWriteFileSync);
+    }
   });
 
   // covers: SC-39
@@ -519,7 +609,7 @@ describe("applyRescope — apply (w2-rescope)", () => {
   // covers: SC-40
   test("apply on a fact with no project: line inserts project: <to> right after the type: line", async () => {
     await mkdir(join(root, "project"), { recursive: true });
-    const content = ["---", "name: widget-noproject", "description: fact", "type: project", "tags: []", "created: 2026-06-10", "pinned: false", "---", "", "body mentions project: other in prose", ""].join("\n");
+    const content = ["---", "name: widget-noproject", "description: fact", "type: project", "tags: []", "created: 2026-06-10", "pinned: false", "---", "", "project: other", ""].join("\n");
     await writeFile(join(root, "project", "widget-noproject.md"), content);
     const rows: RescopeRow[] = [{ slug: "widget-noproject", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
     const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
@@ -529,6 +619,6 @@ describe("applyRescope — apply (w2-rescope)", () => {
 
     expect(res.applied).toBe(1);
     const after = readFileSync(join(root, "project", "widget-noproject.md"), "utf-8");
-    expect(after).toBe(["---", "name: widget-noproject", "description: fact", "type: project", "project: widget", "tags: []", "created: 2026-06-10", "pinned: false", "---", "", "body mentions project: other in prose", ""].join("\n"));
+    expect(after).toBe(["---", "name: widget-noproject", "description: fact", "type: project", "project: widget", "tags: []", "created: 2026-06-10", "pinned: false", "---", "", "project: other", ""].join("\n"));
   });
 });

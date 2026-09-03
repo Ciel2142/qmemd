@@ -8,7 +8,6 @@ import {
   assertSafeSlug,
   syncOutcome,
   reindexMemory,
-  MEMORY_TYPES,
   type MemoryType,
 } from "./engine.js";
 import { gitCommit, gitPush, type GitDeps } from "./git.js";
@@ -118,22 +117,24 @@ export function planRescope(root: string, opts: RescopeOptions = {}): RescopePla
   return { known, rows, unmatched, version: 1 };
 }
 
+const PROJECT_LINE_RE = /^(project\s*:\s*)(.*?)(\r?)$/i;
+const TYPE_LINE_RE = /^type\s*:/i;
+
 export function setProjectLine(content: string, value: string): string {
   const fences = locateFences(content);
   if (!fences) return content;
   const { open, close } = fences;
   const lines = content.split("\n");
-  const projectRe = /^project\s*:/i;
   for (let i = open + 1; i < close; i++) {
-    if (projectRe.test(lines[i]!)) {
-      lines[i] = `project: ${value}`;
+    const m = PROJECT_LINE_RE.exec(lines[i]!);
+    if (m) {
+      lines[i] = `${m[1]}${value}${m[3]}`;
       return lines.join("\n");
     }
   }
-  const typeRe = /^type\s*:/i;
   let insertAt = open + 1;
   for (let i = open + 1; i < close; i++) {
-    if (typeRe.test(lines[i]!)) { insertAt = i + 1; break; }
+    if (TYPE_LINE_RE.test(lines[i]!)) { insertAt = i + 1; break; }
   }
   lines.splice(insertAt, 0, `project: ${value}`);
   return lines.join("\n");
@@ -146,7 +147,7 @@ function isRescopeRow(v: unknown): v is RescopeRow {
   const r = v as Record<string, unknown>;
   return (
     typeof r.slug === "string" &&
-    typeof r.type === "string" && (MEMORY_TYPES as string[]).includes(r.type) &&
+    typeof r.type === "string" &&
     typeof r.from === "string" &&
     typeof r.to === "string" &&
     typeof r.reason === "string" && (RESCOPE_REASONS as string[]).includes(r.reason)
@@ -159,8 +160,7 @@ export function isRescopePlan(v: unknown): v is RescopePlan {
   return (
     Array.isArray(p.known) && p.known.every((k) => typeof k === "string") &&
     Array.isArray(p.rows) && p.rows.every(isRescopeRow) &&
-    typeof p.unmatched === "number" &&
-    p.version === 1
+    typeof p.unmatched === "number"
   );
 }
 
@@ -223,8 +223,12 @@ export async function applyRescope(
       written.push({ path: v.path, content: v.raw });
     }
   } catch (e) {
-    for (const w of written) writeFileSync(w.path, w.content);
-    if (currentTmp && existsSync(currentTmp)) unlinkSync(currentTmp);
+    for (const w of written) {
+      try { writeFileSync(w.path, w.content); } catch { /* best-effort restore; original error still rethrown below */ }
+    }
+    if (currentTmp) {
+      try { unlinkSync(currentTmp); } catch { /* best-effort cleanup; original error still rethrown below */ }
+    }
     throw e;
   }
 
