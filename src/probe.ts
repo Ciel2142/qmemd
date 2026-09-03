@@ -43,12 +43,15 @@ export function errorLine(error: string): string {
 }
 
 export function buildProbeQuery(command: string, error: string): string[] {
-  const raw = [...tokenizeForDedup(headTokens(command).join(" ")), ...tokenizeForDedup(errorLine(error))];
+  // Path-bearing words go BEFORE tokenization (R-14): the tokenizer splits on `/`, so a
+  // later per-token test can never recognize `src/api/user.ts` as one path.
+  const words = [...headTokens(command), ...errorLine(error).split(/\s+/)]
+    .filter(w => w !== "" && !w.includes("/"));
   const tokens: string[] = [];
-  for (const t of raw) {
-    // A hash, a line number or a path segment is unique to this one failure: it can only
-    // dilute a BM25 query over a corpus of durable facts.
-    if (t.includes("/") || HEX_BLOB_RE.test(t) || BARE_NUMBER_RE.test(t)) continue;
+  for (const t of tokenizeForDedup(words.join(" "))) {
+    // A hash or a line number is unique to this one failure: it can only dilute a BM25
+    // query over a corpus of durable facts.
+    if (HEX_BLOB_RE.test(t) || BARE_NUMBER_RE.test(t)) continue;
     if (tokens.includes(t)) continue;
     tokens.push(t);
     if (tokens.length === PROBE_MAX_TOKENS) break;
@@ -116,8 +119,11 @@ export async function runProbe(stdinText: string, deps: ProbeDeps): Promise<stri
   const timeoutMs = deps.timeoutMs ?? PROBE_TIMEOUT_MS;
   let store: QMDStore | null = null;
   let timedOut = false;
+  let searched = false;
+  let kept: RecallHit[] = [];
   try {
     store = await deps.openStore();
+    searched = true; // an invoked search counts as run however it ends (R-13)
     let timer: ReturnType<typeof setTimeout> | undefined;
     const search = recall(store, deps.memoryRoot, query, {
       lexOnly: true, skim: true, limit: PROBE_MAX_HITS + prev.surfacedSlugs.length, project: repo,
@@ -128,21 +134,10 @@ export async function runProbe(stdinText: string, deps: ProbeDeps): Promise<stri
     ]).finally(() => clearTimeout(timer));
 
     const surfaced = new Set(prev.surfacedSlugs);
-    const kept: RecallHit[] = (raced ?? []).filter(h => !surfaced.has(h.slug)).slice(0, PROBE_MAX_HITS);
-    const slugs = kept.map(h => h.slug);
-
-    let state: BeaconState = { ...prev, probedKeys: [...prev.probedKeys, key].slice(-SURFACED_CAP) };
-    if (slugs.length > 0) state = rememberSurfaced(state, slugs);
-    try { writeState(statePath, state); } catch { /* marker-IO failure: a repeat probe is cheaper than a throw */ }
-    appendEvent(eventLogPath(deps.cacheDir), {
-      v: 1, ts: (deps.now ?? (() => new Date()))().toISOString(), session: sessionId, repo,
-      kind: "probe", query, ...(slugs.length > 0 ? { slugs } : {}),
-    });
-
-    if (kept.length === 0) return null;
-    return formatProbe(repo, kept.map(h => ({ type: h.type as MemoryType, description: h.description, slug: h.slug })));
+    kept = (raced ?? []).filter(h => !surfaced.has(h.slug)).slice(0, PROBE_MAX_HITS);
   } catch {
-    return null;
+    // A rejected search must still throttle: without the key below, the same failing
+    // command re-opens the store on every repeat.
   } finally {
     if (store) {
       // On the timeout path the close waits on the abandoned query, so it is left to
@@ -153,4 +148,17 @@ export async function runProbe(stdinText: string, deps: ProbeDeps): Promise<stri
       } catch { /* a synchronous close failure loses nothing either */ }
     }
   }
+
+  if (!searched) return null;
+  const slugs = kept.map(h => h.slug);
+  let state: BeaconState = { ...prev, probedKeys: [...prev.probedKeys, key].slice(-SURFACED_CAP) };
+  if (slugs.length > 0) state = rememberSurfaced(state, slugs);
+  try { writeState(statePath, state); } catch { /* marker-IO failure: a repeat probe is cheaper than a throw */ }
+  appendEvent(eventLogPath(deps.cacheDir), {
+    v: 1, ts: (deps.now ?? (() => new Date()))().toISOString(), session: sessionId, repo,
+    kind: "probe", query, ...(slugs.length > 0 ? { slugs } : {}),
+  });
+
+  if (kept.length === 0) return null;
+  return formatProbe(repo, kept.map(h => ({ type: h.type as MemoryType, description: h.description, slug: h.slug })));
 }

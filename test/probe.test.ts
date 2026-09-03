@@ -69,9 +69,11 @@ describe("probe query building", () => {
   });
 
   // covers: SC-60
-  test("query filters drop hashes, bare numbers and paths, dedupes, and caps at eight tokens", () => {
+  test("query filters drop hashes, bare numbers and whole path words, dedupe, and cap at eight tokens", () => {
     const q = buildProbeQuery("npm ci", "Exit code 1\ndeadbeef abc1234 abc123 jdk21 42 /x/y/z npm");
-    expect(q).toEqual(["npm", "ci", "abc123", "jdk21", "x", "y", "z"]);
+    expect(q).toEqual(["npm", "ci", "abc123", "jdk21"]);
+    expect(buildProbeQuery("npm ci", "Exit code 1\ncannot read src/api/user.ts"))
+      .toEqual(["npm", "ci", "cannot", "read"]);
     const many = buildProbeQuery("mvn verify", `Exit code 1\n${Array.from({ length: 20 }, (_, i) => `word${String.fromCharCode(97 + i)}`).join(" ")}`);
     expect(many).toHaveLength(PROBE_MAX_TOKENS);
   });
@@ -172,6 +174,10 @@ describe("runProbe", () => {
     const failRecall = harness(root, cache, async () => { throw new Error("lex blew up"); });
     expect(await runProbe(evt(), failRecall.deps)).toBeNull();
     expect(failRecall.spy.closes).toBe(1);
+    // A rejected search still counts as run: the repeat is throttled, not retried (R-13).
+    expect(await runProbe(evt(), failRecall.deps)).toBeNull();
+    expect(failRecall.spy.opens).toBe(1);
+    expect(events(cache).filter(e => e.kind === "probe")).toHaveLength(1);
     const { deps, spy } = harness(root, cache, okRecall);
     expect(await runProbe("not json", deps)).toBeNull();
     expect(spy.opens).toBe(0);
