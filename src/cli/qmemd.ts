@@ -290,6 +290,10 @@ async function runRescope(argv: string[]): Promise<void> {
     console.error("a plan file positional is only valid with --apply. Usage: qmemd rescope --apply [plan.json|-]");
     process.exit(1);
   }
+  if (positionals.length > 1) {
+    console.error("qmemd rescope --apply takes at most one plan file positional.");
+    process.exit(1);
+  }
 
   const root = memoryRoot();
 
@@ -305,7 +309,11 @@ async function runRescope(argv: string[]): Promise<void> {
   } else {
     let planText: string;
     try { planText = source === "-" ? readFileSync(0, "utf-8") : readFileSync(source, "utf-8"); }
-    catch (e) { console.error(`cannot read plan '${source}': ${e instanceof Error ? e.message : String(e)}`); process.exit(1); }
+    catch (e) {
+      const code = e && typeof e === "object" && "code" in e ? String((e as { code?: unknown }).code) : "unknown";
+      console.error(`cannot read plan ${source} (${code})`);
+      process.exit(1);
+    }
     let parsed: unknown;
     try { parsed = JSON.parse(planText); }
     catch (e) { console.error(`invalid plan JSON: ${e instanceof Error ? e.message : String(e)}`); process.exit(1); }
@@ -321,11 +329,12 @@ async function runRescope(argv: string[]): Promise<void> {
     const res = await applyRescope(store, root, plan);
     if (values.json) {
       console.log(JSON.stringify(res, null, 2));
-    } else if (res.rejected.length > 0) {
+    } else if (res.rejected.length === 0) {
+      console.log(`${g}✓${r} rescoped ${res.applied} fact${res.applied === 1 ? "" : "s"}`);
+    }
+    if (res.rejected.length > 0) {
       for (const row of res.rejected) console.error(`rejected: ${row.slug} | ${row.from} | ${row.to}`);
       console.error("rejected: slug missing under its type, project on disk no longer matches the row's 'from', or an unsafe row");
-    } else {
-      console.log(`${g}✓${r} rescoped ${res.applied} fact${res.applied === 1 ? "" : "s"}`);
     }
     if (!res.indexed) console.error(`${y}warning:${r} fact saved but not yet indexed (recall may lag until next reindex)`);
     if (res.syncWarning) console.error(`${y}warning:${r} ${res.syncWarning}`);

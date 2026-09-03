@@ -1592,7 +1592,7 @@ describe("rescope (qp-vgl.3)", () => {
   });
 
   // covers: SC-44
-  test("--json on apply prints the full RescopeApplyResult even when rows are rejected", async () => {
+  test("--json on apply prints the full RescopeApplyResult AND the rejection diagnostics still land on stderr", async () => {
     await writeFact("alpha-one", "global");
     const planRes = runCli(["rescope", "--known", "alpha", "--json"], root);
     const plan = JSON.parse(planRes.stdout);
@@ -1602,6 +1602,28 @@ describe("rescope (qp-vgl.3)", () => {
     const parsed = JSON.parse(res.stdout);
     expect(parsed.applied).toBe(0);
     expect(parsed.rejected).toEqual([{ slug: "alpha-one", type: "project", from: "global", to: "alpha", reason: "slug-prefix" }]);
+    expect(res.stderr).toContain("rejected: alpha-one | global | alpha");
+    expect(res.stderr).toMatch(/slug missing|no longer|unsafe/);
+  });
+
+  // covers: SC-44
+  test("--apply with more than one plan positional is a usage error: exit 1, one stderr line, corpus untouched", async () => {
+    await writeFact("alpha-one", "global");
+    await writeFile(join(root, "first.json"), JSON.stringify({ known: [], rows: [], unmatched: 0, version: 1 }));
+    await writeFile(join(root, "second.json"), JSON.stringify({ known: [], rows: [], unmatched: 0, version: 1 }));
+    const res = runCli(["rescope", "--apply", "first.json", "second.json"], root, root);
+    expect(res.status).toBe(1);
+    expect(res.stderr.trim().split("\n")).toHaveLength(1);
+    expect(readFileSync(join(root, "project", "alpha-one.md"), "utf-8")).toMatch(/^project: global$/m);
+  });
+
+  // covers: SC-44
+  test("an unreadable absolute plan path is echoed as typed with only the error code, no other path fragment", () => {
+    const badPath = join(root, "does-not-exist", "plan.json");
+    const res = runCli(["rescope", "--apply", badPath], root);
+    expect(res.status).toBe(1);
+    const line = res.stderr.trim();
+    expect(line).toBe(`cannot read plan ${badPath} (ENOENT)`);
   });
 
   // covers: SC-43
