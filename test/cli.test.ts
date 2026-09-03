@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, chmod } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -1624,6 +1624,38 @@ describe("rescope (qp-vgl.3)", () => {
     expect(res.status).toBe(1);
     const line = res.stderr.trim();
     expect(line).toBe(`cannot read plan ${badPath} (ENOENT)`);
+  });
+
+  // covers: SC-44
+  test("an unusable QMEMD_DB fails apply with one sanitized line: exit 1, an errno code, no path", async () => {
+    await writeFact("alpha-one", "global");
+    await writeFile(join(root, "blocker"), "not a directory");
+    const res = spawnSync(TSX, [CLI, "rescope", "--known", "alpha", "--apply"], {
+      encoding: "utf-8",
+      env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, "blocker", "i.sqlite") }),
+    });
+    expect(res.status).toBe(1);
+    const lines = res.stderr.trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^rescope failed: [A-Z]+$/);
+    expect(res.stderr).not.toContain("/");
+  });
+
+  // covers: SC-44
+  test.skipIf(process.getuid?.() === 0)("an unwritable fact directory fails apply with one sanitized line and leaves the fact untouched", async () => {
+    await writeFact("alpha-one", "global");
+    const dir = join(root, "project");
+    await chmod(dir, 0o555);
+    try {
+      const res = runCli(["rescope", "--known", "alpha", "--apply"], root);
+      expect(res.status).toBe(1);
+      const lines = res.stderr.trim().split("\n");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toBe("rescope failed: EACCES");
+      expect(readFileSync(join(dir, "alpha-one.md"), "utf-8")).toMatch(/^project: global$/m);
+    } finally {
+      await chmod(dir, 0o755);
+    }
   });
 
   // covers: SC-43

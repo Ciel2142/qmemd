@@ -2,7 +2,7 @@
 import { parseArgs } from "node:util";
 import { basename, join as pathJoin, dirname } from "node:path";
 import { openMemoryStore, MEMORY_COLLECTION } from "../store.js";
-import { remember, recallQueryWithStatus, recallSession, forget, getFact, listFacts, staleFacts, markReviewed, projectOverview, formatTagHistogram, countUnreadableFacts, pendingVectorPhrase, completenessFooter, MEMORY_TYPES, PLATFORMS, DEFAULT_MIN_SCORE, applyMerge } from "../engine.js";
+import { remember, recallQueryWithStatus, recallSession, forget, getFact, listFacts, staleFacts, markReviewed, projectOverview, formatTagHistogram, countUnreadableFacts, pendingVectorPhrase, completenessFooter, MEMORY_TYPES, PLATFORMS, DEFAULT_MIN_SCORE, applyMerge, ClientError } from "../engine.js";
 import type { MemoryType, Platform, RecallResult, RecallHit, MergePlan, StaleReport } from "../engine.js";
 import { tryDaemonRecall, daemonPort } from "../client.js";
 import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capability.js";
@@ -245,10 +245,31 @@ function printRescopePlan(plan: RescopePlan, json: boolean): void {
   console.log(`${plan.unmatched} unmatched`);
 }
 
+/** rescope handles its own failures rather than falling through to the top-level catch,
+ *  which prints the whole Error — stacks and store/db paths included. A ClientError is the
+ *  operator-facing message; anything else is reduced to its errno code. */
+async function runRescope(argv: string[]): Promise<void> {
+  try {
+    await rescopeVerb(argv);
+  } catch (e) {
+    if (e instanceof ClientError) console.error(e.message);
+    else console.error(`rescope failed: ${errCode(e, "unexpected error")}`);
+    process.exit(1);
+  }
+}
+
+function errCode(e: unknown, fallback: string): string {
+  if (e && typeof e === "object" && "code" in e) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && code !== "") return code;
+  }
+  return fallback;
+}
+
 /** rescope owns a dedicated parseArgs table, dispatched from main() before the shared
  *  one runs: the shared table's `apply` is string-typed for `dedup --apply <plan>`, and
  *  a bare `--apply` throws on a string option before dispatch (D-w2-1). */
-async function runRescope(argv: string[]): Promise<void> {
+async function rescopeVerb(argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,

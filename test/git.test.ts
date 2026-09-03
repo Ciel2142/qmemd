@@ -173,6 +173,32 @@ describe("git helpers (unit, fake runner)", () => {
     expect(calls).toContainEqual(["commit", "-m", "remember: b (supersedes a)", "--", "project/b.md", "project/a.md"]);
   });
 
+  // covers: SC-39
+  test("allPaths: a single failed add fails the whole commit before any commit runs", () => {
+    const calls: string[][] = [];
+    const run: GitRun = (args) => {
+      calls.push(args);
+      if (args[0] === "add") return args[args.length - 1] === "project/b.md" ? 1 : 0;
+      return args[0] === "diff" ? 1 : 0;
+    };
+    const res = gitCommit("/repo", "rescope: 2 facts", ["project/a.md", "project/b.md"], { run }, { allPaths: true });
+    expect(res).toEqual({ ok: false, committed: false, reason: "add-failed" });
+    expect(calls.some(c => c[0] === "commit")).toBe(false);
+  });
+
+  // covers: SC-39
+  test("without allPaths a failed add still commits the paths git accepted", () => {
+    const calls: string[][] = [];
+    const run: GitRun = (args) => {
+      calls.push(args);
+      if (args[0] === "add") return args[args.length - 1] === "project/b.md" ? 1 : 0;
+      return args[0] === "diff" ? 1 : 0;
+    };
+    const res = gitCommit("/repo", "remember: a", ["project/a.md", "project/b.md"], { run });
+    expect(res).toEqual({ ok: true, committed: true });
+    expect(calls).toContainEqual(["commit", "-m", "remember: a", "--", "project/a.md"]);
+  });
+
   test("still accepts a single-string pathspec", () => {
     const calls: string[][] = [];
     const run: GitRun = (args) => { calls.push(args); return args[0] === "diff" ? 1 : 0; };

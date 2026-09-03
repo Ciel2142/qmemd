@@ -3,13 +3,13 @@ import { planRescope, applyRescope, setProjectLine, isRescopePlan, type RescopeP
 import { serializeMemory, type MemoryFrontmatter, type MemoryType } from "../src/engine.js";
 import type { QMDStore } from "@tobilu/qmd";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync), renameSync: vi.fn(actual.renameSync) };
 });
 
 interface FactOpts {
@@ -235,6 +235,13 @@ describe("setProjectLine — surgical project: rewrite (w2-rescope)", () => {
   test("content with no byte-0 fence is returned unchanged", () => {
     const content = "no frontmatter here\nproject: other\n";
     expect(setProjectLine(content, "widget")).toBe(content);
+  });
+
+  // covers: SC-40
+  test("inserting an absent project: into a CRLF file uses CRLF for the inserted line too", () => {
+    const content = ["---", "name: x", "description: d", "type: project", "tags: []", "---", "", "body", ""].join("\r\n");
+    const out = setProjectLine(content, "widget");
+    expect(out).toBe(["---", "name: x", "description: d", "type: project", "project: widget", "tags: []", "---", "", "body", ""].join("\r\n"));
   });
 });
 
@@ -478,35 +485,111 @@ describe("applyRescope — apply (w2-rescope)", () => {
     expect(calls).toEqual([]);
   });
 
-  // covers: SC-37
-  test("a throw while restoring one pre-image does not abort restoring the rest, and the original phase-2 error still propagates", async () => {
+  // covers: SC-37, INV-3
+  test("a rename failure mid-apply restores every already-renamed file byte-for-byte and leaves no temp behind", async () => {
     await writeFact(root, "a", { project: "global" });
     await writeFact(root, "b", { project: "global" });
     await writeFact(root, "c", { project: "global" });
     const dir = join(root, "project");
-    const aPath = join(dir, "a.md");
-    const beforeB = readFileSync(join(dir, "b.md"), "utf-8");
-    const beforeC = readFileSync(join(dir, "c.md"), "utf-8");
-    await mkdir(join(dir, `c.md.rescope-${process.pid}.tmp`), { recursive: true });
-    const rows: RescopeRow[] = [
-      { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
-      { slug: "b", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
-      { slug: "c", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
-    ];
+    const before: Record<string, string> = {
+      a: readFileSync(join(dir, "a.md"), "utf-8"),
+      b: readFileSync(join(dir, "b.md"), "utf-8"),
+      c: readFileSync(join(dir, "c.md"), "utf-8"),
+    };
+    const rows: RescopeRow[] = ["a", "b", "c"].map((slug) => ({ slug, type: "project", from: "global", to: "widget", reason: "slug-prefix" }));
     const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
     const { store, calls } = fakeStore();
-    const { writeFileSync: realWriteFileSync } = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const { run, calls: gitCalls } = fakeGit();
+    const { renameSync: realRenameSync } = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(renameSync).mockImplementation((oldPath, newPath) => {
+      if (String(newPath).endsWith("c.md")) throw new Error("simulated rename failure");
+      return realRenameSync(oldPath as Parameters<typeof realRenameSync>[0], newPath as Parameters<typeof realRenameSync>[1]);
+    });
+
+    try {
+      await expect(applyRescope(store, root, plan, { run })).rejects.toThrow(/simulated rename failure/);
+
+      for (const slug of ["a", "b", "c"]) {
+        expect(readFileSync(join(dir, `${slug}.md`), "utf-8")).toBe(before[slug]);
+      }
+      expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+      expect(gitCalls.filter((a) => a[0] === "commit")).toHaveLength(0);
+      expect(calls).toEqual([]);
+    } finally {
+      vi.mocked(renameSync).mockImplementation(realRenameSync);
+    }
+  });
+
+  // covers: SC-37
+  test("a restore that itself fails names the still-rescoped fact as <type>/<slug>, carries the original error as cause, and restores the rest", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "global" });
+    await writeFact(root, "c", { project: "global" });
+    const dir = join(root, "project");
+    const beforeB = readFileSync(join(dir, "b.md"), "utf-8");
+    const beforeC = readFileSync(join(dir, "c.md"), "utf-8");
+    const aRestoreTmp = join(dir, `a.md.rescope-restore-${process.pid}.tmp`);
+    const rows: RescopeRow[] = ["a", "b", "c"].map((slug) => ({ slug, type: "project", from: "global", to: "widget", reason: "slug-prefix" }));
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+    const { run, calls: gitCalls } = fakeGit();
+    const { writeFileSync: realWriteFileSync, renameSync: realRenameSync } = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(renameSync).mockImplementation((oldPath, newPath) => {
+      if (String(newPath).endsWith("c.md")) throw new Error("simulated rename failure");
+      return realRenameSync(oldPath as Parameters<typeof realRenameSync>[0], newPath as Parameters<typeof realRenameSync>[1]);
+    });
     vi.mocked(writeFileSync).mockImplementation((path, data, options) => {
-      if (path === aPath) throw new Error("simulated restore failure for a");
+      if (path === aRestoreTmp) throw new Error("simulated restore write failure");
       return realWriteFileSync(path as Parameters<typeof realWriteFileSync>[0], data as Parameters<typeof realWriteFileSync>[1], options as Parameters<typeof realWriteFileSync>[2]);
     });
 
     try {
-      await expect(applyRescope(store, root, plan)).rejects.toThrow(/EISDIR/i);
+      const err: unknown = await applyRescope(store, root, plan, { run }).then(() => null, (e: unknown) => e);
 
-      expect(readFileSync(join(dir, "b.md"), "utf-8")).toBe(beforeB); // restored despite a's restore throwing first
-      expect(readFileSync(join(dir, "c.md"), "utf-8")).toBe(beforeC); // c's forward write never landed
-      expect(readFileSync(aPath, "utf-8")).toContain("project: widget"); // a's own restore failed — stays rewritten
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe("rescope rollback incomplete; still rescoped on disk: project/a");
+      expect((err as Error).message).not.toContain(root);
+      expect(((err as Error).cause as Error).message).toMatch(/simulated rename failure/);
+      expect(readFileSync(join(dir, "a.md"), "utf-8")).toContain("project: widget");
+      expect(readFileSync(join(dir, "b.md"), "utf-8")).toBe(beforeB);
+      expect(readFileSync(join(dir, "c.md"), "utf-8")).toBe(beforeC);
+      expect(gitCalls.filter((a) => a[0] === "commit")).toHaveLength(0);
+      expect(calls).toEqual([]);
+    } finally {
+      vi.mocked(renameSync).mockImplementation(realRenameSync);
+      vi.mocked(writeFileSync).mockImplementation(realWriteFileSync);
+    }
+  });
+
+  // covers: SC-37, INV-3
+  test("a target rewritten by a concurrent writer between plan and apply aborts before any rename: no file rescoped, no temp, no commit, no reindex", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "global" });
+    const dir = join(root, "project");
+    const aPath = join(dir, "a.md");
+    const bPath = join(dir, "b.md");
+    const beforeA = readFileSync(aPath, "utf-8");
+    const rows: RescopeRow[] = ["a", "b"].map((slug) => ({ slug, type: "project", from: "global", to: "widget", reason: "slug-prefix" }));
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+    const { run, calls: gitCalls } = fakeGit();
+    const { writeFileSync: realWriteFileSync } = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(writeFileSync).mockImplementation((path, data, options) => {
+      const out = realWriteFileSync(path as Parameters<typeof realWriteFileSync>[0], data as Parameters<typeof realWriteFileSync>[1], options as Parameters<typeof realWriteFileSync>[2]);
+      // A concurrent remember lands on b while rescope is still staging its temp files.
+      if (String(path).startsWith(aPath)) realWriteFileSync(bPath, `${readFileSync(bPath, "utf-8")}\nconcurrent edit\n`);
+      return out;
+    });
+
+    try {
+      await expect(applyRescope(store, root, plan, { run })).rejects.toThrow(/fact project\/b changed during apply; re-run rescope/);
+
+      expect(readFileSync(aPath, "utf-8")).toBe(beforeA);
+      const afterB = readFileSync(bPath, "utf-8");
+      expect(afterB).toContain("concurrent edit");
+      expect(afterB).toMatch(/^project: global$/m);
+      expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+      expect(gitCalls.filter((a) => a[0] === "commit")).toHaveLength(0);
       expect(calls).toEqual([]);
     } finally {
       vi.mocked(writeFileSync).mockImplementation(realWriteFileSync);
@@ -641,5 +724,62 @@ describe("applyRescope — apply (w2-rescope)", () => {
     expect(res.applied).toBe(1);
     const after = readFileSync(join(root, "project", "widget-noproject.md"), "utf-8");
     expect(after).toBe(["---", "name: widget-noproject", "description: fact", "type: project", "project: widget", "tags: []", "created: 2026-06-10", "pinned: false", "---", "", "project: other", ""].join("\n"));
+  });
+  // covers: SC-39
+  test("a failed git add of one path fails the whole commit: no commit runs, synced:false, files stay rewritten and still reindex", async () => {
+    await writeFact(root, "a", { project: "global" });
+    await writeFact(root, "b", { project: "global" });
+    await writeFact(root, "c", { project: "global" });
+    const rows: RescopeRow[] = ["a", "b", "c"].map((slug) => ({ slug, type: "project", from: "global", to: "widget", reason: "slug-prefix" }));
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const { store, calls } = fakeStore();
+    const gitCalls: string[][] = [];
+    const run = (args: string[]): number => {
+      gitCalls.push(args);
+      if (args[0] === "add") return args[args.length - 1] === "project/b.md" ? 1 : 0;
+      if (args[0] === "diff") return 1;
+      return 0;
+    };
+
+    const res = await applyRescope(store, root, plan, { run });
+
+    expect(res.applied).toBe(3);
+    expect(gitCalls.filter((a) => a[0] === "commit")).toHaveLength(0);
+    expect(res.synced).toBe(false);
+    expect(res.syncWarning).toMatch(/add-failed/);
+    for (const slug of ["a", "b", "c"]) {
+      expect(readFileSync(join(root, "project", `${slug}.md`), "utf-8")).toMatch(/^project: widget$/m);
+    }
+    expect(calls).toHaveLength(1);
+    expect(res.indexed).toBe(true);
+  });
+
+  // covers: SC-41
+  test("a reindex failure logs only the error code and the recovery command, never the raw message", async () => {
+    await writeFact(root, "a", { project: "global" });
+    const rows: RescopeRow[] = [{ slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
+    const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
+    const dbPath = join(root, ".idx", "i.sqlite");
+    const store = {
+      async searchLex() { return []; },
+      async update() {
+        const e = Object.assign(new Error(`database is locked: ${dbPath}`), { code: "SQLITE_BUSY" });
+        throw e;
+      },
+    } as unknown as QMDStore;
+    const { run } = fakeGit();
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(" ")); });
+
+    try {
+      const res = await applyRescope(store, root, plan, { run });
+
+      expect(res.indexed).toBe(false);
+      expect(logged).toContain("[qmemd] rescope: reindex failed (SQLITE_BUSY); run qmemd reindex");
+      expect(logged.join("\n")).not.toContain("database is locked");
+      expect(logged.join("\n")).not.toContain(dbPath);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

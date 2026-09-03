@@ -8,6 +8,7 @@ import {
   assertSafeSlug,
   syncOutcome,
   reindexMemory,
+  ClientError,
   type MemoryType,
 } from "./engine.js";
 import { gitCommit, gitPush, type GitDeps } from "./git.js";
@@ -136,7 +137,10 @@ export function setProjectLine(content: string, value: string): string {
   for (let i = open + 1; i < close; i++) {
     if (TYPE_LINE_RE.test(lines[i]!)) { insertAt = i + 1; break; }
   }
-  lines.splice(insertAt, 0, `project: ${value}`);
+  // Inherit the neighbour's terminator: an LF-only insert into a CRLF file leaves mixed
+  // line endings that no reader round-trips cleanly.
+  const eol = lines[insertAt - 1]!.endsWith("\r") ? "\r" : "";
+  lines.splice(insertAt, 0, `project: ${value}${eol}`);
   return lines.join("\n");
 }
 
@@ -170,6 +174,53 @@ export interface RescopeApplyResult {
   synced: boolean;
   syncWarning?: string;
   indexed: boolean;
+}
+
+interface StagedWrite {
+  row: RescopeRow;
+  path: string;
+  raw: string;
+  tmp: string;
+}
+
+function errorCode(e: unknown, fallback = "error"): string {
+  if (e && typeof e === "object" && "code" in e) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && code !== "") return code;
+  }
+  return fallback;
+}
+
+function removeTemps(entries: readonly StagedWrite[]): void {
+  for (const e of entries) {
+    try { unlinkSync(e.tmp); } catch { /* best-effort: a temp that was never created is fine */ }
+  }
+}
+
+/**
+ * Put every already-renamed file back, temp-then-rename so a failing restore can never
+ * truncate a fact in place. Every file is attempted even after one fails. Returns the error
+ * to throw: the original phase-2 failure when the corpus is whole again, otherwise one that
+ * names the facts left rescoped on disk (never absolute paths) and carries the original as
+ * `cause` — silently reporting only the original would hide a broken all-or-nothing apply.
+ */
+function restorePreImages(renamed: readonly StagedWrite[], cause: unknown): unknown {
+  const unrestored: string[] = [];
+  for (const w of renamed) {
+    const restoreTmp = `${w.path}.rescope-restore-${process.pid}.tmp`;
+    try {
+      writeFileSync(restoreTmp, w.raw);
+      renameSync(restoreTmp, w.path);
+    } catch {
+      unrestored.push(`${w.row.type}/${w.row.slug}`);
+    }
+    try { unlinkSync(restoreTmp); } catch { /* consumed by the rename, or never written */ }
+  }
+  if (unrestored.length === 0) return cause;
+  return new Error(
+    `rescope rollback incomplete; still rescoped on disk: ${unrestored.join(", ")}`,
+    { cause },
+  );
 }
 
 export async function applyRescope(
@@ -210,30 +261,49 @@ export async function applyRescope(
     return { applied: 0, rejected, synced: true, indexed: true };
   }
 
-  const written: { path: string; content: string }[] = [];
-  let currentTmp: string | undefined;
-  try {
-    for (const v of valid) {
-      const rewritten = setProjectLine(v.raw, yamlScalar(v.row.to));
-      const tmpPath = `${v.path}.rescope-${process.pid}.tmp`;
-      currentTmp = tmpPath;
-      writeFileSync(tmpPath, rewritten);
-      renameSync(tmpPath, v.path);
-      currentTmp = undefined;
-      written.push({ path: v.path, content: v.raw });
+  const staged: StagedWrite[] = valid.map((v) => ({
+    row: v.row,
+    path: v.path,
+    raw: v.raw,
+    tmp: `${v.path}.rescope-${process.pid}.tmp`,
+  }));
+
+  for (let i = 0; i < staged.length; i++) {
+    const s = staged[i]!;
+    try {
+      writeFileSync(s.tmp, setProjectLine(s.raw, yamlScalar(s.row.to)));
+    } catch (e) {
+      removeTemps(staged.slice(0, i + 1));
+      throw e;
     }
-  } catch (e) {
-    for (const w of written) {
-      try { writeFileSync(w.path, w.content); } catch { /* best-effort restore; original error still rethrown below */ }
+  }
+
+  // Nothing is renamed yet, so a target that drifted since phase 1 can still be abandoned
+  // for free. Without this a concurrent remember/daemon write would be silently overwritten
+  // from the stale pre-image and swept into the rescope commit.
+  for (const s of staged) {
+    let current: string | undefined;
+    try { current = readFileSync(s.path, "utf-8"); } catch { current = undefined; }
+    if (current !== s.raw) {
+      removeTemps(staged);
+      throw new ClientError(`fact ${s.row.type}/${s.row.slug} changed during apply; re-run rescope`);
     }
-    if (currentTmp) {
-      try { unlinkSync(currentTmp); } catch { /* best-effort cleanup; original error still rethrown below */ }
+  }
+
+  const renamed: StagedWrite[] = [];
+  for (let i = 0; i < staged.length; i++) {
+    const s = staged[i]!;
+    try {
+      renameSync(s.tmp, s.path);
+    } catch (e) {
+      removeTemps(staged.slice(i));
+      throw restorePreImages(renamed, e);
     }
-    throw e;
+    renamed.push(s);
   }
 
   const commitPaths = valid.map((v) => `${v.row.type}/${v.row.slug}.md`);
-  const commit = gitCommit(root, `rescope: ${valid.length} fact${valid.length === 1 ? "" : "s"}`, commitPaths, git);
+  const commit = gitCommit(root, `rescope: ${valid.length} fact${valid.length === 1 ? "" : "s"}`, commitPaths, git, { allPaths: true });
   const push = gitPush(root, git);
   const { synced, syncWarning } = syncOutcome(commit, push);
   if (syncWarning) console.error(`[qmemd] rescope: ${syncWarning}`);
@@ -243,7 +313,7 @@ export async function applyRescope(
     await reindexMemory(store);
   } catch (e) {
     indexed = false;
-    console.error(`[qmemd] rescope: reindex failed (rescope committed): ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`[qmemd] rescope: reindex failed (${errorCode(e)}); run qmemd reindex`);
   }
 
   return { applied: valid.length, rejected: [], synced, syncWarning, indexed };

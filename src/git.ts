@@ -92,6 +92,13 @@ export interface GitPushResult {
   reason?: string;
 }
 
+export interface GitCommitOptions {
+  /** Fail the whole commit when ANY `git add` exits nonzero, instead of committing the
+   *  paths git accepted. For callers whose commit must be all-or-nothing (rescope): a
+   *  partial commit there would push a partial migration while reporting synced:true. */
+  allPaths?: boolean;
+}
+
 /**
  * Stage + commit one fact's file(s), scoped to its pathspec(s). Best-effort: never throws.
  * Returns a structured result so callers can tell a real failure (commit exited nonzero)
@@ -109,7 +116,13 @@ export interface GitPushResult {
  * Accepts multiple pathspecs for the supersede double-write (qmemd-bri) — both fact files
  * land in ONE commit.
  */
-export function gitCommit(root: string, message: string, pathspec: string | string[], deps: GitDeps = {}): GitCommitResult {
+export function gitCommit(
+  root: string,
+  message: string,
+  pathspec: string | string[],
+  deps: GitDeps = {},
+  opts: GitCommitOptions = {},
+): GitCommitResult {
   const run = deps.run ?? defaultRun;
   const paths = Array.isArray(pathspec) ? pathspec : [pathspec];
   try {
@@ -120,8 +133,13 @@ export function gitCommit(root: string, message: string, pathspec: string | stri
     // whose deleted old path is unmatched whenever that fact was never committed (adopted
     // out-of-band, or written while git was failing). Per-path keeps the `-- <pathspec>`
     // scoping: never a bare `add -A` over the whole tree. (An `add` that fails for a DIFFERENT
-    // reason — index.lock contention — is still swallowed here; that is qp-git-add-exit-ignored-v9v.)
-    const staged = paths.filter(p => run(["add", "-A", "--", p], root) === 0);
+    // reason — index.lock contention — is still swallowed here unless the caller passed
+    // allPaths; that is qp-git-add-exit-ignored-v9v.)
+    const staged: string[] = [];
+    for (const p of paths) {
+      if (run(["add", "-A", "--", p], root) === 0) { staged.push(p); continue; }
+      if (opts.allPaths) return { ok: false, committed: false, reason: "add-failed" };
+    }
     if (staged.length === 0) return { ok: true, committed: false, reason: "nothing-to-commit" };
     // Separate a real commit failure (e.g. exit 128, unconfigured identity) from the
     // benign "nothing to commit" no-op (e.g. --replace with byte-identical content): a
