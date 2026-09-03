@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, openSyn
 import { serviceArtifacts, captureDaemonEnv, writeArtifacts, removeArtifacts } from "../service.js";
 import { auditMemory, fixMemory, type FactReport } from "../doctor.js";
 import { dedupReport, mergeProposal, buildMergeCommands, DEDUP_REPORT_DICE, type DedupReport, type MergeProposal } from "../dedup.js";
+import { planRescope, applyRescope, isRescopePlan, type RescopePlan } from "../rescope.js";
 
 const g = "\x1b[32m", y = "\x1b[33m", d = "\x1b[2m", r = "\x1b[0m", cy = "\x1b[36m";
 
@@ -193,7 +194,7 @@ function printStale(report: StaleReport): void {
 
 /** The usage block, shared by bare `qmemd`, `qmemd help`, and `qmemd --help`/`-h`. */
 function printUsage(): void {
-  console.log("qmemd <remember|recall|forget|reviewed|show|list|stale|status|embed|reindex|doctor|dedup|mcp>");
+  console.log("qmemd <remember|recall|forget|reviewed|show|list|stale|status|embed|reindex|doctor|dedup|rescope|mcp>");
   console.log("  qmemd remember <fact> [--type user|feedback|project|reference] [--tags a,b] [--platforms linux,macos] [--pin] [--as slug] [--replace slug] [--supersedes slug] [--source S] [--ttl 90d|--review-by YYYY-MM-DD] [--force]");
   console.log("    --supersedes <slug>: write this fact AND retire <slug> (hidden from recall, linked in frontmatter, one commit)");
   console.log("    --ttl <N>d|w|m|y / --review-by <date>: schedule a re-verify date for a fact that ages — `qmemd stale` surfaces it once due");
@@ -210,6 +211,7 @@ function printUsage(): void {
   console.log("  qmemd reindex                          - rebuild the lex index from the memory dir (no model)");
   console.log("  qmemd doctor [--fix] [--json]          - audit frontmatter integrity; --fix repairs mechanical issues (writes .bak, no model)");
   console.log("  qmemd dedup [--min-dice N] [--project p] [--merge] [--apply <plan.json|->] [--force] [--json] - within-project near-dup report / merge proposal / atomic apply");
+  console.log("  qmemd rescope [--known a,b] [--alias old=new]... [--json] [--apply [plan.json|-]] - migrate global project/reference facts to their inferred project (no model; run `qmemd rescope --help` for details)");
   console.log("  qmemd mcp                              - stdio MCP server (default)");
   console.log("  qmemd mcp --http [--port N] [--daemon] - HTTP MCP + REST server (default 8182; --daemon is dev-only)");
   console.log("  qmemd mcp install-service [--port N] [--print] - generate a systemd/launchd service (recommended for a durable daemon)");
@@ -219,9 +221,126 @@ function printUsage(): void {
   console.log("  qmemd embed [--force] | status | reindex");
 }
 
-async function main() {
+function printRescopeUsage(): void {
+  console.log("qmemd rescope [--known a,b] [--alias old=new]... [--json] [--apply [plan.json|-]]");
+  console.log("  dry run (default): print the migration plan for global project/reference facts — filesystem-only, no writes");
+  console.log("  --known a,b            extra project names to match, comma-separated (in addition to every non-global project already in the corpus)");
+  console.log("  --alias old=new        repeatable; route a fact whose project is 'old' to 'new' instead, and add 'new' to the known set");
+  console.log("  --json                 print the plan (or, with --apply, the RescopeApplyResult) as JSON instead of text");
+  console.log("  --apply [plan.json|-]  apply the plan: freshly computed with no argument, or read from a file or stdin ('-')");
+  console.log("  revert an apply: git revert <commit> in $QMD_MEMORY_DIR, then qmemd reindex");
+}
+
+function isGlobalToken(v: string): boolean {
+  return v.trim().toLowerCase() === "global";
+}
+
+function printRescopePlan(plan: RescopePlan, json: boolean): void {
+  if (json) { console.log(JSON.stringify(plan, null, 2)); return; }
+  for (const row of plan.rows) console.log(`${row.slug} | ${row.from} | ${row.to} | ${row.reason}`);
+  const counts = new Map<string, number>();
+  for (const row of plan.rows) counts.set(row.to, (counts.get(row.to) ?? 0) + 1);
+  const targets = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  for (const [to, n] of targets) console.log(`${to}: ${n}`);
+  console.log(`${plan.unmatched} unmatched`);
+}
+
+/** rescope owns a dedicated parseArgs table, dispatched from main() before the shared
+ *  one runs: the shared table's `apply` is string-typed for `dedup --apply <plan>`, and
+ *  a bare `--apply` throws on a string option before dispatch (D-w2-1). */
+async function runRescope(argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
+    args: argv,
+    allowPositionals: true,
+    options: {
+      apply: { type: "boolean" },
+      alias: { type: "string", multiple: true },
+      known: { type: "string" },
+      json: { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+  if (values.help) { printRescopeUsage(); return; }
+
+  const known = values.known !== undefined
+    ? values.known.split(",").map(s => s.trim()).filter(Boolean)
+    : undefined;
+  if (known?.some(isGlobalToken)) {
+    console.error(`invalid --known '${values.known}': 'global' is not a project name.`);
+    process.exit(1);
+  }
+
+  const aliases: Record<string, string> = {};
+  for (const entry of values.alias ?? []) {
+    const eq = entry.indexOf("=");
+    const from = eq >= 0 ? entry.slice(0, eq).trim() : "";
+    const to = eq >= 0 ? entry.slice(eq + 1).trim() : "";
+    if (eq < 0 || !from || !to) {
+      console.error(`invalid --alias '${entry}' (expected old=new).`);
+      process.exit(1);
+    }
+    if (isGlobalToken(from) || isGlobalToken(to)) {
+      console.error(`invalid --alias '${entry}': 'global' is not a valid alias endpoint.`);
+      process.exit(1);
+    }
+    aliases[from] = to;
+  }
+
+  if (positionals.length > 0 && !values.apply) {
+    console.error("a plan file positional is only valid with --apply. Usage: qmemd rescope --apply [plan.json|-]");
+    process.exit(1);
+  }
+
+  const root = memoryRoot();
+
+  if (!values.apply) {
+    printRescopePlan(planRescope(root, { known, aliases }), !!values.json);
+    return;
+  }
+
+  let plan: RescopePlan;
+  const source = positionals[0];
+  if (source === undefined) {
+    plan = planRescope(root, { known, aliases });
+  } else {
+    let planText: string;
+    try { planText = source === "-" ? readFileSync(0, "utf-8") : readFileSync(source, "utf-8"); }
+    catch (e) { console.error(`cannot read plan '${source}': ${e instanceof Error ? e.message : String(e)}`); process.exit(1); }
+    let parsed: unknown;
+    try { parsed = JSON.parse(planText); }
+    catch (e) { console.error(`invalid plan JSON: ${e instanceof Error ? e.message : String(e)}`); process.exit(1); }
+    if (!isRescopePlan(parsed)) {
+      console.error("invalid plan: expected { known, rows, unmatched, version } (from 'qmemd rescope --json')");
+      process.exit(1);
+    }
+    plan = parsed;
+  }
+
+  const store = await openMemoryStore();
+  try {
+    const res = await applyRescope(store, root, plan);
+    if (values.json) {
+      console.log(JSON.stringify(res, null, 2));
+    } else if (res.rejected.length > 0) {
+      for (const row of res.rejected) console.error(`rejected: ${row.slug} | ${row.from} | ${row.to}`);
+      console.error("rejected: slug missing under its type, project on disk no longer matches the row's 'from', or an unsafe row");
+    } else {
+      console.log(`${g}✓${r} rescoped ${res.applied} fact${res.applied === 1 ? "" : "s"}`);
+    }
+    if (!res.indexed) console.error(`${y}warning:${r} fact saved but not yet indexed (recall may lag until next reindex)`);
+    if (res.syncWarning) console.error(`${y}warning:${r} ${res.syncWarning}`);
+    if (res.rejected.length > 0) process.exitCode = 1;
+  } finally { await store.close(); }
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (argv[0] === "rescope") {
+    await runRescope(argv.slice(1));
+    return;
+  }
+  const { values, positionals } = parseArgs({
+    args: argv,
     allowPositionals: true,
     options: {
       type: { type: "string" }, tags: { type: "string" }, project: { type: "string" },

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { serializeMemory, type MemoryFrontmatter } from "../src/engine.js";
+import { serializeMemory, type MemoryFrontmatter, type MemoryType } from "../src/engine.js";
 import { cleanEnv } from "./support/env.js";
 
 // End-to-end CLI guard for qmemd-jzz: an unvalidated --type was cast straight to
@@ -16,10 +16,11 @@ import { cleanEnv } from "./support/env.js";
 const CLI = resolve(__dirname, "..", "src", "cli", "qmemd.ts");
 const TSX = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
 
-function runCli(args: string[], root: string, cwd?: string) {
+function runCli(args: string[], root: string, cwd?: string, input?: string) {
   return spawnSync(TSX, [CLI, ...args], {
     encoding: "utf-8",
     cwd,
+    input,
     env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite") }),
   });
 }
@@ -1419,6 +1420,204 @@ describe("dedup --apply (qmemd-3fb)", () => {
     const out = applyStdin(JSON.stringify({ cluster: {}, foldedBody: "x" }));
     expect(out.status).not.toBe(0);
     expect(out.stderr).toMatch(/invalid plan/);
+  });
+});
+
+describe("rescope (qp-vgl.3)", () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-cli-rescope-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  async function writeFact(slug: string, project: string, opts: { type?: MemoryType; tags?: string[] } = {}): Promise<void> {
+    const type = opts.type ?? "project";
+    await mkdir(join(root, type), { recursive: true });
+    const fm: MemoryFrontmatter = { name: slug, description: `fact ${slug}`, type, tags: opts.tags ?? [], project, created: "2026-06-10", pinned: false };
+    await writeFile(join(root, type, `${slug}.md`), serializeMemory(fm, `body for ${slug}`));
+  }
+
+  // covers: SC-43
+  test("dry run prints rows, per-target counts sorted by count desc then name, and the unmatched count", async () => {
+    await writeFact("alpha-one", "global");
+    await writeFact("alpha-two", "global");
+    await writeFact("beta-one", "global");
+    await writeFact("unrelated", "global");
+    const res = runCli(["rescope", "--known", "alpha,beta"], root);
+    expect(res.status).toBe(0);
+    const lines = res.stdout.trim().split("\n");
+    expect(lines).toContain("alpha-one | global | alpha | slug-prefix");
+    expect(lines).toContain("alpha-two | global | alpha | slug-prefix");
+    expect(lines).toContain("beta-one | global | beta | slug-prefix");
+    const alphaIdx = lines.indexOf("alpha: 2");
+    const betaIdx = lines.indexOf("beta: 1");
+    expect(alphaIdx).toBeGreaterThanOrEqual(0);
+    expect(betaIdx).toBeGreaterThan(alphaIdx);
+    expect(lines.at(-1)).toBe("1 unmatched");
+  });
+
+  // covers: SC-43
+  test("an empty corpus prints only '0 unmatched'; nothing opens the store", () => {
+    const res = runCli(["rescope"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout.trim()).toBe("0 unmatched");
+    expect(existsSync(join(root, ".idx"))).toBe(false);
+  });
+
+  // covers: SC-44
+  test("--json prints a plan whose rows carry slug/type/from/to/reason", async () => {
+    await writeFact("alpha-one", "global");
+    const res = runCli(["rescope", "--known", "alpha", "--json"], root);
+    expect(res.status).toBe(0);
+    const plan = JSON.parse(res.stdout);
+    expect(plan).toMatchObject({ version: 1, unmatched: 0 });
+    expect(plan.rows).toEqual([{ slug: "alpha-one", type: "project", from: "global", to: "alpha", reason: "slug-prefix" }]);
+  });
+
+  // covers: SC-43
+  test("--known splits on commas, trims whitespace, and drops blank entries", async () => {
+    await writeFact("alpha-one", "global");
+    await writeFact("beta-one", "global");
+    const res = runCli(["rescope", "--known", " alpha , , beta "], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("alpha-one | global | alpha | slug-prefix");
+    expect(res.stdout).toContain("beta-one | global | beta | slug-prefix");
+  });
+
+  // covers: SC-43
+  test("a repeatable --alias splits on the first '=' and routes matches to the target", async () => {
+    await writeFact("old-one", "old");
+    const res = runCli(["rescope", "--alias", "old=new", "--alias", "unused=other"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("old-one | old | new | alias");
+  });
+
+  // covers: SC-43
+  test("an --alias missing '=' is a usage error: exit 1, one stderr line, corpus untouched", () => {
+    const res = runCli(["rescope", "--alias", "noequals"], root);
+    expect(res.status).toBe(1);
+    expect(res.stderr.trim().split("\n")).toHaveLength(1);
+    expect(res.stdout).toBe("");
+  });
+
+  // covers: SC-43
+  test("an --alias with a blank side is a usage error", () => {
+    const res = runCli(["rescope", "--alias", "old="], root);
+    expect(res.status).toBe(1);
+    expect(res.stderr.trim().split("\n")).toHaveLength(1);
+  });
+
+  // covers: SC-43, INV-2
+  test("'global' (case-insensitive) in --known or either side of an --alias is a usage error", () => {
+    expect(runCli(["rescope", "--known", "global"], root).status).toBe(1);
+    expect(runCli(["rescope", "--known", "Global"], root).status).toBe(1);
+    expect(runCli(["rescope", "--alias", "old=global"], root).status).toBe(1);
+    expect(runCli(["rescope", "--alias", "global=new"], root).status).toBe(1);
+  });
+
+  // covers: SC-43
+  test("a positional without --apply is a usage error: exit 1, one stderr line", () => {
+    const res = runCli(["rescope", "plan.json"], root);
+    expect(res.status).toBe(1);
+    expect(res.stderr.trim().split("\n")).toHaveLength(1);
+  });
+
+  // covers: SC-44
+  test("--apply plan.json reads and applies the plan file", async () => {
+    await writeFact("alpha-one", "global");
+    const planRes = runCli(["rescope", "--known", "alpha", "--json"], root);
+    await writeFile(join(root, "plan.json"), planRes.stdout);
+    const res = runCli(["rescope", "--apply", "plan.json"], root, root);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(/rescoped 1 fact\b(?!s)/);
+    expect(readFileSync(join(root, "project", "alpha-one.md"), "utf-8")).toMatch(/^project: alpha$/m);
+  });
+
+  // covers: SC-44
+  test("--apply - reads the plan from stdin", async () => {
+    await writeFact("alpha-one", "global");
+    const planRes = runCli(["rescope", "--known", "alpha", "--json"], root);
+    const res = runCli(["rescope", "--apply", "-"], root, undefined, planRes.stdout);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(/rescoped 1 fact\b(?!s)/);
+    expect(readFileSync(join(root, "project", "alpha-one.md"), "utf-8")).toMatch(/^project: alpha$/m);
+  });
+
+  // covers: SC-44
+  test("bare --apply computes and applies the plan in one step; success line pluralizes", async () => {
+    await writeFact("alpha-one", "global");
+    await writeFact("alpha-two", "global");
+    const res = runCli(["rescope", "--known", "alpha", "--apply"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("rescoped 2 facts");
+    expect(readFileSync(join(root, "project", "alpha-one.md"), "utf-8")).toMatch(/^project: alpha$/m);
+    expect(readFileSync(join(root, "project", "alpha-two.md"), "utf-8")).toMatch(/^project: alpha$/m);
+  });
+
+  // covers: SC-44
+  test("a stale-row plan is rejected: stderr rows plus a causes line, exit 1, files unchanged", async () => {
+    await writeFact("alpha-one", "global");
+    const planRes = runCli(["rescope", "--known", "alpha", "--json"], root);
+    const plan = JSON.parse(planRes.stdout);
+    await writeFact("alpha-one", "already-scoped"); // 'from' on disk no longer matches the plan row
+    const res = runCli(["rescope", "--apply", "-"], root, undefined, JSON.stringify(plan));
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("rejected: alpha-one | global | alpha");
+    expect(res.stderr).toMatch(/slug missing|no longer|unsafe/);
+    expect(readFileSync(join(root, "project", "alpha-one.md"), "utf-8")).toMatch(/^project: already-scoped$/m);
+  });
+
+  // covers: SC-44
+  test("an unreadable plan file exits 1 with 'cannot read plan'; nothing written, no absolute path in output", async () => {
+    await writeFact("alpha-one", "global");
+    const res = runCli(["rescope", "--apply", "missing-plan.json"], root, root);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/cannot read plan/);
+    expect(res.stderr).not.toContain(root);
+    expect(readFileSync(join(root, "project", "alpha-one.md"), "utf-8")).toMatch(/^project: global$/m);
+  });
+
+  // covers: SC-44
+  test("unparsable plan JSON on stdin exits 1 with 'invalid plan JSON'; nothing written", async () => {
+    await writeFact("alpha-one", "global");
+    const res = runCli(["rescope", "--apply", "-"], root, undefined, "{not json");
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/invalid plan JSON/);
+    expect(readFileSync(join(root, "project", "alpha-one.md"), "utf-8")).toMatch(/^project: global$/m);
+  });
+
+  // covers: SC-44
+  test("a plan failing the shape check exits 1 with the exact usage-source message", () => {
+    const res = runCli(["rescope", "--apply", "-"], root, undefined, JSON.stringify({ rows: "nope" }));
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("invalid plan: expected { known, rows, unmatched, version } (from 'qmemd rescope --json')");
+  });
+
+  // covers: SC-44
+  test("--json on apply prints the full RescopeApplyResult even when rows are rejected", async () => {
+    await writeFact("alpha-one", "global");
+    const planRes = runCli(["rescope", "--known", "alpha", "--json"], root);
+    const plan = JSON.parse(planRes.stdout);
+    await writeFact("alpha-one", "already-scoped");
+    const res = runCli(["rescope", "--apply", "-", "--json"], root, undefined, JSON.stringify(plan));
+    expect(res.status).toBe(1);
+    const parsed = JSON.parse(res.stdout);
+    expect(parsed.applied).toBe(0);
+    expect(parsed.rejected).toEqual([{ slug: "alpha-one", type: "project", from: "global", to: "alpha", reason: "slug-prefix" }]);
+  });
+
+  // covers: SC-43
+  test("--help prints usage including the revert recipe, with no absolute path", () => {
+    const res = runCli(["rescope", "--help"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(/git revert/);
+    expect(res.stdout).toMatch(/qmemd reindex/);
+    expect(res.stdout).not.toContain(root);
+  });
+
+  // covers: SC-43
+  test("printUsage lists the rescope verb", () => {
+    const res = runCli(["--help"], root);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(/rescope/);
   });
 });
 
