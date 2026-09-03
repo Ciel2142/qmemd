@@ -3,6 +3,7 @@ import {
   mapCachePath, corpusFingerprint, buildTokenMap, loadOrBuildTokenMap,
   stripWrappers, isOwnSubjectCommand, commandTokens, matchCommand,
   formatFactLine, formatOverlap,
+  OVERLAP_SLUG_HEAD_TOKENS, OVERLAP_COMMAND_TOKEN_CAP, OVERLAP_COMMAND_STOPLIST,
   type TokenMap, type OverlapHit,
 } from "../src/overlap.js";
 import { serializeMemory, tokenizeForDedup, type MemoryFrontmatter, type MemoryType } from "../src/engine.js";
@@ -50,7 +51,7 @@ function fixture100(): TokenMap {
     "noise-c": ["widget"],
     "noise-d": ["widget"],
     "gizmo2-b": ["gizmo2"],
-    "stop-a": ["test", "helper2"],
+    "stop-a": ["test", "helper2", "helper3"],
   };
   for (let i = 0; Object.keys(entries).length < 100; i++) entries[`filler-${i}`] = [`uniq${i}`];
   return makeMap(entries);
@@ -69,7 +70,7 @@ describe("overlap module", () => {
   });
 
   // covers: SC-47
-  test("buildTokenMap scopes to repo+global project/reference facts, tokenizing slug∪tags, skipping superseded and user facts; cache is keyed by repo", async () => {
+  test("buildTokenMap scopes to repo+global project/reference facts, tokenizing tags∪slug-head, skipping superseded and user facts; cache is keyed by repo", async () => {
     await writeFact(root, "project", "alpha-widget", { project: "repo-a", tags: ["Gadget", "jdk21"] });
     await writeFact(root, "project", "beta-thing", { project: "repo-b", tags: ["other"] });
     await writeFact(root, "reference", "global-doc", { project: "global", tags: ["shared"] });
@@ -93,6 +94,18 @@ describe("overlap module", () => {
     loadOrBuildTokenMap(cacheB, root, "repo-b", true);
     expect(existsSync(cacheA)).toBe(true);
     expect(existsSync(cacheB)).toBe(true);
+  });
+
+  // covers: SC-47
+  test("buildTokenMap takes only the first OVERLAP_SLUG_HEAD_TOKENS of a tokenized slug, not the whole slug", async () => {
+    expect(OVERLAP_SLUG_HEAD_TOKENS).toBe(4);
+    await writeFact(root, "project", "alpha-bravo-charlie-delta-echo-foxtrot", { project: "repo-a", tags: [] });
+
+    const map = buildTokenMap(root, "repo-a");
+    const slug = "alpha-bravo-charlie-delta-echo-foxtrot";
+    const headTokens = tokenizeForDedup(slug).slice(0, OVERLAP_SLUG_HEAD_TOKENS);
+    for (const t of headTokens) expect(map.tokens[t]).toContain(slug);
+    for (const t of tokenizeForDedup(slug).slice(OVERLAP_SLUG_HEAD_TOKENS)) expect(map.tokens[t]).toBeUndefined();
   });
 
   // covers: SC-48
@@ -176,6 +189,32 @@ describe("overlap module", () => {
     expect(commandTokens("qmemd-tool run")).not.toEqual([]);
   });
 
+  // covers: SC-51
+  test("commandTokens cuts the command at the first heredoc marker; body tokens after it are dropped", () => {
+    const tokens = commandTokens("git commit -F - <<'EOF'\nlegitimate keyword forgery\nEOF");
+    expect(tokens).toContain("commit");
+    for (const t of ["legitimate", "keyword", "forgery", "eof"]) expect(tokens).not.toContain(t);
+
+    const dashVariant = commandTokens("cat <<-EOF\nhidden token\nEOF");
+    expect(dashVariant).not.toContain("hidden");
+  });
+
+  // covers: SC-51
+  test("commandTokens drops tokens shorter than 3 characters and all-digit tokens", () => {
+    const tokens = commandTokens("go -f 42 to widget");
+    expect(tokens).toEqual(["widget"]);
+  });
+
+  // covers: SC-51
+  test("commandTokens dedupes preserving order and caps at OVERLAP_COMMAND_TOKEN_CAP tokens", () => {
+    expect(OVERLAP_COMMAND_TOKEN_CAP).toBe(24);
+    const words = Array.from({ length: 26 }, (_, i) => `word${i}`);
+    const raw = [words[0], words[0], ...words.slice(1)]; // word0 repeated up front
+    const tokens = commandTokens(raw.join(" "));
+    expect(tokens.length).toBe(OVERLAP_COMMAND_TOKEN_CAP);
+    expect(tokens).toEqual(words.slice(0, OVERLAP_COMMAND_TOKEN_CAP));
+  });
+
   // covers: SC-53
   test("distinctive tokens: a stoplist token never contributes; DF cap=3 over 100 facts admits df=3, excludes df=4", () => {
     const map = fixture100();
@@ -187,17 +226,32 @@ describe("overlap module", () => {
     const overCap = matchCommand(["widget", "gizmo2"], map, new Set());
     expect(overCap.find(h => h.slug === "noise-a")).toBeUndefined();
 
-    const stopHit = matchCommand(["test", "helper2"], map, new Set());
-    expect(stopHit.find(h => h.slug === "stop-a")).toEqual({ slug: "stop-a", score: 1, tokens: ["helper2"] });
+    const stopHit = matchCommand(["test", "helper2", "helper3"], map, new Set());
+    expect(stopHit.find(h => h.slug === "stop-a")).toEqual({ slug: "stop-a", score: 2, tokens: ["helper2", "helper3"] });
+  });
+
+  // covers: SC-53
+  test("a token in OVERLAP_COMMAND_STOPLIST never contributes to score", () => {
+    expect(OVERLAP_COMMAND_STOPLIST.has("gradle")).toBe(true);
+    const map = makeMap({ a: ["gradle", "zzyzx"], b: ["gradle"] });
+
+    expect(matchCommand(["gradle", "zzyzx"], map, new Set())).toEqual([]); // score 1 (zzyzx only), below min-score
   });
 
   // covers: SC-54
-  test("fires at score >= 2; score 1 needs a DF-1 (unique) shared token; each hit reports score and tokens", () => {
+  test("fires at score >= 2; score 1 with a DF=1 token does NOT fire; each hit reports score and tokens", () => {
     const map = makeMap({ a: ["x1", "x2"], b: ["x1"], c: ["x2"], d: ["y1"], e: ["y1"], f: ["z1"] });
 
     expect(matchCommand(["x1", "x2"], map, new Set())).toEqual([{ slug: "a", score: 2, tokens: ["x1", "x2"] }]);
     expect(matchCommand(["y1"], map, new Set())).toEqual([]);
-    expect(matchCommand(["z1"], map, new Set())).toEqual([{ slug: "f", score: 1, tokens: ["z1"] }]);
+    expect(matchCommand(["z1"], map, new Set())).toEqual([]); // DF=1 unique token, score 1 — no longer fires (R-9d)
+  });
+
+  // covers: SC-50
+  test("a query token colliding with an inherited Object.prototype name does not throw and yields no hit (R-10)", () => {
+    const map = makeMap({ unrelated: ["widget"] });
+    expect(() => matchCommand(["constructor", "toString", "hasOwnProperty", "foo"], map, new Set())).not.toThrow();
+    expect(matchCommand(["constructor", "toString", "hasOwnProperty", "foo"], map, new Set())).toEqual([]);
   });
 
   // covers: SC-55

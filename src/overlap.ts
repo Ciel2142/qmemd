@@ -21,10 +21,41 @@ export interface TokenMap {
 export const OVERLAP_DF_FRACTION = 0.03;
 export const OVERLAP_MIN_SCORE = 2;
 export const OVERLAP_MAX_HITS = 3;
+export const OVERLAP_SLUG_HEAD_TOKENS = 4;
+export const OVERLAP_COMMAND_TOKEN_CAP = 24;
 export const MAP_REBUILD_EVERY_N_CALLS = 40;
 /** Live descriptions run past 150 chars; unbounded lines cost tokens on a hot hook
  *  path (D-w3-3). Slug stays intact for `qmemd show`. */
 export const FACT_LINE_DESC_CAP = 120;
+
+/** Generic shell/tool/SCM/file-type words (R-9c) — never a project name, so this list
+ *  ships fixed and isn't calibrated per repo. */
+export const OVERLAP_COMMAND_STOPLIST: ReadonlySet<string> = new Set([
+  "grep", "head", "echo", "rtk", "sed", "git", "tail", "read", "status", "run", "null", "cat",
+  "python3", "python", "node", "npm", "npx", "mvn", "mvnw", "gradle", "go", "cargo", "make",
+  "task", "tasks", "diff", "tests", "log", "logs", "review", "done", "short", "commit",
+  "commits", "find", "oneline", "add", "name", "error", "errors", "import", "sort", "print",
+  "stat", "include", "exit", "type", "timeout", "only", "package", "src", "main", "json",
+  "result", "results", "failed", "fail", "open", "report", "integration", "false", "true",
+  "project", "file", "files", "sleep", "show", "design", "model", "base", "new", "full",
+  "format", "lines", "line", "any", "verify", "porcelain", "class", "code", "brief", "export",
+  "final", "docs", "doc", "edit", "failure", "wave", "spec", "specs", "coverage", "plan",
+  "plans", "global", "version", "cd", "ls", "rm", "cp", "mv", "mkdir", "wc", "awk", "cut", "tr",
+  "xargs", "curl", "jq", "kubectl", "docker", "printf", "tee", "touch", "chmod", "pwd", "env",
+  "set", "unset", "which", "time", "date", "wait", "kill", "ps", "top", "less", "more", "nl",
+  "paste", "comm", "uniq", "rev", "seq", "yes", "eof", "dev", "tmp", "path", "dir", "out",
+  "output", "input", "list", "get", "put", "post", "delete", "update", "create", "remove",
+  "check", "checks", "count", "total", "first", "last", "next", "prev", "old", "current",
+  "latest", "local", "remote", "origin", "master", "push", "pull", "fetch", "clone", "branch",
+  "merge", "rebase", "stash", "tag", "tags", "checkout", "reset", "revert", "init", "config",
+  "blame", "bisect", "help", "usage", "debug", "info", "warn", "warning", "trace", "verbose",
+  "quiet", "dry", "all", "none", "default", "the", "this", "that", "with", "from", "into", "for",
+  "and", "or", "not", "via", "per", "use", "uses", "used", "using", "runs", "running", "start",
+  "stop", "restart", "end", "ok", "no", "on", "off", "enable", "disable", "install", "uninstall",
+  "upgrade", "cache", "data", "text", "txt", "md", "html", "xml", "yaml", "yml", "toml", "ini",
+  "csv", "sh", "bash", "zsh", "js", "ts", "mjs", "cjs", "py", "rb", "rs", "java", "kt", "scala",
+  "cs", "cpp", "hpp",
+]);
 
 export function mapCachePath(cacheDir: string, root: string, repo: string): string {
   const rootHash = createHash("sha256").update(root).digest("hex").slice(0, 12);
@@ -54,8 +85,9 @@ export function buildTokenMap(root: string, project: string): TokenMap {
   for (const type of MAP_TYPES) {
     for (const e of listFacts(root, { type, project })) {
       if (e.supersededBy) continue;
-      const factTokens = new Set<string>(tokenizeForDedup(e.slug));
+      const factTokens = new Set<string>();
       for (const tag of e.tags) for (const t of tokenizeForDedup(tag)) factTokens.add(t);
+      for (const t of tokenizeForDedup(e.slug).slice(0, OVERLAP_SLUG_HEAD_TOKENS)) factTokens.add(t);
       facts[e.slug] = { type: e.type, description: e.description, project: e.project };
       for (const t of factTokens) (tokens[t] ??= []).push(e.slug);
     }
@@ -106,11 +138,25 @@ export function isOwnSubjectCommand(command: string): boolean {
   return first === "qmemd" || first === "br";
 }
 
+const HEREDOC_MARKER_RE = /<<-?\s*['"]?[A-Za-z_]+/;
+const SHORT_OR_DIGIT_RE = /^\d+$/;
+
 export function commandTokens(command: string): string[] {
   const words = stripWrappers(command);
   if (words.length === 0 || isOwnSubjectCommand(command)) return [];
   const normalized = words.map(w => (w.includes("/") ? basename(w) : w).replace(/^-+/, ""));
-  return tokenizeForDedup(normalized.join(" "));
+  const joined = normalized.join(" ");
+  const heredocIdx = joined.search(HEREDOC_MARKER_RE);
+  const text = heredocIdx >= 0 ? joined.slice(0, heredocIdx) : joined;
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const t of tokenizeForDedup(text)) {
+    if (t.length < 3 || SHORT_OR_DIGIT_RE.test(t) || seen.has(t)) continue;
+    seen.add(t);
+    kept.push(t);
+    if (kept.length === OVERLAP_COMMAND_TOKEN_CAP) break;
+  }
+  return kept;
 }
 
 export interface OverlapHit {
@@ -132,9 +178,10 @@ export function matchCommand(
   const dfCap = Math.max(3, Math.ceil(dfFraction * factCount));
   const perSlugTokens = new Map<string, Set<string>>();
   for (const t of new Set(tokens)) {
-    if (RECALL_BOOST_STOPLIST.has(t)) continue;
+    if (RECALL_BOOST_STOPLIST.has(t) || OVERLAP_COMMAND_STOPLIST.has(t)) continue;
+    if (!Object.hasOwn(map.tokens, t)) continue;
     const slugs = map.tokens[t];
-    if (!slugs || slugs.length > dfCap) continue;
+    if (slugs.length > dfCap) continue;
     for (const slug of slugs) {
       if (exclude.has(slug)) continue;
       let set = perSlugTokens.get(slug);
@@ -145,8 +192,7 @@ export function matchCommand(
   const hits: OverlapHit[] = [];
   for (const [slug, tokSet] of perSlugTokens) {
     const score = tokSet.size;
-    const hasUniqueToken = [...tokSet].some(t => map.tokens[t].length === 1);
-    if (score >= minScore || hasUniqueToken) hits.push({ slug, score, tokens: [...tokSet] });
+    if (score >= minScore) hits.push({ slug, score, tokens: [...tokSet] });
   }
   hits.sort((a, b) => b.score - a.score || a.slug.localeCompare(b.slug));
   return hits.slice(0, OVERLAP_MAX_HITS);

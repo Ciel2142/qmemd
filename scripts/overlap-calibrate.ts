@@ -20,10 +20,6 @@ const COMMAND_TRUNCATE = 100;
 const TOP_SLUGS = 20;
 const LOG_LINE_RE = /^\[[^\]]*\]\s*(.*)$/;
 
-// map.tokens is a plain object; a token equal to an inherited Object.prototype name (e.g.
-// "constructor") crashes matchCommand. Script-side workaround only — see report concerns.
-const UNSAFE_TOKENS = new Set(Object.getOwnPropertyNames(Object.prototype).map(n => n.toLowerCase()));
-
 function expandHome(path: string): string {
   return path.startsWith("~") ? join(homedir(), path.slice(1)) : path;
 }
@@ -57,7 +53,6 @@ interface ReplayStats {
   replayed: number;
   withHit: number;
   skippedOwnSubject: number;
-  unsafeTokensDropped: number;
   histogram: Map<number, number>;
   slugFireCount: Map<string, number>;
 }
@@ -67,7 +62,6 @@ function replay(lines: string[], map: TokenMap, dfFraction: number | undefined, 
     replayed: 0,
     withHit: 0,
     skippedOwnSubject: 0,
-    unsafeTokensDropped: 0,
     histogram: new Map(),
     slugFireCount: new Map(),
   };
@@ -77,9 +71,7 @@ function replay(lines: string[], map: TokenMap, dfFraction: number | undefined, 
     if (command.length === 0) continue;
     if (isOwnSubjectCommand(command)) { stats.skippedOwnSubject++; continue; }
     stats.replayed++;
-    const rawTokens = commandTokens(command);
-    const tokens = rawTokens.filter(t => !UNSAFE_TOKENS.has(t));
-    stats.unsafeTokensDropped += rawTokens.length - tokens.length;
+    const tokens = commandTokens(command);
     const hits = matchCommand(tokens, map, exclude, { dfFraction, minScore });
     if (hits.length === 0) continue;
     stats.withHit++;
@@ -101,7 +93,6 @@ function printSummary(stats: ReplayStats, factCount: number, dfFraction: number,
   console.log(`project: ${project}  facts: ${factCount}  df-cap: ${dfCap}  min-score: ${minScore}`);
   console.log(`commands replayed: ${stats.replayed}`);
   console.log(`skipped own-subject: ${stats.skippedOwnSubject}`);
-  console.log(`unsafe tokens dropped (Object.prototype collisions): ${stats.unsafeTokensDropped}`);
   console.log(`commands with >=1 hit: ${stats.withHit}  fire rate: ${(rate * 100).toFixed(2)}%`);
   console.log("hit-count histogram:");
   for (const n of [...stats.histogram.keys()].sort((a, b) => a - b)) {

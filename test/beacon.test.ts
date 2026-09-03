@@ -310,8 +310,8 @@ describe("runBeacon orchestration (w3)", () => {
     root = await mkdtemp(join(tmpdir(), "qmemd-beac-root-"));
     cache = await mkdtemp(join(tmpdir(), "qmemd-beac-cache-"));
     await writeFact(root, "project", "jdk", { project: "beta", tags: ["jdk", "build"], description: "jdk toolchain notes" });
-    await writeFact(root, "project", "gradle-daemon", { project: "global", tags: ["gradle", "daemon"], description: "gradle daemon gotcha" });
-    await writeFact(root, "project", "kube-ctl", { project: "global", tags: ["kubectl", "apply"], description: "kubectl apply notes" });
+    await writeFact(root, "project", "gradle-daemon", { project: "global", tags: ["gradle", "daemon", "clean"], description: "gradle daemon gotcha" });
+    await writeFact(root, "project", "kube-ctl", { project: "global", tags: ["kubectl", "apply", "manifest"], description: "kubectl apply notes" });
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); await rm(cache, { recursive: true, force: true }); });
 
@@ -363,7 +363,7 @@ describe("runBeacon orchestration (w3)", () => {
       "   [project] gradle daemon gotcha (gradle-daemon)",
       "   → qmemd show gradle-daemon for the full fact",
     ]);
-    const later = runBeacon(evt("kubectl apply -f manifest.yaml"), deps());
+    const later = runBeacon(evt("kubectl apply -f manifest"), deps());
     expect(later!.split("\n\n").length).toBe(1);
     expect(later).toContain("(kube-ctl)");
   });
@@ -377,13 +377,14 @@ describe("runBeacon orchestration (w3)", () => {
   });
 
   // covers: INV-7
-  test("pivot-listed slugs are excluded from the overlap on the same call (D-w3-6)", () => {
-    const pivoted = runBeacon(evt("jdk --version"), deps());
+  test("pivot-listed slugs are excluded from the overlap on the same call (D-w3-6)", async () => {
+    await writeFact(root, "project", "jdk", { project: "beta", tags: ["jdk", "build", "toolchain"], description: "jdk toolchain notes" });
+    const pivoted = runBeacon(evt("jdk toolchain"), deps());
     expect(pivoted).toContain("(jdk)");
     expect(pivoted).not.toContain("facts matching this command");
     // Control: the same command in a session that never listed jdk does match it.
     writeState(stateFilePath(cache, "s2"), st({ repo: "beta", callCount: 1, beaconedRepos: ["beta"] }));
-    const out = runBeacon(evt("jdk --version", { session_id: "s2" }), deps());
+    const out = runBeacon(evt("jdk toolchain", { session_id: "s2" }), deps());
     expect(out).toContain("💡 qmemd · beta — facts matching this command:");
     expect(out).toContain("(jdk)");
   });
@@ -440,14 +441,14 @@ describe("runBeacon orchestration (w3)", () => {
     // In-place rewrite: same file count, same directory mtime → the fingerprint still matches.
     await writeFact(root, "project", "jdk", { project: "beta", tags: ["jdk", "build", "zebra"], description: "jdk toolchain notes" });
     writeState(stateFilePath(cache, "s1"), st({ repo: "beta", callCount: 39, beaconedRepos: ["beta"], mapBuiltAtCall: 1 }));
-    expect(runBeacon(evt("zebra run"), deps())).toBeNull();     // call 40: 40-1 = 39 < 40 → cached map
-    const out = runBeacon(evt("zebra run"), deps());            // call 41: 41-1 = 40 → forced rebuild
+    expect(runBeacon(evt("zebra jdk"), deps())).toBeNull();     // call 40: 40-1 = 39 < 40 → cached map
+    const out = runBeacon(evt("zebra jdk"), deps());            // call 41: 41-1 = 40 → forced rebuild
     expect(out).toContain("(jdk)");
     expect(marker()!.mapBuiltAtCall).toBe(41);
 
     // A fingerprint-driven rebuild on a non-forced call does not reset the cadence (R-3).
-    await writeFact(root, "project", "orangutan", { project: "beta", tags: ["orangutan"] });
-    expect(runBeacon(evt("orangutan run"), deps())).toContain("(orangutan)");
+    await writeFact(root, "project", "orangutan", { project: "beta", tags: ["orangutan", "sanctuary"] });
+    expect(runBeacon(evt("orangutan sanctuary"), deps())).toContain("(orangutan)");
     expect(marker()!.mapBuiltAtCall).toBe(41);
   });
 
