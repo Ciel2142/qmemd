@@ -1314,6 +1314,17 @@ describe("remember (SDK-backed)", () => {
     expect(dup.duplicateOf).toBe("use-bun-not-node");
   });
 
+  // covers: SC-29
+  test("a written fact's result.project matches the written frontmatter, absent on a dedup block", async () => {
+    const { remember, getFact } = await import("../src/engine.js");
+    const res = await remember(store, root, { fact: "Postgres listens on 5432", type: "project", project: "alpha" });
+    expect(res.wrote).toBe(true);
+    expect(res.project).toBe(getFact(root, res.slug)!.frontmatter.project);
+    const dup = await remember(store, root, { fact: "Postgres listens on 5432", type: "project", project: "alpha" });
+    expect(dup.wrote).toBe(false);
+    expect(dup.project).toBeUndefined();
+  });
+
   test("a report-shaped body still writes but surfaces a reportWarning (qmemd-a3k)", async () => {
     const { remember } = await import("../src/engine.js");
     const report = "## What happened\nThe cross-instance exchange 500'd.\n## Root cause\nDescriptor marshalled before signatures.\n## Fix\nStamp signatures first.";

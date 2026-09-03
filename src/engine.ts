@@ -1029,6 +1029,10 @@ export interface RememberResult {
    *  committed without the reverse link): run doctor --fix to complete it. Mirrors
    *  syncWarning's best-effort style. */
   supersedeWarning?: string;
+  /** The written fact's scope (qmemd-due wave: scope default). Set from the written
+   *  frontmatter's `project` on the write path only — absent on every no-write path
+   *  (dedup/conflict/blocked), since nothing was written to have a scope. */
+  project?: string;
 }
 
 function today(): string {
@@ -1941,7 +1945,7 @@ export async function remember(
   }
 
   return { wrote: true, slug, path, type, indexed, synced, syncWarning, dedupSkipped, reportWarning, sanitizedWarning,
-    supersededSlug: input.supersedes, conflictsWith: conflictRecord, supersedeWarning };
+    supersededSlug: input.supersedes, conflictsWith: conflictRecord, supersedeWarning, project: fm.project };
 }
 
 // =============================================================================

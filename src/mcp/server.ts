@@ -64,6 +64,7 @@ export function toRememberDTO(res: RememberResult) {
     dedupSkipped: res.dedupSkipped, reportWarning: res.reportWarning,
     sanitizedWarning: res.sanitizedWarning, supersededSlug: res.supersededSlug,
     conflictsWith: res.conflictsWith, supersedeWarning: res.supersedeWarning,
+    project: res.project,
   };
 }
 

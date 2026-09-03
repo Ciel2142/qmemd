@@ -1,5 +1,1 @@
-# beads_rust (br) configuration for this repository.
-#
-# All keys are optional; run `br config --help` for the supported settings. Settings can
-# also be supplied via environment variables or CLI flags. The issue prefix and the
-# database / JSONL-export paths are recorded in .beads/metadata.json.
+issue_prefix: qp

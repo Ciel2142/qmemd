@@ -132,4 +132,16 @@ describe("toRememberDTO (qp-nq2 — one mapper for MCP structuredContent + REST)
     expect(dto.authorityComparison).toEqual(res.authorityComparison);
     expect(dto).toMatchObject({ wrote: false, slug: "s", type: "project", duplicateOf: "other", disposition: "conflict", supersedeWarning: "w" });
   });
+
+  // covers: SC-29
+  test("keeps project on the write path, still drops path (qmemd-due)", async () => {
+    const { toRememberDTO } = await import("../src/mcp/server.js");
+    const res = {
+      wrote: true, slug: "s", path: "/abs/secret/s.md", type: "project" as const,
+      indexed: true, synced: true, dedupSkipped: 0, project: "qmemd-public",
+    };
+    const dto = toRememberDTO(res as never);
+    expect("path" in dto).toBe(false);
+    expect(dto.project).toBe("qmemd-public");
+  });
 });
