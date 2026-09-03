@@ -676,7 +676,7 @@ describe("CLI hook beacon e2e (tfu)", () => {
       env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), XDG_CACHE_HOME: cache }),
     });
     expect(res.status).toBe(0);
-    expect(res.stderr).toContain("Usage: qmemd hook <beacon|write-beacon>");
+    expect(res.stderr).toContain("Usage: qmemd hook <beacon|probe|write-beacon>");
     expect(res.stdout.trim()).toBe("");
   });
 
@@ -690,6 +690,56 @@ describe("CLI hook beacon e2e (tfu)", () => {
     expect(res.status).toBe(0);
     expect(JSON.parse(res.stdout).hookSpecificOutput.additionalContext)
       .toContain("💡 qmemd · beta — 1 repo + 0 global memories");
+  });
+});
+
+function runProbeHook(stdin: string, root: string, cache: string) {
+  return spawnSync(TSX, [CLI, "hook", "probe"], {
+    encoding: "utf-8",
+    input: stdin,
+    env: cleanEnv({
+      QMD_MEMORY_DIR: root,
+      QMEMD_DB: join(root, ".idx", "i.sqlite"),
+      XDG_CACHE_HOME: cache,
+    }),
+  });
+}
+
+describe("CLI hook probe e2e", () => {
+  let root: string, cache: string;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "qmemd-probe-"));
+    cache = await mkdtemp(join(tmpdir(), "qmemd-probec-"));
+  });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); await rm(cache, { recursive: true, force: true }); });
+
+  const failure = JSON.stringify({
+    session_id: "s1", cwd: "/work/repo-a", tool_name: "Bash", is_interrupt: false,
+    error: "Exit code 1\nnpm ERR! ERESOLVE unable to resolve dependency tree",
+    tool_input: { command: "npm ci" },
+  });
+
+  // covers: SC-65
+  test("a matching failure prints a PostToolUseFailure envelope naming the fact", () => {
+    const seed = runCli(["remember",
+      "npm ci fails with npm ERR! ERESOLVE unable to resolve dependency tree when peer deps conflict",
+      "--type", "project", "--project", "repo-a", "--as", "npm-ci-eresolve"], root);
+    expect(seed.status, seed.stderr).toBe(0);
+    const res = runProbeHook(failure, root, cache);
+    expect(res.status).toBe(0);
+    const out = JSON.parse(res.stdout);
+    expect(out.hookSpecificOutput.hookEventName).toBe("PostToolUseFailure");
+    expect(out.hookSpecificOutput.additionalContext).toContain("npm-ci-eresolve");
+  });
+
+  // covers: INV-4
+  test("garbage stdin and a failure with no matching fact both exit 0 with no output", () => {
+    const garbage = runProbeHook("not json at all", root, cache);
+    expect(garbage.status).toBe(0);
+    expect(garbage.stdout.trim()).toBe("");
+    const empty = runProbeHook(failure, root, cache); // empty corpus: no hit to surface
+    expect(empty.status).toBe(0);
+    expect(empty.stdout.trim()).toBe("");
   });
 });
 

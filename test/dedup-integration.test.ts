@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStore as openQmd, type QMDStore } from "@tobilu/qmd";
-import { remember } from "../src/engine.js";
+import { remember, reindexMemory } from "../src/engine.js";
+import { runProbe } from "../src/probe.js";
 
 // Real-store companions to the fake-store unit tests in engine.test.ts. A fake searchLex
 // cannot express any of this: that a real index KEEPS a row for a deleted file, that the row
@@ -72,5 +73,47 @@ describe("dedup against a real qmd index", () => {
     // Raw: the leading dash became FTS5 negation (NOT "force"*), so the fact excluded itself.
     expect(await store.searchLex(fact, { limit: 5, collection: "memory" })).toHaveLength(0);
     expect(await store.searchLex(lexDedupQuery(fact), { limit: 5, collection: "memory" })).toHaveLength(1);
+  });
+});
+
+// The probe's project gate and its FTS query shape only exist against a real index: a fake
+// recall cannot show that the space-joined token list matches where the punctuated raw error
+// line does not, nor that a byte-identical fact in another repo stays out. Lex only — no model.
+describe("probe against a real qmd index", () => {
+  let parent: string, root: string, cache: string, dbPath: string;
+
+  beforeEach(async () => {
+    parent = await mkdtemp(join(tmpdir(), "qmemd-probe-int-"));
+    root = join(parent, "mem");
+    cache = join(parent, "cache");
+    dbPath = join(parent, "idx", "i.sqlite");
+    await mkdir(root, { recursive: true });
+    await mkdir(join(parent, "idx"), { recursive: true });
+  });
+  afterEach(async () => { await rm(parent, { recursive: true, force: true }); });
+
+  const openStore = () => openQmd({
+    dbPath,
+    config: { collections: { memory: { path: root, pattern: "**/*.md" } } },
+  });
+
+  // covers: SC-65
+  test("the probe names the in-scope fact and not its byte-identical twin in another repo", async () => {
+    const fact = "npm ci fails with npm ERR! ERESOLVE unable to resolve dependency tree when peer deps conflict";
+    const seed = await openStore();
+    const mine = await remember(seed, root, { fact, type: "project", project: "repo-a", as: "npm-ci-eresolve-peer-deps" });
+    const theirs = await remember(seed, root, { fact, type: "project", project: "repo-b", as: "npm-ci-eresolve-other-repo", force: true });
+    expect(mine.wrote && theirs.wrote).toBe(true);
+    await reindexMemory(seed);
+    await seed.close();
+
+    const block = await runProbe(JSON.stringify({
+      session_id: "s1", cwd: "/work/repo-a", tool_name: "Bash", is_interrupt: false,
+      error: "Exit code 1\nnpm ERR! ERESOLVE unable to resolve dependency tree",
+      tool_input: { command: "npm ci" },
+    }), { memoryRoot: root, cacheDir: cache, openStore });
+
+    expect(block).toContain("npm-ci-eresolve-peer-deps");
+    expect(block).not.toContain("npm-ci-eresolve-other-repo");
   });
 });

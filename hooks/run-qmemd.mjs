@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Hook proxy — run `qmemd <args>`, falling back to `npx -y @ciel2142/qmemd <args>`
 // when qmemd is not on PATH (the README contract for the plugin's hooks). Used by
-// the SessionStart snapshot (`recall --session`) and the PreToolUse beacon
-// (`hook beacon`).
+// the SessionStart snapshot (`recall --session`), the PreToolUse beacon
+// (`hook beacon`) and the PostToolUseFailure probe (`hook probe`).
 //
 // Why a node wrapper instead of a bare `qmemd …` hook string: it adds the npx
 // fallback, and it avoids POSIX shell operators (`||`, `2>`) that break when

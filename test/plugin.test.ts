@@ -90,8 +90,21 @@ describe("plugin hooks.json", () => {
     expect(block.matcher).toBe("Bash");
   });
 
+  // covers: SC-66
+  test("PostToolUseFailure(Bash) fires the failure probe through the proxy on a 10s timeout", () => {
+    const groups = hooks.PostToolUseFailure ?? [];
+    expect(groups).toHaveLength(1);
+    expect(groups[0].matcher).toBe("Bash");
+    expect(groups[0].hooks).toEqual([{
+      type: "command",
+      command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/run-qmemd.mjs" hook probe',
+      timeout: 10,
+    }]);
+  });
+
+  // covers: SC-66
   test("hook commands are cross-platform: ${CLAUDE_PLUGIN_ROOT}, no POSIX-only operators", () => {
-    const all = [...cmds(hooks.SessionStart), ...cmds(hooks.PreToolUse)];
+    const all = [...cmds(hooks.SessionStart), ...cmds(hooks.PreToolUse), ...cmds(hooks.PostToolUseFailure)];
     expect(all.length).toBeGreaterThan(0);
     for (const c of all) {
       expect(c, c).toContain("${CLAUDE_PLUGIN_ROOT}");

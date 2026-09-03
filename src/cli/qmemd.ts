@@ -7,6 +7,7 @@ import type { MemoryType, Platform, RecallResult, RecallHit, MergePlan, StaleRep
 import { tryDaemonRecall, daemonPort } from "../client.js";
 import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capability.js";
 import { runBeacon, runWriteBeacon } from "../beacon.js";
+import { runProbe } from "../probe.js";
 import { resolveWriteScope } from "../scope.js";
 import { gitPullFfOnly, sessionSyncWarning } from "../git.js";
 import { memoryRoot, cacheDir, daemonPaths, systemdUserDir, qmemdConfigDir, launchAgentsDir, macLogsDir } from "../paths.js";
@@ -363,7 +364,7 @@ async function rescopeVerb(argv: string[]): Promise<void> {
   } finally { await store.close(); }
 }
 
-const HOOK_USAGE = "Usage: qmemd hook <beacon|write-beacon>   (reads a hook event JSON on stdin)";
+const HOOK_USAGE = "Usage: qmemd hook <beacon|probe|write-beacon>   (reads a hook event JSON on stdin)";
 
 /** hook is dispatched from main() ahead of the shared parseArgs table (D-w3-5, the rescope
  *  precedent), and the sub-verb is read straight off argv: no option parsing runs on a hook
@@ -381,6 +382,19 @@ async function hookVerb(argv: string[]): Promise<void> {
         }) + "\n");
       }
     } catch { /* fail-open: swallow everything, exit 0 — must never block Bash */ }
+    return;
+  }
+  if (sub === "probe") {
+    try {
+      const ctx = await runProbe(await readStdin(), {
+        memoryRoot: memoryRoot(), cacheDir: cacheDir(), openStore: openMemoryStore,
+      });
+      if (ctx) {
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: { hookEventName: "PostToolUseFailure", additionalContext: ctx },
+        }) + "\n");
+      }
+    } catch { /* fail-open: swallow everything, exit 0 — a failed Bash call must not fail twice */ }
     return;
   }
   if (sub === "write-beacon") {

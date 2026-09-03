@@ -25,6 +25,18 @@
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/run-qmemd.mjs\" hook probe",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
