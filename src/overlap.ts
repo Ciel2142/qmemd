@@ -89,7 +89,10 @@ export function buildTokenMap(root: string, project: string): TokenMap {
       for (const tag of e.tags) for (const t of tokenizeForDedup(tag)) factTokens.add(t);
       for (const t of tokenizeForDedup(e.slug).slice(0, OVERLAP_SLUG_HEAD_TOKENS)) factTokens.add(t);
       facts[e.slug] = { type: e.type, description: e.description, project: e.project };
-      for (const t of factTokens) (tokens[t] ??= []).push(e.slug);
+      for (const t of factTokens) {
+        if (!Object.hasOwn(tokens, t)) tokens[t] = [];
+        tokens[t].push(e.slug);
+      }
     }
   }
   return { version: 1, fingerprint: corpusFingerprint(root), project, facts, tokens };

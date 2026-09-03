@@ -108,6 +108,16 @@ describe("overlap module", () => {
     for (const t of tokenizeForDedup(slug).slice(OVERLAP_SLUG_HEAD_TOKENS)) expect(map.tokens[t]).toBeUndefined();
   });
 
+  // covers: SC-47
+  test("buildTokenMap does not throw when a fact's tag or slug head collides with an inherited Object.prototype name", async () => {
+    await writeFact(root, "project", "ctor-tagged", { project: "repo-a", tags: ["constructor"] });
+    await writeFact(root, "project", "constructor-marker", { project: "repo-a", tags: [] });
+
+    expect(() => buildTokenMap(root, "repo-a")).not.toThrow();
+    const map = buildTokenMap(root, "repo-a");
+    expect(map.tokens["constructor"]).toEqual(["constructor-marker", "ctor-tagged"]);
+  });
+
   // covers: SC-48
   test("unchanged fingerprint returns the cached map without a corpus walk", async () => {
     await writeFact(root, "project", "fact-one", { project: "repo-a", tags: ["alpha"] });
