@@ -595,7 +595,7 @@ describe("recall mode resolution (capability gate)", () => {
   });
 });
 
-function runHook(stdin: string, root: string, cache: string, everyN?: string) {
+function runHook(stdin: string, root: string, cache: string, env: Record<string, string> = {}) {
   return spawnSync(TSX, [CLI, "hook", "beacon"], {
     encoding: "utf-8",
     input: stdin,
@@ -603,7 +603,7 @@ function runHook(stdin: string, root: string, cache: string, everyN?: string) {
       QMD_MEMORY_DIR: root,
       QMEMD_DB: join(root, ".idx", "i.sqlite"),
       XDG_CACHE_HOME: cache,
-      ...(everyN ? { QMEMD_BEACON_EVERY: everyN } : {}),
+      ...env,
     }),
   });
 }
@@ -637,64 +637,47 @@ describe("CLI hook beacon e2e (tfu)", () => {
     session_id: "s1", cwd: "/work/beta", tool_name: "Bash", tool_input: { command: "mvn test" }, ...over,
   });
 
-  test("first Bash emits PreToolUse additionalContext, exit 0", () => {
+  // covers: SC-45
+  test("first Bash emits PreToolUse additionalContext; the next call is silent even with QMEMD_BEACON_EVERY=1", () => {
     const res = runHook(evt(), root, cache);
     expect(res.status).toBe(0);
     const out = JSON.parse(res.stdout);
     expect(out.hookSpecificOutput.hookEventName).toBe("PreToolUse");
-    expect(out.hookSpecificOutput.additionalContext).toContain("beta");
-    expect(out.hookSpecificOutput.additionalContext).toContain("build(1)");
-    expect(out.hookSpecificOutput.additionalContext).toContain("jdk(1)");
-  });
-
-  test("second Bash within cooldown emits nothing, exit 0", () => {
-    runHook(evt(), root, cache);
-    const res = runHook(evt(), root, cache);
-    expect(res.status).toBe(0);
-    expect(res.stdout.trim()).toBe("");
-  });
-
-  test("non-Bash tool emits nothing, exit 0", () => {
-    const res = runHook(evt({ tool_name: "Read" }), root, cache);
-    expect(res.status).toBe(0);
-    expect(res.stdout.trim()).toBe("");
-  });
-
-  test("malformed stdin never blocks: exit 0, no output", () => {
-    const res = runHook("garbage", root, cache);
-    expect(res.status).toBe(0);
-    expect(res.stdout.trim()).toBe("");
-  });
-
-  test("re-fires after everyN Bash calls when QMEMD_BEACON_EVERY=1", () => {
-    const first = runHook(evt(), root, cache, "1");   // call 1: first fire (full)
-    expect(first.status).toBe(0);
-    expect(first.stdout).toContain("beta");
-    const second = runHook(evt(), root, cache, "1");  // call 2: everyN=1, 2-1=1 >= 1 → re-fires (terse)
+    expect(out.hookSpecificOutput.additionalContext).toContain("💡 qmemd · beta");
+    const second = runHook(evt(), root, cache, { QMEMD_BEACON_EVERY: "1" });
     expect(second.status).toBe(0);
-    expect(second.stdout).toContain("beta");
+    expect(second.stdout.trim()).toBe("");
   });
 
-  // qmemd-1jt: `parseInt(...) || <default>` coerced QMEMD_BEACON_EVERY=0 to the default —
-  // the opposite of the stated intent (0 = fire on every call). 0 must behave like
-  // every-call; a non-numeric value falls back to the default silently (hook path stays
-  // fail-open).
-  test("QMEMD_BEACON_EVERY=0 fires on every call, not silently at the default cadence (qmemd-1jt)", () => {
-    const first = runHook(evt(), root, cache, "0");
-    expect(first.status).toBe(0);
-    expect(first.stdout).toContain("beta");
-    const second = runHook(evt(), root, cache, "0");
-    expect(second.status).toBe(0);
-    expect(second.stdout).toContain("beta");
+  // covers: SC-46
+  test("the pivot block lists the repo fact, with no tag histogram and no global line", () => {
+    const ctx = JSON.parse(runHook(evt(), root, cache).stdout).hookSpecificOutput.additionalContext;
+    expect(ctx.split("\n")).toEqual([
+      "💡 qmemd · beta — 1 repo + 0 global memories",
+      "   [project] jdk (jdk)",
+      '   → qmemd recall "beta <topic>" before diagnosing',
+    ]);
   });
 
-  test("non-numeric QMEMD_BEACON_EVERY falls back to the default cooldown (qmemd-1jt)", () => {
-    const first = runHook(evt(), root, cache, "abc");
-    expect(first.status).toBe(0);
-    expect(first.stdout).toContain("beta");   // pivot fire unaffected
-    const second = runHook(evt(), root, cache, "abc");
-    expect(second.status).toBe(0);
-    expect(second.stdout.trim()).toBe("");           // default cooldown (40) applies
+  // covers: INV-4
+  test("a non-Bash tool and malformed stdin emit nothing, exit 0", () => {
+    const nonBash = runHook(evt({ tool_name: "Read" }), root, cache);
+    expect(nonBash.status).toBe(0);
+    expect(nonBash.stdout.trim()).toBe("");
+    const garbage = runHook("garbage", root, cache);
+    expect(garbage.status).toBe(0);
+    expect(garbage.stdout.trim()).toBe("");
+  });
+
+  // covers: INV-4
+  test("an unknown hook sub-verb is a usage error, not a hook path: stderr + exit 1", () => {
+    const res = spawnSync(TSX, [CLI, "hook", "bogus"], {
+      encoding: "utf-8",
+      env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), XDG_CACHE_HOME: cache }),
+    });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("Usage: qmemd hook <beacon|probe|write-beacon|stats");
+    expect(res.stdout.trim()).toBe("");
   });
 });
 

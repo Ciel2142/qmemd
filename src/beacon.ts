@@ -1,6 +1,12 @@
 import { basename, dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { projectOverview, formatTagHistogram, type ProjectOverview, type MemoryType } from "./engine.js";
+import { listFacts, tagHistogram, formatTagHistogram, type ListEntry, type MemoryType } from "./engine.js";
+import {
+  loadOrBuildTokenMap, mapCachePath, commandTokens, isOwnSubjectCommand, matchCommand,
+  formatOverlap, formatFactLine, MAP_REBUILD_EVERY_N_CALLS, type FactLine,
+} from "./overlap.js";
+import { appendEvent, eventLogPath, pruneEvents, EVENT_MAX_AGE_MS, type HookEvent } from "./hookstats.js";
 
 export interface RepoActivity {
   calls: number;       // Bash calls in this repo this session
@@ -14,32 +20,38 @@ export interface BeaconState {
   lastBeaconAtCall: number;
   beaconedRepos: string[];
   perRepo: Record<string, RepoActivity>; // write beacon, keyed by basename(cwd)
+  /** Slugs already shown this session by the beacon or the probe — never shown twice. */
+  surfacedSlugs: string[];
+  probedKeys: string[];
+  mapBuiltAtCall: number;
 }
+
+/** Cap on surfacedSlugs and probedKeys: oldest entries drop out first. */
+export const SURFACED_CAP = 200;
 
 export interface BeaconDecision {
   fire: boolean;
-  terse: boolean;
   next: BeaconState;
 }
 
-/** Pure throttle decision. Pivot to a new repo always fires; within a repo, re-fire
- *  once `everyN` Bash calls have elapsed since the last beacon. `terse` = this repo's
- *  full table was already shown this session (→ render the one-line re-fire). */
-export function decideBeacon(prev: BeaconState | null, repo: string, everyN: number): BeaconDecision {
+/** Pure pivot decision: the first Bash call in a repo fires, and nothing else does.
+ *  There is no call-count re-fire — a repo already in `beaconedRepos` stays silent for
+ *  the rest of the session, including after a pivot away and back. */
+export function decideBeacon(prev: BeaconState | null, repo: string): BeaconDecision {
   const callCount = (prev?.callCount ?? 0) + 1;
   const beaconedRepos = prev?.beaconedRepos ?? [];
-  const pivot = !prev || prev.repo !== repo;
-  const sinceLast = prev ? callCount - prev.lastBeaconAtCall : Infinity;
-  const fire = pivot || sinceLast >= everyN;
-  const alreadyBeaconed = beaconedRepos.includes(repo);
+  const fire = !beaconedRepos.includes(repo);
   const next: BeaconState = {
     repo,
     callCount,
     lastBeaconAtCall: fire ? callCount : (prev?.lastBeaconAtCall ?? 0),
-    beaconedRepos: fire && !alreadyBeaconed ? [...beaconedRepos, repo] : beaconedRepos,
+    beaconedRepos: fire ? [...beaconedRepos, repo] : beaconedRepos,
     perRepo: prev?.perRepo ?? {},
+    surfacedSlugs: prev?.surfacedSlugs ?? [],
+    probedKeys: prev?.probedKeys ?? [],
+    mapBuiltAtCall: prev?.mapBuiltAtCall ?? 0,
   };
-  return { fire, terse: alreadyBeaconed, next };
+  return { fire, next };
 }
 
 export interface WriteBeaconDecision {
@@ -60,27 +72,62 @@ export function decideWriteBeacon(state: BeaconState | null, repo: string, thres
   };
 }
 
-/** Beacon histogram cap: top-N tags per scope line; the full shape stays on
- *  demand via `qmemd tags`. Keeps a repo-pivot fire bounded (a mixed dump
- *  measured ~200 tags ≈ 1.4k tokens before the split). */
-const BEACON_TAG_CAP = 12;
-
-function scopeLine(label: string, scope: { total: number; tags: { tag: string; count: number }[] }): string {
-  const shown = formatTagHistogram(scope.tags.slice(0, BEACON_TAG_CAP)) || "(untagged)";
-  const hidden = scope.tags.length - BEACON_TAG_CAP;
-  return `   ${label} ${shown}${hidden > 0 ? ` (+${hidden} more)` : ""}`;
+/** Append `slugs` to the session's surfaced set (INV-7): duplicates are never re-added and
+ *  the set is capped at SURFACED_CAP, oldest out. Shared with the probe. */
+export function rememberSurfaced(state: BeaconState, slugs: string[]): BeaconState {
+  const merged = [...state.surfacedSlugs];
+  for (const slug of slugs) if (!merged.includes(slug)) merged.push(slug);
+  return { ...state, surfacedSlugs: merged.slice(-SURFACED_CAP) };
 }
 
-/** Render the beacon text. No filesystem path (qmemd-81n) — repo name + tag shape only.
- *  Counts are split repo vs global: the pre-split "N memories for this repo" line counted
- *  project+global together and read as repo-only (misleading at 13 repo + 167 global). */
-export function formatBeacon(ov: ProjectOverview, terse: boolean): string {
-  const counts = `${ov.repo.total} repo + ${ov.global.total} global`;
-  if (terse) return `💡 qmemd · ${ov.project}: ${counts} — recall before diagnosing`;
-  const lines = [`💡 qmemd · ${ov.project} — ${counts} memories:`];
-  if (ov.repo.total > 0) lines.push(scopeLine("repo:  ", ov.repo));
-  if (ov.global.total > 0) lines.push(scopeLine("global:", ov.global));
-  lines.push(`   → recall before diagnosing, e.g.  qmemd recall "${ov.project} <topic>"`);
+/** Pivot histogram cap: top-N tags on the repo line; the full shape stays on demand via
+ *  `qmemd tags`. Keeps a repo pivot bounded (a mixed dump measured ~200 tags ≈ 1.4k tokens). */
+const BEACON_TAG_CAP = 12;
+
+/** Repo facts listed one line each up to this count; above it, the tag histogram. */
+export const PIVOT_LIST_MAX = 10;
+
+export interface PivotOverview {
+  project: string;
+  repo: { total: number; tags: { tag: string; count: number }[]; facts: FactLine[] };
+  global: { total: number };
+}
+
+const PIVOT_TYPES: readonly MemoryType[] = ["project", "reference"]; // user/feedback are always injected
+
+/** Model-free in-scope overview for the pivot block: project+reference facts for this repo
+ *  plus global, split repo vs global. Filesystem only — safe on the Bash hot path. */
+export function pivotOverview(root: string, repo: string): PivotOverview {
+  const entries: ListEntry[] = [];
+  for (const type of PIVOT_TYPES) entries.push(...listFacts(root, { type, project: repo }));
+  const repoEntries = entries.filter(e => e.project !== "global");
+  return {
+    project: repo,
+    repo: {
+      total: repoEntries.length,
+      tags: tagHistogram(repoEntries.map(e => e.tags)),
+      facts: repoEntries
+        .map(e => ({ type: e.type, description: e.description, slug: e.slug }))
+        .sort((a, b) => a.slug.localeCompare(b.slug)),
+    },
+    global: { total: entries.length - repoEntries.length },
+  };
+}
+
+function repoTagLine(tags: { tag: string; count: number }[]): string {
+  const shown = formatTagHistogram(tags.slice(0, BEACON_TAG_CAP)) || "(untagged)";
+  const hidden = tags.length - BEACON_TAG_CAP;
+  return `   repo: ${shown}${hidden > 0 ? ` (+${hidden} more)` : ""}`;
+}
+
+/** Render the once-per-repo pivot block. No filesystem path (qmemd-81n) — repo name, the
+ *  in-scope counts, and either the fact list or the repo tag shape. No global tag line: the
+ *  global corpus is the same in every repo and reads as noise on a pivot. */
+export function formatPivot(ov: PivotOverview): string {
+  const lines = [`💡 qmemd · ${ov.project} — ${ov.repo.total} repo + ${ov.global.total} global memories`];
+  if (ov.repo.total > PIVOT_LIST_MAX) lines.push(repoTagLine(ov.repo.tags));
+  else for (const f of ov.repo.facts.slice(0, PIVOT_LIST_MAX)) lines.push(formatFactLine(f));
+  lines.push(`   → qmemd recall "${ov.project} <topic>" before diagnosing`);
   return lines.join("\n");
 }
 
@@ -103,6 +150,41 @@ export function isCaptureCommand(cmd: string): boolean {
   return CAPTURE_RE.test(cmd);
 }
 
+export type Followup = { kind: "recall"; query: string } | { kind: "show"; slugs: string[] };
+
+// Unanchored so a wrapper-rewritten command ("rtk qmemd recall …") still counts.
+const FOLLOWUP_RE = /\bqmemd\s+(recall|show|get)\s+/;
+// The recall flags that take a value: their argument is not the query.
+const VALUE_FLAGS = new Set(["--type", "--platform", "--limit", "--min-score"]);
+
+function firstBareArg(rest: string): string | null {
+  const args = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = args.exec(rest)) !== null) {
+    const quoted = m[1] !== undefined || m[2] !== undefined;
+    const value = m[1] ?? m[2] ?? m[3];
+    if (quoted || !value.startsWith("-")) return value;
+    if (value === "--session") return null; // the session snapshot carries no query
+    if (VALUE_FLAGS.has(value)) args.exec(rest);
+  }
+  return null;
+}
+
+/** Classify a Bash command as a read of qmemd memory — the "did the nudge land" signal
+ *  (§3.5). Write verbs (remember/forget/…) are not followups. */
+export function followupOf(command: string): Followup | null {
+  const m = FOLLOWUP_RE.exec(command);
+  if (!m) return null;
+  const arg = firstBareArg(command.slice(m.index + m[0].length));
+  if (arg === null) return null;
+  return m[1] === "recall" ? { kind: "recall", query: arg } : { kind: "show", slugs: [arg] };
+}
+
+/** Stable short id for a command, so an event line carries no command text (INV-5). */
+export function commandHash(command: string): string {
+  return createHash("sha1").update(command).digest("hex").slice(0, 12);
+}
+
 export function stateFilePath(cacheDir: string, sessionId: string): string {
   // sessionId is hook-controlled and flows into a filename — collapse to one safe
   // segment so it cannot traverse out of the hook dir (qmemd-fd8 spirit).
@@ -118,6 +200,11 @@ export function readState(path: string): BeaconState | null {
         && typeof s.lastBeaconAtCall === "number" && Array.isArray(s.beaconedRepos)) {
       if (s.perRepo == null) s.perRepo = {};
       else if (typeof s.perRepo !== "object" || Array.isArray(s.perRepo)) return null;
+      // A marker written before this feature carries none of the three below; defaulting
+      // them (rather than rejecting) keeps an in-flight session's pivot state (SC-58).
+      if (!Array.isArray(s.surfacedSlugs)) s.surfacedSlugs = [];
+      if (!Array.isArray(s.probedKeys)) s.probedKeys = [];
+      if (typeof s.mapBuiltAtCall !== "number") s.mapBuiltAtCall = 0;
       return s;
     }
     return null;
@@ -144,25 +231,28 @@ export function pruneOldStates(hookDir: string, maxAgeMs: number, now: number): 
  *  only needs to run occasionally — stale markers age in days, not calls (qp-nq2). */
 const PRUNE_EVERY_N_WRITES = 20;
 
-export function writeState(path: string, state: BeaconState): void {
+export function writeState(path: string, state: BeaconState, eventsPath?: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(state));
   renameSync(tmp, path); // atomic replace
-  // Opportunistic cleanup of old sessions' markers (qmemd-4y2) — best-effort, never throws.
-  // Gated to every Nth call of the session (plus the first) so the hot hook path is not
-  // paying a directory sweep per Bash command.
+  // Opportunistic cleanup of old sessions' markers (qmemd-4y2) and event lines — best-effort,
+  // never throws. Gated to every Nth call of the session (plus the first) so the hot hook path
+  // is not paying a directory sweep or a log rewrite per Bash command.
   if (state.callCount % PRUNE_EVERY_N_WRITES === 0 || state.callCount === 1) {
-    pruneOldStates(dirname(path), STATE_MAX_AGE_MS, Date.now());
+    const now = Date.now();
+    pruneOldStates(dirname(path), STATE_MAX_AGE_MS, now);
+    if (eventsPath) pruneEvents(eventsPath, EVENT_MAX_AGE_MS, now);
   }
 }
 
 export interface BeaconDeps {
   memoryRoot: string;
   cacheDir: string;
-  everyN: number;
-  /** test seam — defaults to projectOverview */
-  overview?: (root: string, project: string, types: MemoryType[]) => ProjectOverview;
+  /** test seam — defaults to pivotOverview */
+  overview?: (root: string, repo: string) => PivotOverview;
+  /** test seam for the event timestamp */
+  now?: () => Date;
 }
 
 export interface WriteBeaconDeps {
@@ -170,10 +260,16 @@ export interface WriteBeaconDeps {
   threshold: number;
 }
 
-/** Orchestrate one PreToolUse event → beacon text or null (silent). Pure of process
- *  IO except the marker file. Never throws on bad input — returns null (fail-open).
- *  Throttle decides FIRST; the corpus scan runs only on a firing call (qmemd-abi) —
- *  this path runs on every Bash PreToolUse, so throttled calls must stay scan-free. */
+/** loadOrBuildTokenMap does not report whether it rebuilt; the cache file is rewritten
+ *  (temp-then-rename) only on a build, so its mtime is the signal for mapBuiltAtCall. */
+function mapFileStamp(path: string): number {
+  try { return statSync(path).mtimeMs; } catch { return -1; }
+}
+
+/** Orchestrate one PreToolUse event → beacon text or null (silent). Pure of process IO except
+ *  the marker, the map cache, and the event log. Never throws on bad input — returns null
+ *  (fail-open, INV-4). Two blocks can print on one call: the once-per-repo pivot and the
+ *  content overlap, joined by a blank line. */
 export function runBeacon(stdinText: string, deps: BeaconDeps): string | null {
   let evt: { tool_name?: unknown; cwd?: unknown; session_id?: unknown; tool_input?: { command?: unknown } };
   try { evt = JSON.parse(stdinText); } catch { return null; }
@@ -183,30 +279,69 @@ export function runBeacon(stdinText: string, deps: BeaconDeps): string | null {
   const sessionId = typeof evt.session_id === "string" ? evt.session_id : "session";
   const path = stateFilePath(deps.cacheDir, sessionId);
   const prev = readState(path);
-  const { fire, terse, next } = decideBeacon(prev, repo, deps.everyN);
+  const { fire, next } = decideBeacon(prev, repo);
   // Write-beacon accounting (qmemd-yl3): record per-repo work + captures on EVERY call,
-  // independent of the read-beacon throttle, so every persist path below carries it.
+  // independent of the pivot latch, so the Stop hook can read it.
   const cmd = typeof evt?.tool_input?.command === "string" ? evt.tool_input.command : "";
   const act = next.perRepo[repo] ?? { calls: 0, captures: 0, writeFired: false };
-  next.perRepo = {
-    ...next.perRepo,
-    [repo]: { ...act, calls: act.calls + 1, captures: act.captures + (isCaptureCommand(cmd) ? 1 : 0) },
+  let state: BeaconState = {
+    ...next,
+    perRepo: {
+      ...next.perRepo,
+      [repo]: { ...act, calls: act.calls + 1, captures: act.captures + (isCaptureCommand(cmd) ? 1 : 0) },
+    },
   };
-  const persist = (s: BeaconState) => {
-    try { writeState(path, s); } catch { /* marker-IO failure: state loss is acceptable, never block Bash */ }
-  };
-  if (!fire) { persist(next); return null; }
-  const TYPES: MemoryType[] = ["project", "reference"]; // exclude always-on user/feedback
-  const ov = (deps.overview ?? projectOverview)(deps.memoryRoot, repo, TYPES);
-  if (ov.total === 0) {
-    // Empty corpus: advance the throttle window (a fact-less repo scans 1/everyN, not
-    // every call) but do NOT mark the repo beaconed — the first beacon after facts
-    // appear must still render the full table.
-    persist({ ...next, beaconedRepos: prev?.beaconedRepos ?? [] });
-    return null;
+
+  const eventsPath = eventLogPath(deps.cacheDir);
+  const ts = (deps.now ?? (() => new Date()))().toISOString();
+  const log = (ev: Omit<HookEvent, "v" | "ts" | "session" | "repo">) =>
+    appendEvent(eventsPath, { v: 1, ts, session: sessionId, repo, ...ev });
+
+  const blocks: string[] = [];
+  let pivoted = false;
+  if (fire) {
+    let ov: PivotOverview | null;
+    try { ov = (deps.overview ?? pivotOverview)(deps.memoryRoot, repo); } catch { ov = null; }
+    if (!ov || ov.repo.total + ov.global.total === 0) {
+      // Fact-less repo (or an unreadable corpus): stay silent and do NOT mark the repo, so the
+      // first pivot after facts appear still renders.
+      state = { ...state, beaconedRepos: prev?.beaconedRepos ?? [] };
+    } else {
+      pivoted = true;
+      blocks.push(formatPivot(ov));
+      // A fact the agent has just seen listed counts as surfaced (D-w3-6): the overlap block
+      // on this and later calls excludes it.
+      const listed = ov.repo.total <= PIVOT_LIST_MAX ? ov.repo.facts.slice(0, PIVOT_LIST_MAX).map(f => f.slug) : [];
+      if (listed.length > 0) state = rememberSurfaced(state, listed);
+      log({ kind: "pivot", ...(listed.length > 0 ? { slugs: listed } : {}) });
+    }
   }
-  persist(next);
-  return formatBeacon(ov, terse);
+
+  const followup = followupOf(cmd);
+  if (followup) {
+    log(followup.kind === "recall" ? { kind: "followup", query: followup.query } : { kind: "followup", slugs: followup.slugs });
+  } else if (!isOwnSubjectCommand(cmd)) {
+    try {
+      const tokens = commandTokens(cmd);
+      if (tokens.length > 0) {
+        const mapPath = mapCachePath(deps.cacheDir, deps.memoryRoot, repo);
+        const force = pivoted || state.callCount - state.mapBuiltAtCall >= MAP_REBUILD_EVERY_N_CALLS;
+        const stamp = mapFileStamp(mapPath);
+        const map = loadOrBuildTokenMap(mapPath, deps.memoryRoot, repo, force);
+        if (mapFileStamp(mapPath) !== stamp) state = { ...state, mapBuiltAtCall: state.callCount };
+        const hits = matchCommand(tokens, map, new Set(state.surfacedSlugs));
+        if (hits.length > 0) {
+          const slugs = hits.map(h => h.slug);
+          blocks.push(formatOverlap(repo, hits, map));
+          state = rememberSurfaced(state, slugs);
+          log({ kind: "overlap", slugs, cmdHash: commandHash(cmd) });
+        }
+      }
+    } catch { /* a corpus-walk failure costs the overlap block only — the pivot still prints (SC-50) */ }
+  }
+
+  try { writeState(path, state, eventsPath); } catch { /* marker-IO failure: state loss is acceptable, never block Bash */ }
+  return blocks.length > 0 ? blocks.join("\n\n") : null;
 }
 
 /** Orchestrate one Stop event → write-beacon text or null (silent). Reads the shared

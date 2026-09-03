@@ -363,10 +363,71 @@ async function rescopeVerb(argv: string[]): Promise<void> {
   } finally { await store.close(); }
 }
 
+const HOOK_USAGE = "Usage: qmemd hook <beacon|probe|write-beacon|stats [--since <N>d|<N>h|<N>w] [--json]>   (the hook verbs read a hook event JSON on stdin)";
+
+/** hook owns a dedicated parseArgs table, dispatched from main() before the shared one runs
+ *  (D-w3-5, the rescope precedent): the shared table has no `since` option, so `hook stats
+ *  --since 2d` would throw on it before dispatch. Every hook path is fail-open — it must
+ *  never exit non-zero in a way that blocks the command or the turn, and never load the
+ *  embedding model. An unknown sub-verb is an operator typo, not a hook event: usage, exit 1. */
+async function hookVerb(argv: string[]): Promise<void> {
+  let sub: string | undefined;
+  let help = false;
+  try {
+    const { values, positionals } = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: { since: { type: "string" }, json: { type: "boolean" }, help: { type: "boolean", short: "h" } },
+    });
+    sub = positionals[0];
+    help = !!values.help;
+  } catch {
+    console.error(HOOK_USAGE);
+    process.exit(1);
+  }
+
+  if (sub === "beacon") {
+    try {
+      const ctx = runBeacon(await readStdin(), { memoryRoot: memoryRoot(), cacheDir: cacheDir() });
+      if (ctx) {
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: ctx },
+        }) + "\n");
+      }
+    } catch { /* fail-open: swallow everything, exit 0 — must never block Bash */ }
+    return;
+  }
+  if (sub === "write-beacon") {
+    // Write-side capture beacon (qmemd-yl3), Stop hook. OFF unless QMEMD_WRITE_BEACON is
+    // truthy — when unset this is a silent no-op even if the hook is wired.
+    try {
+      if (/^(1|true)$/i.test(process.env.QMEMD_WRITE_BEACON ?? "")) {
+        const stdinText = await readStdin();
+        const rawMin = parseInt(process.env.QMEMD_WRITE_BEACON_MIN ?? "20", 10);
+        const threshold = Number.isInteger(rawMin) && rawMin >= 0 ? Math.max(1, rawMin) : 20;
+        const ctx = runWriteBeacon(stdinText, { cacheDir: cacheDir(), threshold });
+        if (ctx) {
+          process.stdout.write(JSON.stringify({
+            hookSpecificOutput: { hookEventName: "Stop", additionalContext: ctx },
+          }) + "\n");
+        }
+      }
+    } catch { /* fail-open: swallow everything, exit 0 — must never block the turn */ }
+    return;
+  }
+  if (help) { console.log(HOOK_USAGE); return; }
+  console.error(HOOK_USAGE);
+  process.exit(1);
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   if (argv[0] === "rescope") {
     await runRescope(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "hook") {
+    await hookVerb(argv.slice(1));
     return;
   }
   const { values, positionals } = parseArgs({
@@ -671,45 +732,6 @@ async function main() {
       }
       printStale(report);
       console.log(`${d}Resolve: qmemd show <slug> → re-verify, then 'reviewed <slug>' to reset the clock, 'remember --replace <slug> <fact>' if it changed, '--supersedes <slug>' to retire, or 'forget <slug>'.${r}`);
-      break;
-    }
-    case "hook": {
-      // qmemd hook <beacon|write-beacon>. Both read a hook event on stdin and emit a
-      // non-blocking additionalContext nudge. MUST fail open — never exit non-zero in a
-      // way that blocks the command/turn, never load the embedding model.
-      const sub = rest[0];
-      if (sub === "beacon") {
-        try {
-          const stdinText = await readStdin();
-          // 0 = fire on every call (clamped to 1); non-numeric/negative → 40 silently (qmemd-1jt).
-          const rawEvery = parseInt(process.env.QMEMD_BEACON_EVERY ?? "40", 10);
-          const everyN = Number.isInteger(rawEvery) && rawEvery >= 0 ? Math.max(1, rawEvery) : 40;
-          const ctx = runBeacon(stdinText, { memoryRoot: root, cacheDir: cacheDir(), everyN });
-          if (ctx) {
-            process.stdout.write(JSON.stringify({
-              hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: ctx },
-            }) + "\n");
-          }
-        } catch { /* fail-open: swallow everything, exit 0 — must never block Bash */ }
-      } else if (sub === "write-beacon") {
-        // Write-side capture beacon (qmemd-yl3), Stop hook. OFF unless QMEMD_WRITE_BEACON is
-        // truthy — when unset this is a silent no-op even if the hook is wired.
-        try {
-          if (/^(1|true)$/i.test(process.env.QMEMD_WRITE_BEACON ?? "")) {
-            const stdinText = await readStdin();
-            const rawMin = parseInt(process.env.QMEMD_WRITE_BEACON_MIN ?? "20", 10);
-            const threshold = Number.isInteger(rawMin) && rawMin >= 0 ? Math.max(1, rawMin) : 20;
-            const ctx = runWriteBeacon(stdinText, { cacheDir: cacheDir(), threshold });
-            if (ctx) {
-              process.stdout.write(JSON.stringify({
-                hookSpecificOutput: { hookEventName: "Stop", additionalContext: ctx },
-              }) + "\n");
-            }
-          }
-        } catch { /* fail-open: swallow everything, exit 0 — must never block the turn */ }
-      } else {
-        console.error("Usage: qmemd hook <beacon|write-beacon>   (reads a hook event JSON on stdin)");
-      }
       break;
     }
     case "status": {
