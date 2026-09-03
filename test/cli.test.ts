@@ -670,14 +670,26 @@ describe("CLI hook beacon e2e (tfu)", () => {
   });
 
   // covers: INV-4
-  test("an unknown hook sub-verb is a usage error, not a hook path: stderr + exit 1", () => {
+  test("an unknown hook sub-verb prints the usage line on stderr and still exits 0", () => {
     const res = spawnSync(TSX, [CLI, "hook", "bogus"], {
       encoding: "utf-8",
       env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), XDG_CACHE_HOME: cache }),
     });
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain("Usage: qmemd hook <beacon|probe|write-beacon|stats");
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain("Usage: qmemd hook <beacon|write-beacon>");
     expect(res.stdout.trim()).toBe("");
+  });
+
+  // covers: INV-4
+  test("an unknown option on the beacon never blocks: exit 0, same block as a bare hook beacon", () => {
+    const res = spawnSync(TSX, [CLI, "hook", "beacon", "--bogus"], {
+      encoding: "utf-8",
+      input: evt(),
+      env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), XDG_CACHE_HOME: cache }),
+    });
+    expect(res.status).toBe(0);
+    expect(JSON.parse(res.stdout).hookSpecificOutput.additionalContext)
+      .toContain("💡 qmemd · beta — 1 repo + 0 global memories");
   });
 });
 

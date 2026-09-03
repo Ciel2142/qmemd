@@ -363,28 +363,14 @@ async function rescopeVerb(argv: string[]): Promise<void> {
   } finally { await store.close(); }
 }
 
-const HOOK_USAGE = "Usage: qmemd hook <beacon|probe|write-beacon|stats [--since <N>d|<N>h|<N>w] [--json]>   (the hook verbs read a hook event JSON on stdin)";
+const HOOK_USAGE = "Usage: qmemd hook <beacon|write-beacon>   (reads a hook event JSON on stdin)";
 
-/** hook owns a dedicated parseArgs table, dispatched from main() before the shared one runs
- *  (D-w3-5, the rescope precedent): the shared table has no `since` option, so `hook stats
- *  --since 2d` would throw on it before dispatch. Every hook path is fail-open — it must
- *  never exit non-zero in a way that blocks the command or the turn, and never load the
- *  embedding model. An unknown sub-verb is an operator typo, not a hook event: usage, exit 1. */
+/** hook is dispatched from main() ahead of the shared parseArgs table (D-w3-5, the rescope
+ *  precedent), and the sub-verb is read straight off argv: no option parsing runs on a hook
+ *  path, so a stray flag from a host's hook config cannot throw before dispatch. Every hook
+ *  path is fail-open (INV-4) — never a non-zero exit, never the embedding model. */
 async function hookVerb(argv: string[]): Promise<void> {
-  let sub: string | undefined;
-  let help = false;
-  try {
-    const { values, positionals } = parseArgs({
-      args: argv,
-      allowPositionals: true,
-      options: { since: { type: "string" }, json: { type: "boolean" }, help: { type: "boolean", short: "h" } },
-    });
-    sub = positionals[0];
-    help = !!values.help;
-  } catch {
-    console.error(HOOK_USAGE);
-    process.exit(1);
-  }
+  const sub = argv[0];
 
   if (sub === "beacon") {
     try {
@@ -415,9 +401,7 @@ async function hookVerb(argv: string[]): Promise<void> {
     } catch { /* fail-open: swallow everything, exit 0 — must never block the turn */ }
     return;
   }
-  if (help) { console.log(HOOK_USAGE); return; }
-  console.error(HOOK_USAGE);
-  process.exit(1);
+  console.error(HOOK_USAGE); // exit 0: a hook invocation never blocks on its argv (INV-4)
 }
 
 async function main() {
