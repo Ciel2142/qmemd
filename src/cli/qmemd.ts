@@ -8,6 +8,7 @@ import { tryDaemonRecall, daemonPort } from "../client.js";
 import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capability.js";
 import { runBeacon, runWriteBeacon } from "../beacon.js";
 import { runProbe } from "../probe.js";
+import { eventLogPath, readEvents, computeStats, formatStats, FOLLOWUP_WINDOW_MS, type HookStats } from "../hookstats.js";
 import { resolveWriteScope } from "../scope.js";
 import { gitPullFfOnly, sessionSyncWarning } from "../git.js";
 import { memoryRoot, cacheDir, daemonPaths, systemdUserDir, qmemdConfigDir, launchAgentsDir, macLogsDir } from "../paths.js";
@@ -220,6 +221,9 @@ function printUsage(): void {
   console.log("  qmemd mcp stop                         - stop the HTTP daemon");
   console.log("  qmemd mcp token                        - print the HTTP daemon's auth token (for other MCP/REST clients)");
   console.log("  qmemd embed [--force] | status | reindex");
+  console.log("  qmemd hook beacon|write-beacon         - PreToolUse/Stop hook envelopes (wired via hook config, reads a hook event JSON on stdin)");
+  console.log("  qmemd hook probe                       - PostToolUseFailure hook envelope (reads a hook event JSON on stdin)");
+  console.log("  qmemd hook stats [--since <N>d|<N>h|<N>w] [--json]  - hook trigger/uptake stats from the event log (no model)");
 }
 
 function printRescopeUsage(): void {
@@ -364,7 +368,8 @@ async function rescopeVerb(argv: string[]): Promise<void> {
   } finally { await store.close(); }
 }
 
-const HOOK_USAGE = "Usage: qmemd hook <beacon|probe|write-beacon>   (reads a hook event JSON on stdin)";
+const HOOK_USAGE = "Usage: qmemd hook <beacon|probe|write-beacon|stats [--since <N>d|<N>h|<N>w] [--json]>   (reads a hook event JSON on stdin; stats reads the event log)";
+const HOOK_STATS_USAGE = "usage: qmemd hook stats [--since <N>d|<N>h|<N>w] [--json]";
 
 /** hook is dispatched from main() ahead of the shared parseArgs table (D-w3-5, the rescope
  *  precedent), and the sub-verb is read straight off argv: no option parsing runs on a hook
@@ -413,6 +418,37 @@ async function hookVerb(argv: string[]): Promise<void> {
         }
       }
     } catch { /* fail-open: swallow everything, exit 0 — must never block the turn */ }
+    return;
+  }
+  if (sub === "stats") {
+    let values: { since?: string; json?: boolean; help?: boolean };
+    try {
+      ({ values } = parseArgs({
+        args: argv.slice(1),
+        allowPositionals: false,
+        options: {
+          since: { type: "string" },
+          json: { type: "boolean" },
+          help: { type: "boolean" },
+        },
+      }));
+    } catch {
+      console.error(HOOK_STATS_USAGE);
+      process.exitCode = 1;
+      return;
+    }
+    if (values.help) { console.log(HOOK_STATS_USAGE); return; }
+    const m = /^(\d+)(h|d|w)$/.exec(values.since ?? "7d");
+    if (!m) {
+      console.error(HOOK_STATS_USAGE);
+      process.exitCode = 1;
+      return;
+    }
+    const unitMs = { h: 3_600_000, d: 86_400_000, w: 604_800_000 }[m[2] as "h" | "d" | "w"];
+    const since = new Date(Date.now() - Number(m[1]) * unitMs);
+    const { events, skipped } = readEvents(eventLogPath(cacheDir()), since.getTime());
+    const stats: HookStats = { ...computeStats(events, FOLLOWUP_WINDOW_MS, since), skipped };
+    console.log(values.json ? JSON.stringify(stats) : formatStats(stats));
     return;
   }
   console.error(HOOK_USAGE); // exit 0: a hook invocation never blocks on its argv (INV-4)

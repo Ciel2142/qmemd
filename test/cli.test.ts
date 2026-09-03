@@ -676,7 +676,7 @@ describe("CLI hook beacon e2e (tfu)", () => {
       env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), XDG_CACHE_HOME: cache }),
     });
     expect(res.status).toBe(0);
-    expect(res.stderr).toContain("Usage: qmemd hook <beacon|probe|write-beacon>");
+    expect(res.stderr).toContain("Usage: qmemd hook <beacon|probe|write-beacon|stats");
     expect(res.stdout.trim()).toBe("");
   });
 
@@ -777,6 +777,101 @@ describe("CLI hook write-beacon e2e (qmemd-yl3)", () => {
     const res = runWriteHook(stop, root, cache, { on: false, min: "1" });
     expect(res.status).toBe(0);
     expect(res.stdout.trim()).toBe("");
+  });
+});
+
+function runStatsHook(args: string[], cache: string) {
+  return spawnSync(TSX, [CLI, "hook", "stats", ...args], {
+    encoding: "utf-8",
+    env: cleanEnv({ XDG_CACHE_HOME: cache }),
+  });
+}
+
+async function writeHookEvents(cache: string, lines: string[]): Promise<void> {
+  const dir = join(cache, "qmemd", "hook");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "events.jsonl"), lines.join("\n") + "\n");
+}
+
+describe("CLI hook stats (w3 task 6)", () => {
+  let cache: string;
+  beforeEach(async () => { cache = await mkdtemp(join(tmpdir(), "qmemd-statsc-")); });
+  afterEach(async () => { await rm(cache, { recursive: true, force: true }); });
+
+  function fixtureLines(): string[] {
+    const base = Date.now();
+    const iso = (deltaMs: number) => new Date(base - deltaMs).toISOString();
+    return [
+      JSON.stringify({ v: 1, ts: iso(60_000), session: "s-pivot", repo: "r", kind: "pivot", slugs: ["a", "b"] }),
+      JSON.stringify({ v: 1, ts: iso(50_000), session: "s-pivot", repo: "r", kind: "followup", slugs: ["a"] }),
+      JSON.stringify({ v: 1, ts: iso(40_000), session: "s-overlap", repo: "r", kind: "overlap", slugs: ["c"] }),
+      JSON.stringify({ v: 1, ts: iso(30_000), session: "s-overlap", repo: "r", kind: "followup", slugs: ["z"] }),
+      JSON.stringify({ v: 1, ts: iso(20_000), session: "s-probe", repo: "r", kind: "probe", slugs: ["p"] }),
+      "not valid json at all",
+    ];
+  }
+
+  // covers: SC-75, SC-76
+  test("text output prints per-kind rows with proportions, and the skipped-lines footer", async () => {
+    await writeHookEvents(cache, fixtureLines());
+    const res = runStatsHook([], cache);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("pivot fired 1 matched 1 used 1 acted 1");
+    expect(res.stdout).toMatch(/used\/matched \d\.\d\d \[\d\.\d\d, \d\.\d\d\]/);
+    expect(res.stdout).toContain("overlap fired 1 matched 1 used 0 acted 1");
+    expect(res.stdout).toContain("probe fired 1 matched 1 used 0 acted 0");
+    expect(res.stdout).toContain("1 unparsable lines skipped");
+  });
+
+  // covers: SC-75
+  test("--json prints a parseable HookStats matching the computed numbers", async () => {
+    await writeHookEvents(cache, fixtureLines());
+    const res = runStatsHook(["--json"], cache);
+    expect(res.status).toBe(0);
+    const stats = JSON.parse(res.stdout);
+    expect(stats.byKind.pivot).toEqual({ fired: 1, matched: 1, used: 1, acted: 1 });
+    expect(stats.byKind.overlap).toEqual({ fired: 1, matched: 1, used: 0, acted: 1 });
+    expect(stats.byKind.probe).toEqual({ fired: 1, matched: 1, used: 0, acted: 0 });
+    expect(stats.skipped).toBe(1);
+  });
+
+  // covers: SC-75
+  test("--since <N>h parses hours and excludes an event outside that window", async () => {
+    const base = Date.now();
+    const iso = (deltaMs: number) => new Date(base - deltaMs).toISOString();
+    await writeHookEvents(cache, [
+      JSON.stringify({ v: 1, ts: iso(30 * 60_000), session: "s-recent", repo: "r", kind: "pivot", slugs: ["a"] }),
+      JSON.stringify({ v: 1, ts: iso(3 * 60 * 60_000), session: "s-old", repo: "r", kind: "pivot", slugs: ["b"] }),
+    ]);
+    const wide = runStatsHook(["--json"], cache);
+    expect(JSON.parse(wide.stdout).byKind.pivot.fired).toBe(2);
+    const narrow = runStatsHook(["--since", "1h", "--json"], cache);
+    expect(JSON.parse(narrow.stdout).byKind.pivot.fired).toBe(1);
+  });
+
+  // covers: SC-75
+  test("an invalid --since value exits 1 with the usage line on stderr", () => {
+    const res = runStatsHook(["--since", "x"], cache);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("usage: qmemd hook stats [--since <N>d|<N>h|<N>w] [--json]");
+    expect(res.stdout.trim()).toBe("");
+  });
+
+  // covers: SC-75
+  test("an unrecognized option exits 1 with the same usage line, never blocking silently", () => {
+    const res = runStatsHook(["--bogus"], cache);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("usage: qmemd hook stats [--since <N>d|<N>h|<N>w] [--json]");
+  });
+
+  // covers: SC-76
+  test("a missing event log exits 0 with all-zero rows and no skipped-lines footer", () => {
+    const res = runStatsHook([], cache);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("pivot fired 0 matched 0 used 0 acted 0");
+    expect(res.stdout).toContain("overlap fired 0 matched 0 used 0 acted 0");
+    expect(res.stdout).toContain("probe fired 0 matched 0 used 0 acted 0");
+    expect(res.stdout).not.toContain("unparsable lines skipped");
   });
 });
 
