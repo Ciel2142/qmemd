@@ -16,9 +16,10 @@ import { cleanEnv } from "./support/env.js";
 const CLI = resolve(__dirname, "..", "src", "cli", "qmemd.ts");
 const TSX = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
 
-function runCli(args: string[], root: string) {
+function runCli(args: string[], root: string, cwd?: string) {
   return spawnSync(TSX, [CLI, ...args], {
     encoding: "utf-8",
+    cwd,
     env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite") }),
   });
 }
@@ -474,13 +475,73 @@ describe("CLI remember --replace inherits metadata (q65)", () => {
     expect(first.status).toBe(0);
     const upd = runCli(["remember", "In the diadoc repo the remote aton is gitlab", "--replace", "ovoretype", "--type", "project"], root);
     expect(upd.status).toBe(0);
-    expect(upd.stdout).toContain("(project)");                                  // reported type follows the request
+    expect(upd.stdout).toContain("(project ⊥ diadoc)");                        // type follows request; scope inherited (q65)
     expect(existsSync(join(root, "project", "ovoretype.md"))).toBe(true);
     expect(existsSync(join(root, "feedback", "ovoretype.md"))).toBe(false);     // no unreachable shadow copy
     const listed = runCli(["list", "--json"], root);
     const entry = (JSON.parse(listed.stdout) as { slug: string; type: string; project: string }[]).find(e => e.slug === "ovoretype");
     expect(entry!.type).toBe("project");
     expect(entry!.project).toBe("diadoc"); // q65 inherit survives the move
+  });
+});
+
+describe("CLI remember default write scope from type and cwd (qmemd-due)", () => {
+  let parent: string, root: string, repoA: string, repoB: string;
+  beforeEach(async () => {
+    parent = await mkdtemp(join(tmpdir(), "qmemd-scopecli-"));
+    root = join(parent, "mem");
+    await mkdir(root, { recursive: true });
+    repoA = join(parent, "repo-a");
+    repoB = join(parent, "repo-b");
+    await mkdir(repoA, { recursive: true });
+    await mkdir(repoB, { recursive: true });
+  });
+  afterEach(async () => { await rm(parent, { recursive: true, force: true }); });
+
+  // covers: SC-27
+  test("no flags defaults project to the cwd basename", async () => {
+    const res = runCli(["remember", "Scoped default fact one", "--as", "scopeone"], root, repoA);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("(reference ⊥ repo-a)");
+    expect(readFileSync(join(root, "reference", "scopeone.md"), "utf-8")).toContain("project: repo-a");
+  });
+
+  // covers: SC-27
+  test("--type user defaults project to global regardless of cwd", async () => {
+    const res = runCli(["remember", "Scoped default fact two", "--type", "user", "--as", "scopetwo"], root, repoA);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("(user ⊥ global)");
+    expect(readFileSync(join(root, "user", "scopetwo.md"), "utf-8")).toContain("project: global");
+  });
+
+  // covers: SC-27
+  test("--project global overrides the cwd default", async () => {
+    const res = runCli(["remember", "Scoped default fact three", "--project", "global", "--as", "scopethree"], root, repoA);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("(reference ⊥ global)");
+  });
+
+  // covers: SC-27
+  test("--project \"  \" (blank) behaves as absent, falling back to cwd", async () => {
+    const res = runCli(["remember", "Scoped default fact four", "--project", "  ", "--as", "scopefour"], root, repoA);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("(reference ⊥ repo-a)");
+  });
+
+  // covers: SC-28
+  test("--replace from a different cwd keeps the fact's stored scope", async () => {
+    runCli(["remember", "Original scoped fact five", "--as", "scopefive"], root, repoA);
+    const upd = runCli(["remember", "Updated scoped fact five", "--replace", "scopefive"], root, repoB);
+    expect(upd.status).toBe(0);
+    expect(upd.stdout).toContain("(reference ⊥ repo-a)");
+  });
+
+  // covers: SC-28
+  test("--replace --project repo-b moves the fact to the given scope", async () => {
+    runCli(["remember", "Original scoped fact six", "--as", "scopesix"], root, repoA);
+    const upd = runCli(["remember", "Updated scoped fact six", "--replace", "scopesix", "--project", "repo-b"], root, repoB);
+    expect(upd.status).toBe(0);
+    expect(upd.stdout).toContain("(reference ⊥ repo-b)");
   });
 });
 

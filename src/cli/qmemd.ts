@@ -7,6 +7,7 @@ import type { MemoryType, Platform, RecallResult, RecallHit, MergePlan, StaleRep
 import { tryDaemonRecall, daemonPort } from "../client.js";
 import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capability.js";
 import { runBeacon, runWriteBeacon } from "../beacon.js";
+import { defaultProjectFor, isBlankProject } from "../scope.js";
 import { gitPullFfOnly, sessionSyncWarning } from "../git.js";
 import { memoryRoot, cacheDir, daemonPaths, systemdUserDir, qmemdConfigDir, launchAgentsDir, macLogsDir } from "../paths.js";
 import { readOrCreateDaemonToken } from "../token.js";
@@ -272,6 +273,14 @@ async function main() {
         process.exit(1);
       }
       const type = requireValidType(values.type); // reject before opening the store (qmemd-jzz)
+      // Blank (absent or whitespace-only) --project defaults per type+cwd (qmemd-due). --replace
+      // is an in-place update, so a blank there passes undefined and the engine keeps the fact's
+      // stored scope; every other write (including --force/--as over an existing slug) takes the
+      // caller's cwd-derived scope, since the caller issues those as new writes now (decision D3).
+      const projectFlag = isBlankProject(values.project) ? undefined : values.project;
+      const project = values.replace
+        ? projectFlag
+        : projectFlag ?? defaultProjectFor(type ?? "reference", process.cwd());
       const store = await openMemoryStore();
       try {
         const res = await remember(store, root, {
@@ -283,7 +292,7 @@ async function main() {
           // Pass undefined (not false) when --pin is absent so a --replace inherits the
           // existing fact's pin instead of silently unpinning it (qmemd-q65). parseArgs
           // yields true when present, undefined when absent — never false.
-          pinned: values.pin, project: values.project, source: values.source,
+          pinned: values.pin, project, source: values.source,
           as: values.as, replace: values.replace, force: !!values.force,
           platforms: parsePlatformsCsv(values.platforms),
           supersedes: values.supersedes,
@@ -311,7 +320,7 @@ async function main() {
           }
         }
         else {
-          console.log(`${g}✓${r} remembered '${res.slug}' (${res.type}) → ${res.path}`);
+          console.log(`${g}✓${r} remembered '${res.slug}' (${res.type} ⊥ ${res.project}) → ${res.path}`);
           if (res.supersededSlug) console.log(`  superseded '${res.supersededSlug}' — hidden from recall (still on disk + git)`);
           if (res.conflictsWith) console.log(`  ${y}conflicts_with '${res.conflictsWith}'${r} recorded — two contradictory facts now coexist; review them`);
           if (res.supersedeWarning) console.error(`${y}warning:${r} ${res.supersedeWarning}`);
