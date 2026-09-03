@@ -2698,11 +2698,10 @@ describe("remember requires project for a new fact (SC-24/SC-25)", () => {
     const tmp = await mkt(join(tmpdir(), "qmemd-sc24-"));
     try {
       for (const project of [undefined, "", "  "]) {
-        await expect(remember(store, tmp, { fact: "Needs a project to land somewhere", type: "project", project }))
-          .rejects.toThrow('project is required for a new fact; pass a repo name or "global"');
+        const p = remember(store, tmp, { fact: "Needs a project to land somewhere", type: "project", project });
+        await expect(p).rejects.toThrow('project is required for a new fact; pass a repo name or "global"');
+        await expect(p).rejects.toBeInstanceOf(ClientError);
       }
-      await expect(remember(store, tmp, { fact: "Needs a project to land somewhere", type: "project", project: "" }))
-        .rejects.toBeInstanceOf(ClientError);
       expect(existsSync(join(tmp, "project"))).toBe(false);
       expect(calls).toEqual([]);
     } finally {
@@ -2719,8 +2718,10 @@ describe("remember requires project for a new fact (SC-24/SC-25)", () => {
       const seeded = await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo", type: "project", project: "omnimailcore" });
       expect(seeded.wrote).toBe(true);
 
-      await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo", type: "project", replace: seeded.slug });
-      expect(getFact(tmp, seeded.slug)!.frontmatter.project).toBe("omnimailcore");
+      for (const project of [undefined, "", "  "]) {
+        await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo", type: "project", replace: seeded.slug, project });
+        expect(getFact(tmp, seeded.slug)!.frontmatter.project).toBe("omnimailcore");
+      }
 
       await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo", type: "project", replace: seeded.slug, project: "global" });
       expect(getFact(tmp, seeded.slug)!.frontmatter.project).toBe("global");

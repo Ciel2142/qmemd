@@ -1650,14 +1650,15 @@ export async function remember(
     throw new ClientError(`no fact named '${slug}' to replace`);
   }
 
-  // Every shipped surface now resolves or rejects project before calling remember()
-  // (qmemd-due wave); this is the last-resort guard, so it must precede dedup and every
-  // write (SC-24). A blank project on replace/force over an existing slug keeps the
-  // fact's stored scope rather than re-homing it to "global" (SC-25); a blank project on
-  // a genuinely new fact has nothing to inherit and is a caller error.
-  const project = !isBlankProject(input.project) ? input.project as string
-    : existing ? existing.frontmatter.project
-    : (() => { throw new ClientError('project is required for a new fact; pass a repo name or "global"'); })();
+  // CLI/stdio MCP resolve project before calling remember() (qmemd-due wave); REST passes
+  // body.project verbatim and relies on this guard to reject a missing one. Must precede
+  // dedup and every write (SC-24). Blank + existing (replace/force over a live slug)
+  // inherits the stored scope instead of re-homing it (SC-25); blank + no existing has
+  // nothing to inherit and is a caller error.
+  if (isBlankProject(input.project) && !existing) {
+    throw new ClientError('project is required for a new fact; pass a repo name or "global"');
+  }
+  const project = isBlankProject(input.project) ? existing!.frontmatter.project : input.project!;
 
   // Supersede target must exist — mirroring the replace no-fabricate guard (qmemd-acm):
   // a mistyped target would otherwise create the new fact with a dangling forward link.
