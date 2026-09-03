@@ -46,6 +46,7 @@
     "test": "vitest run --reporter=verbose",
     "qmemd": "tsx src/cli/qmemd.ts",
     "bench:recall": "QMEMD_EMBED_TIMEOUT_MS=120000 tsx scripts/recall-bench.ts",
+    "calibrate:overlap": "tsx scripts/overlap-calibrate.ts",
     "prepublishOnly": "npm run build && node scripts/smoke-clean-room.cjs"
   },
   "dependencies": {

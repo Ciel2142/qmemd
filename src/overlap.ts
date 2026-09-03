@@ -119,10 +119,17 @@ export interface OverlapHit {
   tokens: string[];
 }
 
-export function matchCommand(tokens: string[], map: TokenMap, exclude: ReadonlySet<string>): OverlapHit[] {
+export function matchCommand(
+  tokens: string[],
+  map: TokenMap,
+  exclude: ReadonlySet<string>,
+  opts?: { dfFraction?: number; minScore?: number },
+): OverlapHit[] {
   const factCount = Object.keys(map.facts).length;
   if (tokens.length === 0 || factCount === 0) return [];
-  const dfCap = Math.max(3, Math.ceil(OVERLAP_DF_FRACTION * factCount));
+  const dfFraction = opts?.dfFraction ?? OVERLAP_DF_FRACTION;
+  const minScore = opts?.minScore ?? OVERLAP_MIN_SCORE;
+  const dfCap = Math.max(3, Math.ceil(dfFraction * factCount));
   const perSlugTokens = new Map<string, Set<string>>();
   for (const t of new Set(tokens)) {
     if (RECALL_BOOST_STOPLIST.has(t)) continue;
@@ -139,7 +146,7 @@ export function matchCommand(tokens: string[], map: TokenMap, exclude: ReadonlyS
   for (const [slug, tokSet] of perSlugTokens) {
     const score = tokSet.size;
     const hasUniqueToken = [...tokSet].some(t => map.tokens[t].length === 1);
-    if (score >= OVERLAP_MIN_SCORE || hasUniqueToken) hits.push({ slug, score, tokens: [...tokSet] });
+    if (score >= minScore || hasUniqueToken) hits.push({ slug, score, tokens: [...tokSet] });
   }
   hits.sort((a, b) => b.score - a.score || a.slug.localeCompare(b.slug));
   return hits.slice(0, OVERLAP_MAX_HITS);
