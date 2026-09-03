@@ -9,7 +9,7 @@ import { gitPullFfOnly, sessionSyncWarning, type GitDeps } from "../git.js";
 import { rootHash } from "../client.js";
 import { DAEMON_TOKEN_HEADER, readOrCreateDaemonToken, tokenMatches } from "../token.js";
 import { shouldAutoResolve, autoRecallMode, resolveExplicitMode, type RecallMode } from "../capability.js";
-import { defaultProjectFor, isBlankProject } from "../scope.js";
+import { isBlankProject, resolveWriteScope } from "../scope.js";
 import { basename } from "node:path";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -184,12 +184,8 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
   }, async ({ fact, type, tags, project, pin, source, as: asSlug, replace, supersedes, force, platforms, ttl, reviewBy }) => {
     try {
       const store = await getStore();
-      // Blank (absent or whitespace-only) project defaults per type+cwd (qmemd-due), mirroring
-      // the CLI. `replace` is an in-place update, so a blank there stays undefined and the engine
-      // keeps the fact's stored scope. Under "required" the schema guarantees a non-blank value,
-      // so the default never fires.
-      const explicitProject = isBlankProject(project) ? undefined : project;
-      const writeScope = replace ? explicitProject : explicitProject ?? defaultProjectFor(type ?? "reference", opts.cwd ?? process.cwd());
+      // Under "required" the schema guarantees a non-blank project, so no default is ever substituted.
+      const writeScope = resolveWriteScope({ project, type, replace: !!replace, cwd: opts.cwd ?? process.cwd() });
       const res = await remember(store, root, { fact, type, tags, project: writeScope, pinned: pin, source, as: asSlug, replace, supersedes, force, platforms, ttl, reviewBy });
       let text: string;
       if (res.wrote) {

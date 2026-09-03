@@ -7,7 +7,7 @@ import type { MemoryType, Platform, RecallResult, RecallHit, MergePlan, StaleRep
 import { tryDaemonRecall, daemonPort } from "../client.js";
 import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capability.js";
 import { runBeacon, runWriteBeacon } from "../beacon.js";
-import { defaultProjectFor, isBlankProject } from "../scope.js";
+import { resolveWriteScope } from "../scope.js";
 import { gitPullFfOnly, sessionSyncWarning } from "../git.js";
 import { memoryRoot, cacheDir, daemonPaths, systemdUserDir, qmemdConfigDir, launchAgentsDir, macLogsDir } from "../paths.js";
 import { readOrCreateDaemonToken } from "../token.js";
@@ -273,14 +273,9 @@ async function main() {
         process.exit(1);
       }
       const type = requireValidType(values.type); // reject before opening the store (qmemd-jzz)
-      // Blank (absent or whitespace-only) --project defaults per type+cwd (qmemd-due). --replace
-      // is an in-place update, so a blank there passes undefined and the engine keeps the fact's
-      // stored scope; every other write (including --force/--as over an existing slug) takes the
-      // caller's cwd-derived scope, since the caller issues those as new writes now (decision D3).
-      const projectFlag = isBlankProject(values.project) ? undefined : values.project;
-      const project = values.replace
-        ? projectFlag
-        : projectFlag ?? defaultProjectFor(type ?? "reference", process.cwd());
+      // --force/--as over an existing slug still takes the caller's cwd-derived scope: those are
+      // issued as new writes, not in-place updates (decision D3).
+      const project = resolveWriteScope({ project: values.project, type, replace: !!values.replace, cwd: process.cwd() });
       const store = await openMemoryStore();
       try {
         const res = await remember(store, root, {

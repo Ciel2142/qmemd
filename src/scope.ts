@@ -12,3 +12,13 @@ export function defaultProjectFor(type: MemoryType, cwd: string): string {
 export function isBlankProject(project: string | undefined): boolean {
   return project === undefined || project.trim() === "";
 }
+
+/** The write scope every surface passes to `remember()` (qmemd-due). A blank (absent or
+ *  whitespace-only) project defaults per type+cwd — except on `replace`, which is an in-place
+ *  update: undefined there lets the engine keep the fact's stored scope rather than silently
+ *  re-homing it to the caller's repo (decision D1). */
+export function resolveWriteScope(input: { project?: string; type?: MemoryType; replace?: boolean; cwd: string }): string | undefined {
+  const explicit = isBlankProject(input.project) ? undefined : input.project;
+  if (input.replace) return explicit;
+  return explicit ?? defaultProjectFor(input.type ?? "reference", input.cwd);
+}

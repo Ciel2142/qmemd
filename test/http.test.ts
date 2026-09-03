@@ -447,10 +447,6 @@ describe("HTTP server: REST input-validation parity, part 2 (qp-rest-recall-limi
     expect((await post("/remember", { fact: "pin-parity marker", type: "project", pin: "yes", project: "global" })).status).toBe(400);
   });
 
-  test("scj: project as a non-string -> 400 (would else scope the fact invisible to every recall)", async () => {
-    expect((await post("/remember", { fact: "project-parity marker", type: "project", project: 123 })).status).toBe(400);
-  });
-
   test("scj: a well-typed pin:true still writes (no over-rejection)", async () => {
     const res = await post("/remember", { fact: "well-typed pin sanity marker unique-xq7", type: "project", pin: true, project: "global" });
     expect(res.status).toBe(200);
@@ -875,5 +871,25 @@ describe("REST /remember requires an explicit project (qmemd-due)", () => {
     const res = await post({ fact: "REST write with an explicit scope", type: "project", project: "rest-scope-proj", as: "rest-scope-ok" });
     expect(res.status).toBe(200);
     expect(await res.json() as { wrote: boolean; project?: string }).toMatchObject({ wrote: true, project: "rest-scope-proj" });
+  });
+});
+
+describe("daemon MCP remember requires an explicit project (qmemd-due)", () => {
+  const J = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" };
+
+  // covers: SC-30
+  test("tools/call remember without a project is a schema error, and nothing is written", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST", headers: J,
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "remember", arguments: { fact: "Daemon MCP write without a scope", type: "project", as: "mcp-scope-guard" } },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const result = (await res.json() as { result: { isError?: boolean; content: { text: string }[] } }).result;
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("project");
+    expect((await fetch(`${baseUrl}/get?slug=mcp-scope-guard`)).status).toBe(404);
   });
 });

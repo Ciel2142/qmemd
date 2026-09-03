@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { defaultProjectFor, isBlankProject } from "../src/scope.js";
+import { defaultProjectFor, isBlankProject, resolveWriteScope } from "../src/scope.js";
 
 describe("defaultProjectFor", () => {
   // covers: SC-26
@@ -32,5 +32,31 @@ describe("isBlankProject", () => {
   // covers: SC-26
   test("false for a non-blank project", () => {
     expect(isBlankProject("x")).toBe(false);
+  });
+});
+
+describe("resolveWriteScope", () => {
+  // covers: SC-27
+  test("a non-replace write takes the explicit project, else the type+cwd default", () => {
+    expect(resolveWriteScope({ project: "chosen", type: "project", cwd: "/x/repo-a" })).toBe("chosen");
+    expect(resolveWriteScope({ type: "project", cwd: "/x/repo-a" })).toBe("repo-a");
+    expect(resolveWriteScope({ type: "user", cwd: "/x/repo-a" })).toBe("global");
+  });
+
+  // covers: SC-27
+  test("an untyped write defaults as a reference fact, scoped to the cwd", () => {
+    expect(resolveWriteScope({ cwd: "/x/repo-a" })).toBe("repo-a");
+  });
+
+  // covers: SC-27
+  test("a replace passes an explicit project through but never substitutes a default", () => {
+    expect(resolveWriteScope({ project: "chosen", type: "project", replace: true, cwd: "/x/repo-a" })).toBe("chosen");
+    expect(resolveWriteScope({ type: "project", replace: true, cwd: "/x/repo-a" })).toBeUndefined();
+  });
+
+  // covers: SC-29
+  test("a blank project is treated as missing on both paths", () => {
+    expect(resolveWriteScope({ project: "   ", type: "project", cwd: "/x/repo-a" })).toBe("repo-a");
+    expect(resolveWriteScope({ project: "", type: "project", replace: true, cwd: "/x/repo-a" })).toBeUndefined();
   });
 });
