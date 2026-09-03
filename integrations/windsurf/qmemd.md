@@ -12,7 +12,7 @@ description: qmemd durable-memory trigger policy — when to remember and recall
 
 Durable knowledge lives in **qmemd memory** (knowledge lane); work/issue state lives in **br (beads_rust)** (work lane).
 
-**Remember** (`remember` MCP tool, or `qmemd remember "<fact>" --type <type>`) when: the user states a durable preference (`type: user`), gives guidance/correction on how to work (`type: feedback`), I discover a non-obvious gotcha or a repo/system fact not in code/git (`type: project`), or hit a reference worth keeping — URL/dashboard/discovery (`type: reference`).
+**Remember** (`remember` MCP tool, or `qmemd remember "<fact>" --type <type>`) when: the user states a durable preference (`type: user`), gives guidance/correction on how to work (`type: feedback`), I discover a non-obvious gotcha or a repo/system fact not in code/git (`type: project`), or hit a reference worth keeping — URL/dashboard/discovery (`type: reference`). Facts scope to the current repo by default (`project`/`reference` → cwd basename; `user`/`feedback` → `global`); pass `project: global` (CLI `--project global`) for something true in every repo. `--replace` keeps the fact's stored scope.
 
 **Recall** (`recall` MCP tool, or `qmemd recall "<topic>"`) — **pull-only** unless you wired the optional `pre_user_prompt` hook (qmemd's `integrations/windsurf/hooks.json.example`), which injects memory **before each prompt** (Windsurf has no session-start event, so no one-shot snapshot). Either way, pull explicitly at these concrete moments:
 - **Before diagnosing any build/env/tooling error** — the cause and fix may already be documented.

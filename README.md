@@ -220,6 +220,10 @@ A freshly remembered fact is lex-searchable immediately. Vector (semantic) recal
 
 `qmemd mcp` is a **stdio** MCP server by default. It exposes six tools: `remember`, `recall`, `forget`, `reviewed`, `get`, and `list`, with the same semantics as the CLI verbs (the MCP `get` tool ↔ the CLI `show` verb; `remember` takes the same `supersedes`/`platforms`/`ttl`/`reviewBy` parameters). `recall` carries a truncated body preview per hit; `get` returns one fact's full body by slug; `list` browses by type/tag/project; `reviewed` resets a fact's staleness clock (forward-sets `review_by`, accepting the same `ttl`/`reviewBy`).
 
+Over stdio, `remember`'s `project` is optional and scopes to the current repo when omitted (`project`/`reference` → cwd basename; `user`/`feedback` → `global`); pass `project: "global"` for something true in every repo. `replace` keeps the fact's stored scope rather than re-homing it. The shared HTTP daemon (below) has no cwd to fall back to, so it requires `project` explicitly.
+
+**Breaking changes:** the daemon `remember` tool (`--http`) now requires `project` — a call that omitted it used to default to `global` and now fails validation. Pass the repo basename or `global` explicitly.
+
 Register it under `mcpServers` in your MCP client config (e.g. `~/.claude.json`), using any server name (here `qmemd`):
 
 ```json
@@ -386,10 +390,18 @@ REST endpoints (localhost, JSON):
 | Method | Path        | Body / query                                                       |
 |--------|-------------|--------------------------------------------------------------------|
 | POST   | `/recall`   | `{query, lexOnly?, minScore?, type?, limit?, full?, skim?, allPlatforms?, platform?}` or `{session:true, project?}` |
-| POST   | `/remember` | `{fact, type?, tags?, project?, pin?, source?, as?, replace?, supersedes?, force?, platforms?, ttl?, reviewBy?}` |
+| POST   | `/remember` | `{fact, project, type?, tags?, pin?, source?, as?, replace?, supersedes?, force?, platforms?, ttl?, reviewBy?}` |
 | POST   | `/forget`   | `{slug}`                                                            |
 | GET    | `/list`     | `?type=&tag=&project=&platform=`                                    |
 | GET    | `/get`      | `?slug=`                                                            |
+
+`POST /remember` requires `project` — there is no cwd on the server side to default
+it from, so a request that omits it gets `400 {"error":"Missing required field:
+project"}` rather than a silently-scoped write.
+
+**Breaking changes:** REST `POST /remember` now requires `project` — a request that
+omitted it used to default to `global` and now fails with a `400`. Pass the repo
+basename or `global` explicitly.
 
 The server binds `localhost` only with no auth — same single-user trust boundary
 as the CLI. For a durable daemon that restarts on crash and survives reboot, run

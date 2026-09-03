@@ -2,7 +2,7 @@
 
 Durable knowledge lives in **qmemd memory** (knowledge lane); work/issue state lives in **br (beads_rust)** (work lane). Built-in Claude Code auto-memory is OFF (`autoMemoryEnabled: false`) — use qmemd, not `~/.claude/projects/*/memory/`.
 
-**Remember** (`remember` MCP tool, or `qmemd remember "<fact>" --type <type>`) when: the user states a durable preference (`type: user`), gives guidance/correction on how to work (`type: feedback`), I discover a non-obvious gotcha or a repo/system fact not in code/git (`type: project`), or hit a reference worth keeping — URL/dashboard/discovery (`type: reference`).
+**Remember** (`remember` MCP tool, or `qmemd remember "<fact>" --type <type>`) when: the user states a durable preference (`type: user`), gives guidance/correction on how to work (`type: feedback`), I discover a non-obvious gotcha or a repo/system fact not in code/git (`type: project`), or hit a reference worth keeping — URL/dashboard/discovery (`type: reference`). Facts scope to the current repo by default (`project`/`reference` → cwd basename; `user`/`feedback` → `global`); pass `project: global` (CLI `--project global`) for something true in every repo. `--replace` keeps the fact's stored scope.
 
 **Recall** (`recall` MCP tool, or `qmemd recall "<topic>"`) — do **not** assume the session-start snapshot already handed you the relevant facts; it is **partial** (only **pinned** project/reference facts are injected). Pull explicitly at these concrete moments:
 - **Before diagnosing any build/env/tooling error** — the cause and fix may already be documented.
