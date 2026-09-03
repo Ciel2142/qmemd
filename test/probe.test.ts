@@ -190,6 +190,13 @@ describe("runProbe", () => {
     expect(spy.closes).toBe(1);
   });
 
+  // covers: INV-4
+  test("a throw in the post-search accounting resolves null instead of rejecting", async () => {
+    const { deps, spy } = harness(root, cache, okRecall, { now: () => { throw new Error("clock gone"); } });
+    await expect(runProbe(evt(), deps)).resolves.toBeNull();
+    expect(spy.closes).toBe(1);
+  });
+
   // covers: SC-70
   test("a probe with hits logs slugs and the query; a probe without hits logs the query alone", async () => {
     const withHits = harness(root, cache, async () => result([hit("a")]));
