@@ -40,7 +40,7 @@ describe.skipIf(!gitAvailable)("remember/forget land real git commits (k9q)", ()
   });
 
   test("remember commits the fact file with the 'remember: <slug>' message", async () => {
-    const res = await remember(store, root, { fact: "Use Bun not Node", type: "user" });
+    const res = await remember(store, root, { fact: "Use Bun not Node", type: "user", project: "global" });
     expect(res.wrote).toBe(true);
     expect(res.synced).toBe(true); // committed; push is a benign no-upstream no-op
 
@@ -53,7 +53,7 @@ describe.skipIf(!gitAvailable)("remember/forget land real git commits (k9q)", ()
   });
 
   test("forget commits the deletion with the 'forget: <slug>' message", async () => {
-    await remember(store, root, { fact: "Use Bun not Node", type: "user" });
+    await remember(store, root, { fact: "Use Bun not Node", type: "user", project: "global" });
     const res = await forget(store, root, "use-bun-not-node");
     expect(res.removed).toBe(true);
 
@@ -70,7 +70,7 @@ describe.skipIf(!gitAvailable)("remember/forget land real git commits (k9q)", ()
     } as unknown as QMDStore;
 
     // force skips the dedup tiers, so the broken store's search surface is never touched.
-    const res = await remember(broken, root, { fact: "Survives index failure", type: "project", force: true });
+    const res = await remember(broken, root, { fact: "Survives index failure", type: "project", force: true, project: "global" });
 
     expect(res.wrote).toBe(true);
     expect(res.indexed).toBe(false); // failure surfaced, not hidden
@@ -84,7 +84,7 @@ describe.skipIf(!gitAvailable)("remember/forget land real git commits (k9q)", ()
   // The engine-level test asserts the pathspecs handed to a fake runner; only real git
   // proves the commit actually records the move and leaves a clean tree.
   test("retype records the move as one commit: old path deleted, new path added", async () => {
-    await remember(store, root, { fact: "The remote aton is gitlab", type: "feedback", as: "aton-remote" });
+    await remember(store, root, { fact: "The remote aton is gitlab", type: "feedback", as: "aton-remote", project: "global" });
     const res = await remember(store, root, { fact: "The remote aton is gitlab", replace: "aton-remote", type: "project" });
 
     expect(res.wrote).toBe(true);

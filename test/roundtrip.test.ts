@@ -27,8 +27,8 @@ describe("forget() + reindex round-trip (4lr)", () => {
     await mkdir(root, { recursive: true });
     await mkdir(join(parent, "idx"), { recursive: true });
     store = await openQmd({ dbPath: join(parent, "idx", "i.sqlite"), config: { collections: { memory: { path: root, pattern: "**/*.md" } } } });
-    await remember(store, root, { fact: "Redpanda broker runs on the lab pi", type: "project" });
-    await remember(store, root, { fact: "Grafana dashboards live on the k3s sandbox cluster", type: "reference" });
+    await remember(store, root, { fact: "Redpanda broker runs on the lab pi", type: "project", project: "global" });
+    await remember(store, root, { fact: "Grafana dashboards live on the k3s sandbox cluster", type: "reference", project: "global" });
   });
   afterEach(async () => {
     await store.close();

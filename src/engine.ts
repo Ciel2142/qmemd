@@ -5,6 +5,7 @@ import { MEMORY_COLLECTION } from "./store.js";
 import { gitCommit, gitPush, type GitDeps, type GitCommitResult, type GitPushResult } from "./git.js";
 import { type QMDStore, Maintenance } from "@tobilu/qmd";
 import type { MergeProposalCluster } from "./dedup.js"; // type-only — no runtime cycle
+import { isBlankProject } from "./scope.js"; // scope.ts's MemoryType import is type-only — no runtime cycle
 
 /**
  * A client-facing rejection: the caller can fix it by changing their input, and the
@@ -1649,6 +1650,15 @@ export async function remember(
     throw new ClientError(`no fact named '${slug}' to replace`);
   }
 
+  // Every shipped surface now resolves or rejects project before calling remember()
+  // (qmemd-due wave); this is the last-resort guard, so it must precede dedup and every
+  // write (SC-24). A blank project on replace/force over an existing slug keeps the
+  // fact's stored scope rather than re-homing it to "global" (SC-25); a blank project on
+  // a genuinely new fact has nothing to inherit and is a caller error.
+  const project = !isBlankProject(input.project) ? input.project as string
+    : existing ? existing.frontmatter.project
+    : (() => { throw new ClientError('project is required for a new fact; pass a repo name or "global"'); })();
+
   // Supersede target must exist — mirroring the replace no-fabricate guard (qmemd-acm):
   // a mistyped target would otherwise create the new fact with a dangling forward link.
   // Path-free message, surfaced verbatim by MCP (sanitizeToolError) / mapped to 400 by HTTP.
@@ -1841,7 +1851,7 @@ export async function remember(
     description: input.description ?? firstLine(input.fact),
     type,
     tags: input.tags ?? existing?.frontmatter.tags ?? [],
-    project: input.project ?? existing?.frontmatter.project ?? "global",
+    project,
     platforms: platforms ?? existing?.frontmatter.platforms ?? [],
     created: existing?.frontmatter.created ?? today(),
     updated: new Date().toISOString(),

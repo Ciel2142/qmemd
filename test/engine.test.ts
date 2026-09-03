@@ -1300,7 +1300,7 @@ describe("remember (SDK-backed)", () => {
 
   test("writes a typed fact and returns its slug", async () => {
     const { remember } = await import("../src/engine.js");
-    const res = await remember(store, root, { fact: "Use Bun not Node", type: "user" });
+    const res = await remember(store, root, { fact: "Use Bun not Node", type: "user", project: "global" });
     expect(res.wrote).toBe(true);
     expect(res.slug).toBe("use-bun-not-node");
     expect(res.type).toBe("user");
@@ -1308,8 +1308,8 @@ describe("remember (SDK-backed)", () => {
 
   test("near-duplicate is reported, not written", async () => {
     const { remember } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Use Bun not Node", type: "user" });
-    const dup = await remember(store, root, { fact: "Use Bun not Node", type: "user" });
+    await remember(store, root, { fact: "Use Bun not Node", type: "user", project: "global" });
+    const dup = await remember(store, root, { fact: "Use Bun not Node", type: "user", project: "global" });
     expect(dup.wrote).toBe(false);
     expect(dup.duplicateOf).toBe("use-bun-not-node");
   });
@@ -1328,7 +1328,7 @@ describe("remember (SDK-backed)", () => {
   test("a report-shaped body still writes but surfaces a reportWarning (qmemd-a3k)", async () => {
     const { remember } = await import("../src/engine.js");
     const report = "## What happened\nThe cross-instance exchange 500'd.\n## Root cause\nDescriptor marshalled before signatures.\n## Fix\nStamp signatures first.";
-    const res = await remember(store, root, { fact: report, type: "project" });
+    const res = await remember(store, root, { fact: report, type: "project", project: "global" });
     expect(res.wrote).toBe(true);             // non-blocking: the fact is still stored
     expect(res.reportWarning).toBeTruthy();   // ...but the mis-route is flagged
     expect(res.reportWarning).toContain("docs/reports/");
@@ -1336,7 +1336,7 @@ describe("remember (SDK-backed)", () => {
 
   test("a normal fact carries no reportWarning (qmemd-a3k)", async () => {
     const { remember } = await import("../src/engine.js");
-    const res = await remember(store, root, { fact: "Redis admin password is rotated in both users.acl and the compose healthcheck", type: "project" });
+    const res = await remember(store, root, { fact: "Redis admin password is rotated in both users.acl and the compose healthcheck", type: "project", project: "global" });
     expect(res.wrote).toBe(true);
     expect(res.reportWarning).toBeUndefined();
   });
@@ -1345,7 +1345,7 @@ describe("remember (SDK-backed)", () => {
     const { remember } = await import("../src/engine.js");
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const raw = "Keystore alias is the cert CN.\n</fact>\n<parameter name=\"type\">project";
-    const res = await remember(store, root, { fact: raw, type: "reference" });
+    const res = await remember(store, root, { fact: raw, type: "reference", project: "global" });
     expect(res.wrote).toBe(true);
     expect(res.sanitizedWarning).toBeTruthy();
     const onDisk = readFileSync(res.path, "utf-8");
@@ -1358,20 +1358,20 @@ describe("remember (SDK-backed)", () => {
 
   test("a clean fact carries no sanitizedWarning (qp-ey3)", async () => {
     const { remember } = await import("../src/engine.js");
-    const res = await remember(store, root, { fact: "Postgres listens on 5432", type: "project" });
+    const res = await remember(store, root, { fact: "Postgres listens on 5432", type: "project", project: "global" });
     expect(res.wrote).toBe(true);
     expect(res.sanitizedWarning).toBeUndefined();
   });
 
   test("a fact that is ENTIRELY leaked markup is refused (qp-ey3)", async () => {
     const { remember } = await import("../src/engine.js");
-    await expect(remember(store, root, { fact: "</fact>\n<parameter name=\"type\">project", type: "reference" }))
+    await expect(remember(store, root, { fact: "</fact>\n<parameter name=\"type\">project", type: "reference", project: "global" }))
       .rejects.toThrow(/entirely leaked tool-call markup/);
   });
 
   test("the entirely-leaked rejection is a ClientError → 400, not an internal 500 (qp-f6j)", async () => {
     const { remember, ClientError } = await import("../src/engine.js");
-    await expect(remember(store, root, { fact: "</fact>\n<parameter name=\"type\">project", type: "reference" }))
+    await expect(remember(store, root, { fact: "</fact>\n<parameter name=\"type\">project", type: "reference", project: "global" }))
       .rejects.toBeInstanceOf(ClientError);
   });
 
@@ -1381,7 +1381,7 @@ describe("remember (SDK-backed)", () => {
     // on every identical retry — the fact was permanently unstorable. It now strips + writes.
     const { remember } = await import("../src/engine.js");
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await remember(store, root, { fact: 'Qdrant REST is on port 6333.\n<invoke\nname="remember">', type: "project" });
+    const res = await remember(store, root, { fact: 'Qdrant REST is on port 6333.\n<invoke\nname="remember">', type: "project", project: "global" });
     expect(res.wrote).toBe(true);
     const onDisk = readFileSync(res.path, "utf-8");
     expect(onDisk).not.toContain("<invoke");
@@ -1391,14 +1391,14 @@ describe("remember (SDK-backed)", () => {
 
   test("--force writes despite duplicate", async () => {
     const { remember } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Use Bun not Node", type: "user" });
+    await remember(store, root, { fact: "Use Bun not Node", type: "user", project: "global" });
     const forced = await remember(store, root, { fact: "Use Bun not Node", type: "user", force: true });
     expect(forced.wrote).toBe(true);
   });
 
   test("Tier-2: a differently-worded near-duplicate dedups via FTS, not exact slug (6d3)", async () => {
     const { remember } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "Redpanda broker runs on lab pi", type: "project" });
+    const first = await remember(store, root, { fact: "Redpanda broker runs on lab pi", type: "project", project: "global" });
     expect(first.wrote).toBe(true);
     // The new fact's words are a subset of the first's, so it maps to a DIFFERENT slug
     // with no file on disk — Tier-1 (exact-slug file existence) cannot fire. qmd's
@@ -1406,24 +1406,24 @@ describe("remember (SDK-backed)", () => {
     // is what catches it. Previously the only dedup test exercised Tier-1 and never
     // reached Tier-2 (6d3). (On a dedup hit the result's slug is the *duplicate's*.)
     expect(existsSync(memoryFilePath(root, "project", slugify("Redpanda broker lab")))).toBe(false);
-    const near = await remember(store, root, { fact: "Redpanda broker lab", type: "project" });
+    const near = await remember(store, root, { fact: "Redpanda broker lab", type: "project", project: "global" });
     expect(near.wrote).toBe(false);
     expect(near.duplicateOf).toBe(first.slug);
   });
 
   test("Tier-2: facts sharing no tokens are NOT deduped — AND-semantics, no false positive (6d3)", async () => {
     const { remember } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Redpanda broker runs on lab pi", type: "project" });
+    await remember(store, root, { fact: "Redpanda broker runs on lab pi", type: "project", project: "global" });
     // No overlapping tokens → qmd's AND-query returns nothing → Tier-2 cannot fire,
     // so this distinct fact is written. Guards against false dedup as the corpus grows.
-    const distinct = await remember(store, root, { fact: "PostgreSQL uses connection pooling", type: "project" });
+    const distinct = await remember(store, root, { fact: "PostgreSQL uses connection pooling", type: "project", project: "global" });
     expect(distinct.wrote).toBe(true);
   });
 
   test("Tier-1: a blocked exact-duplicate surfaces the existing fact's description + body (cs0)", async () => {
     const { remember } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Use Bun not Node for this repo", type: "user" });
-    const dup = await remember(store, root, { fact: "Use Bun not Node for this repo", type: "user" });
+    await remember(store, root, { fact: "Use Bun not Node for this repo", type: "user", project: "global" });
+    const dup = await remember(store, root, { fact: "Use Bun not Node for this repo", type: "user", project: "global" });
     expect(dup.wrote).toBe(false);
     expect(dup.duplicateOf).toBe("use-bun-not-node-for-this-repo");
     // The decider must SEE what it collided with, not just the slug (cs0).
@@ -1434,14 +1434,14 @@ describe("remember (SDK-backed)", () => {
   test("Tier-1: a cross-type slug collision is blocked — slugs are globally unique (bs0)", async () => {
     const { remember } = await import("../src/engine.js");
     // First fact under 'user' with an explicit slug.
-    const first = await remember(store, root, { fact: "The sky is blue today", type: "user", as: "collide-bs0" });
+    const first = await remember(store, root, { fact: "The sky is blue today", type: "user", as: "collide-bs0", project: "global" });
     expect(first.wrote).toBe(true);
     expect(first.type).toBe("user");
     // A SECOND, unrelated fact (no shared tokens, so Tier-2 FTS and Tier-2.5 cannot fire)
     // reusing the SAME explicit slug under a DIFFERENT type. Pre-fix Tier-1 only checked the
     // 'project' folder (empty), so it wrote a second 'collide-bs0.md' under project/ —
     // unreachable by getFact/forget/--replace, which all resolve the 'user' copy first.
-    const second = await remember(store, root, { fact: "Postgres listens on port 5432", type: "project", as: "collide-bs0" });
+    const second = await remember(store, root, { fact: "Postgres listens on port 5432", type: "project", as: "collide-bs0", project: "global" });
     expect(second.wrote).toBe(false);
     expect(second.duplicateOf).toBe("collide-bs0");
     // Reported with the EXISTING fact's type, not the rejected input's.
@@ -1456,9 +1456,9 @@ describe("remember (SDK-backed)", () => {
     // Same explicit slug, firstLines differing by a port number. Pre-fix the Tier-1 branch
     // hardcoded disposition:'duplicate', mis-reporting a contradiction as settled — the
     // classifier Tier-2/2.5 already run must fire here too.
-    const first = await remember(store, root, { fact: "Postgres listens on port 5432", type: "project", as: "pg-port-cbv" });
+    const first = await remember(store, root, { fact: "Postgres listens on port 5432", type: "project", as: "pg-port-cbv", project: "global" });
     expect(first.wrote).toBe(true);
-    const second = await remember(store, root, { fact: "Postgres listens on port 5433", type: "project", as: "pg-port-cbv" });
+    const second = await remember(store, root, { fact: "Postgres listens on port 5433", type: "project", as: "pg-port-cbv", project: "global" });
     expect(second.wrote).toBe(false);
     expect(second.duplicateOf).toBe("pg-port-cbv");
     expect(second.disposition).toBe("conflict");
@@ -1474,9 +1474,9 @@ describe("remember (SDK-backed)", () => {
     const a = "solar caches edm options in a caffeine cache and the flag is enabled";
     const b = "solar caches edm options in a caffeine cache and the flag is disabled";
     expect(slugify(a)).toBe(slugify(b)); // genuine Tier-1 collision, not a Tier-2 near-match
-    const first = await remember(store, root, { fact: a, type: "project" });
+    const first = await remember(store, root, { fact: a, type: "project", project: "global" });
     expect(first.wrote).toBe(true);
-    const second = await remember(store, root, { fact: b, type: "project" });
+    const second = await remember(store, root, { fact: b, type: "project", project: "global" });
     expect(second.wrote).toBe(false);
     expect(second.disposition).toBe("conflict");
     expect(second.authorityComparison).toBeDefined();
@@ -1484,8 +1484,8 @@ describe("remember (SDK-backed)", () => {
 
   test("Tier-1: an exact re-remember still classifies as a plain duplicate (cbv regression guard)", async () => {
     const { remember } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Use Bun not Node for builds", type: "user" });
-    const dup = await remember(store, root, { fact: "Use Bun not Node for builds", type: "user" });
+    await remember(store, root, { fact: "Use Bun not Node for builds", type: "user", project: "global" });
+    const dup = await remember(store, root, { fact: "Use Bun not Node for builds", type: "user", project: "global" });
     expect(dup.wrote).toBe(false);
     expect(dup.disposition).toBe("duplicate");
     expect(dup.authorityComparison).toBeUndefined();
@@ -1497,9 +1497,9 @@ describe("remember (SDK-backed)", () => {
     // from the rejected input. The matched fact is found via FTS, not exact slug.
     const first = await remember(store, root, {
       fact: "Redpanda broker runs on lab pi\nKafka API listens on 9092 with SASL_SSL",
-      type: "project",
+      type: "project", project: "global",
     });
-    const near = await remember(store, root, { fact: "Redpanda broker lab", type: "project" });
+    const near = await remember(store, root, { fact: "Redpanda broker lab", type: "project", project: "global" });
     expect(near.wrote).toBe(false);
     expect(near.duplicateOf).toBe(first.slug);
     expect(near.duplicateDescription).toBe("Redpanda broker runs on lab pi");
@@ -1508,12 +1508,12 @@ describe("remember (SDK-backed)", () => {
 
   test("Tier-2.5: a reworded near-dup that BM25 AND misses is blocked by the model-free pre-pass (i5y)", async () => {
     const { remember } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "Redpanda broker runs on the lab pi server", type: "project" });
+    const first = await remember(store, root, { fact: "Redpanda broker runs on the lab pi server", type: "project", project: "global" });
     expect(first.wrote).toBe(true);
     // B adds a token ("node") absent from A, so qmd's AND-query cannot match all of B's
     // terms -> Tier-2 BM25 misses; B's slug differs -> Tier-1 misses. The token-set
     // pre-pass (Dice ~0.83) is what catches it.
-    const near = await remember(store, root, { fact: "Redpanda broker runs on lab pi node", type: "project" });
+    const near = await remember(store, root, { fact: "Redpanda broker runs on lab pi node", type: "project", project: "global" });
     expect(near.wrote).toBe(false);
     expect(near.duplicateOf).toBe(first.slug);
     // A true paraphrase (no conflict cue) classifies as a plain duplicate, not a contradiction.
@@ -1527,16 +1527,16 @@ describe("remember (SDK-backed)", () => {
     // Near-identical phrasing differing ONLY by the version token. i5y kept both facts
     // (write-both, identifier veto); 5td instead routes the high-similarity numeric conflict
     // to the cs0 SURFACE so the agent resolves it (replace = update, force = keep both).
-    const a = await remember(store, root, { fact: "The alpha project builds green on JDK 21", type: "project" });
+    const a = await remember(store, root, { fact: "The alpha project builds green on JDK 21", type: "project", project: "global" });
     expect(a.wrote).toBe(true);
-    const b = await remember(store, root, { fact: "The alpha project builds green on JDK 25", type: "project" });
+    const b = await remember(store, root, { fact: "The alpha project builds green on JDK 25", type: "project", project: "global" });
     expect(b.wrote).toBe(false);
     expect(b.duplicateOf).toBe(a.slug);
     expect(b.disposition).toBe("conflict");
     // The surface shows the colliding fact (cs0 reuse), so the agent isn't blocked blind.
     expect(b.duplicateDescription).toBe("The alpha project builds green on JDK 21");
     // --force is the escape hatch when the two numbers are genuinely distinct facts.
-    const forced = await remember(store, root, { fact: "The alpha project builds green on JDK 25", type: "project", force: true });
+    const forced = await remember(store, root, { fact: "The alpha project builds green on JDK 25", type: "project", force: true, project: "global" });
     expect(forced.wrote).toBe(true);
   });
 
@@ -1544,9 +1544,9 @@ describe("remember (SDK-backed)", () => {
     const { remember } = await import("../src/engine.js");
     // Same predicate, opposite state — the exact 'X enabled' → 'X disabled' update signal a
     // pure similarity threshold would silently swallow as a near-duplicate.
-    const a = await remember(store, root, { fact: "TLS certificate verification is enabled on the S3 client", type: "project" });
+    const a = await remember(store, root, { fact: "TLS certificate verification is enabled on the S3 client", type: "project", project: "global" });
     expect(a.wrote).toBe(true);
-    const b = await remember(store, root, { fact: "TLS certificate verification is disabled on the S3 client", type: "project" });
+    const b = await remember(store, root, { fact: "TLS certificate verification is disabled on the S3 client", type: "project", project: "global" });
     expect(b.wrote).toBe(false);
     expect(b.duplicateOf).toBe(a.slug);
     expect(b.disposition).toBe("conflict");
@@ -1554,9 +1554,9 @@ describe("remember (SDK-backed)", () => {
 
   test("vkn: conflict attaches authorityComparison; equal tiers when both project", async () => {
     const { remember } = await import("../src/engine.js");
-    const a = await remember(store, root, { fact: "The cache TTL is 60 seconds", type: "project", source: "obs 2026-06-01" });
+    const a = await remember(store, root, { fact: "The cache TTL is 60 seconds", type: "project", source: "obs 2026-06-01", project: "global" });
     expect(a.wrote).toBe(true);
-    const b = await remember(store, root, { fact: "The cache TTL is 120 seconds", type: "project", source: "obs 2026-06-08" });
+    const b = await remember(store, root, { fact: "The cache TTL is 120 seconds", type: "project", source: "obs 2026-06-08", project: "global" });
     expect(b.wrote).toBe(false);
     expect(b.disposition).toBe("conflict");
     const cmp = b.authorityComparison;
@@ -1571,9 +1571,9 @@ describe("remember (SDK-backed)", () => {
 
   test("vkn: verdict existing-higher guards a user fact against a project overwrite", async () => {
     const { remember } = await import("../src/engine.js");
-    const a = await remember(store, root, { fact: "The deploy endpoint is enabled on staging", type: "user" });
+    const a = await remember(store, root, { fact: "The deploy endpoint is enabled on staging", type: "user", project: "global" });
     expect(a.wrote).toBe(true);
-    const b = await remember(store, root, { fact: "The deploy endpoint is disabled on staging", type: "project" });
+    const b = await remember(store, root, { fact: "The deploy endpoint is disabled on staging", type: "project", project: "global" });
     expect(b.disposition).toBe("conflict");
     expect(b.authorityComparison!.verdict).toBe("existing-higher");
     expect(b.authorityComparison!.existing.tier).toBe(2);
@@ -1582,19 +1582,19 @@ describe("remember (SDK-backed)", () => {
 
   test("vkn: verdict incoming-higher when a user fact contradicts a project fact", async () => {
     const { remember } = await import("../src/engine.js");
-    const a = await remember(store, root, { fact: "The log output is enabled in production", type: "project" });
+    const a = await remember(store, root, { fact: "The log output is enabled in production", type: "project", project: "global" });
     expect(a.wrote).toBe(true);
-    const b = await remember(store, root, { fact: "The log output is disabled in production", type: "user" });
+    const b = await remember(store, root, { fact: "The log output is disabled in production", type: "user", project: "global" });
     expect(b.disposition).toBe("conflict");
     expect(b.authorityComparison!.verdict).toBe("incoming-higher");
   });
 
   test("vkn: no authorityComparison on the write path or a pure duplicate", async () => {
     const { remember } = await import("../src/engine.js");
-    const w = await remember(store, root, { fact: "Grafana runs on the sandbox k3s cluster", type: "project" });
+    const w = await remember(store, root, { fact: "Grafana runs on the sandbox k3s cluster", type: "project", project: "global" });
     expect(w.wrote).toBe(true);
     expect(w.authorityComparison).toBeUndefined();
-    const dup = await remember(store, root, { fact: "Grafana runs on the sandbox k3s cluster", type: "project" });
+    const dup = await remember(store, root, { fact: "Grafana runs on the sandbox k3s cluster", type: "project", project: "global" });
     expect(dup.wrote).toBe(false);
     expect(dup.disposition).toBe("duplicate");
     expect(dup.authorityComparison).toBeUndefined();
@@ -1624,8 +1624,8 @@ describe("remember (SDK-backed)", () => {
   test("a long existing body is truncated with an ellipsis in the duplicate preview (cs0)", async () => {
     const { remember } = await import("../src/engine.js");
     const longBody = "Redpanda broker on the lab pi. " + "x".repeat(600);
-    await remember(store, root, { fact: longBody, type: "project" });
-    const dup = await remember(store, root, { fact: longBody, type: "project" });
+    await remember(store, root, { fact: longBody, type: "project", project: "global" });
+    const dup = await remember(store, root, { fact: longBody, type: "project", project: "global" });
     expect(dup.wrote).toBe(false);
     expect(dup.duplicateBody).toMatch(/…$/);
     expect(Buffer.byteLength(dup.duplicateBody!.replace(/…$/, ""), "utf-8")).toBeLessThanOrEqual(500);
@@ -1640,9 +1640,9 @@ describe("remember (SDK-backed)", () => {
     const nfc = base.normalize("NFC");
     const nfd = base.normalize("NFD");
     expect(nfc).not.toBe(nfd); // precondition: the two normalization forms differ
-    const first = await remember(store, root, { fact: nfc, type: "project" });
+    const first = await remember(store, root, { fact: nfc, type: "project", project: "global" });
     expect(first.wrote).toBe(true);
-    const dup = await remember(store, root, { fact: nfd, type: "project" });
+    const dup = await remember(store, root, { fact: nfd, type: "project", project: "global" });
     expect(dup.wrote).toBe(false);
     expect(dup.duplicateOf).toBe(first.slug);
   });
@@ -1650,7 +1650,7 @@ describe("remember (SDK-backed)", () => {
   test("the stored fact is NOT hash-normalized — BOM + CRLF survive on disk (n63)", async () => {
     const { remember } = await import("../src/engine.js");
     const raw = "﻿한국어\r\n메모"; // leading BOM + CRLF: the exact bytes normalizeForHash strips
-    const res = await remember(store, root, { fact: raw, type: "project" });
+    const res = await remember(store, root, { fact: raw, type: "project", project: "global" });
     expect(res.wrote).toBe(true);
     const parsed = parseMemory(readFileSync(res.path, "utf-8"));
     // normalizeForHash (BOM strip + CRLF->LF + NFKC) feeds the dedup identity ONLY,
@@ -1662,19 +1662,19 @@ describe("remember (SDK-backed)", () => {
   test("a leading BOM + trailing CRLF does not defeat fallback-hash dedup (n63)", async () => {
     const { remember } = await import("../src/engine.js");
     const clean = "한국어 메모 노트";
-    const first = await remember(store, root, { fact: clean, type: "project" });
+    const first = await remember(store, root, { fact: clean, type: "project", project: "global" });
     expect(first.wrote).toBe(true);
     // Same CJK fact decorated with a leading BOM + trailing CRLF — normalizeForHash
     // must strip both so it hashes to the SAME fallback slug (guards the BOM strip).
-    const decorated = await remember(store, root, { fact: "﻿한국어 메모 노트\r\n", type: "project" });
+    const decorated = await remember(store, root, { fact: "﻿한국어 메모 노트\r\n", type: "project", project: "global" });
     expect(decorated.wrote).toBe(false);
     expect(decorated.duplicateOf).toBe(first.slug);
   });
 
   test("an ASCII fact with a trailing newline still dedupes via slugify (n63 unchanged)", async () => {
     const { remember } = await import("../src/engine.js");
-    const a = await remember(store, root, { fact: "Use Ripgrep not grep", type: "user" });
-    const b = await remember(store, root, { fact: "Use Ripgrep not grep\n", type: "user" });
+    const a = await remember(store, root, { fact: "Use Ripgrep not grep", type: "user", project: "global" });
+    const b = await remember(store, root, { fact: "Use Ripgrep not grep\n", type: "user", project: "global" });
     expect(a.wrote).toBe(true);
     expect(b.wrote).toBe(false);
     expect(b.duplicateOf).toBe("use-ripgrep-not-grep");
@@ -1682,7 +1682,7 @@ describe("remember (SDK-backed)", () => {
 
   test("remember leaves the fact pending embedding (lex-only write path)", async () => {
     const { remember } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Vectors are built lazily on recall", type: "project" });
+    await remember(store, root, { fact: "Vectors are built lazily on recall", type: "project", project: "global" });
     const status = await store.getStatus();
     expect(status.needsEmbedding).toBeGreaterThan(0);
   });
@@ -1691,14 +1691,14 @@ describe("remember (SDK-backed)", () => {
     const { remember } = await import("../src/engine.js");
     // REST/MCP may hand the engine mixed case; the single write choke point must lowercase
     // so disk stays canonical and parseMemory's lowercase read never diverges from the file.
-    const res = await remember(store, root, { fact: "metal embed mixed case", type: "project", platforms: ["MacOS", "LINUX"] as unknown as Platform[] });
+    const res = await remember(store, root, { fact: "metal embed mixed case", type: "project", platforms: ["MacOS", "LINUX"] as unknown as Platform[], project: "global" });
     expect(res.wrote).toBe(true);
     expect(parseMemory(readFileSync(res.path, "utf-8")).frontmatter.platforms).toEqual(["macos", "linux"]);
   });
 
   test("replace updates in place under the existing type when --type is omitted (s5f)", async () => {
     const { remember } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "Prefer tabs over spaces", type: "user", as: "indent-pref" });
+    const first = await remember(store, root, { fact: "Prefer tabs over spaces", type: "user", as: "indent-pref", project: "global" });
     expect(first.type).toBe("user");
     expect(existsSync(join(root, "user", "indent-pref.md"))).toBe(true);
     const upd = await remember(store, root, { fact: "Prefer spaces over tabs", replace: "indent-pref" });
@@ -1710,7 +1710,7 @@ describe("remember (SDK-backed)", () => {
 
   test("force does not orphan a duplicate slug across types (s5f/force)", async () => {
     const { remember } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Old fact", type: "user", as: "dup-slug" });
+    await remember(store, root, { fact: "Old fact", type: "user", as: "dup-slug", project: "global" });
     const forced = await remember(store, root, { fact: "New fact", type: "reference", force: true, as: "dup-slug" });
     expect(forced.wrote).toBe(true);
     expect(forced.type).toBe("user");                                          // relocated to the existing folder
@@ -1794,7 +1794,7 @@ describe("remember (SDK-backed)", () => {
     const { remember } = await import("../src/engine.js");
     // Regression guard for the acm fix: the replace-missing throw must be replace-specific.
     // --force on a fresh slug is the legitimate "write even if a near-duplicate exists" path.
-    const res = await remember(store, root, { fact: "Brand new forced fact", type: "project", force: true, as: "forced-new" });
+    const res = await remember(store, root, { fact: "Brand new forced fact", type: "project", force: true, as: "forced-new", project: "global" });
     expect(res.wrote).toBe(true);
     expect(existsSync(join(root, "project", "forced-new.md"))).toBe(true);
   });
@@ -1810,7 +1810,7 @@ describe("remember stamps updated (bri)", () => {
 
   it("stamps a full ISO instant on create", async () => {
     const { remember, getFact } = await import("../src/engine.js");
-    const res = await remember(store, root, { fact: "alpha fact", type: "project" });
+    const res = await remember(store, root, { fact: "alpha fact", type: "project", project: "global" });
     expect(res.wrote).toBe(true);
     const f = getFact(root, res.slug)!;
     expect(f.frontmatter.updated).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
@@ -1851,18 +1851,18 @@ describe("recallQuery + forget (SDK-backed)", () => {
 
   test("lexOnly recall finds a remembered fact", async () => {
     const { remember, recallQuery } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Redpanda runs on the lab pi", type: "project" });
+    await remember(store, root, { fact: "Redpanda runs on the lab pi", type: "project", project: "global" });
     const hits = await recallQuery(store, root, "Redpanda", { lexOnly: true });
     expect(hits.some(h => h.slug === "redpanda-runs-on-the-lab-pi")).toBe(true);
   });
 
   test("remember surfaces a port-flip as a conflict, not a silent second fact (733 e2e)", async () => {
     const { remember } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "redis on 6379", type: "project" });
+    const first = await remember(store, root, { fact: "redis on 6379", type: "project", project: "global" });
     expect(first.wrote).toBe(true);
     // The single differing token (6380) drops Dice below the dup floor, so without the
     // low-similarity-conflict check this contradicting fact is written as a second file.
-    const second = await remember(store, root, { fact: "redis on 6380", type: "project" });
+    const second = await remember(store, root, { fact: "redis on 6380", type: "project", project: "global" });
     expect(second.wrote).toBe(false);
     expect(second.disposition).toBe("conflict");
     expect(second.duplicateOf).toBe("redis-on-6379");
@@ -1870,15 +1870,15 @@ describe("recallQuery + forget (SDK-backed)", () => {
 
   test("remember surfaces an enabled→disabled flip as a conflict (733 e2e)", async () => {
     const { remember } = await import("../src/engine.js");
-    await remember(store, root, { fact: "S3 TLS verification enabled", type: "project" });
-    const flip = await remember(store, root, { fact: "S3 TLS verification disabled", type: "project" });
+    await remember(store, root, { fact: "S3 TLS verification enabled", type: "project", project: "global" });
+    const flip = await remember(store, root, { fact: "S3 TLS verification disabled", type: "project", project: "global" });
     expect(flip.wrote).toBe(false);
     expect(flip.disposition).toBe("conflict");
   });
 
   test("forget removes the fact", async () => {
     const { remember, recallQuery, forget } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Temporary fact about widgets", type: "reference" });
+    await remember(store, root, { fact: "Temporary fact about widgets", type: "reference", project: "global" });
     const gone = await forget(store, root, "temporary-fact-about-widgets");
     expect(gone.removed).toBe(true);
     const hits = await recallQuery(store, root, "widgets", { lexOnly: true });
@@ -1902,7 +1902,7 @@ describe("recallQuery + forget (SDK-backed)", () => {
   test("recall hits carry a body, truncated to RECALL_BODY_CAP with an ellipsis (bgf)", async () => {
     const { remember, recallQuery } = await import("../src/engine.js");
     const longBody = "Redpanda broker detail. " + "padding ".repeat(120); // > 500 bytes, one line
-    await remember(store, root, { fact: longBody, type: "project" });
+    await remember(store, root, { fact: longBody, type: "project", project: "global" });
     const hits = await recallQuery(store, root, "Redpanda", { lexOnly: true });
     const hit = hits.find(h => h.description.startsWith("Redpanda broker detail"));
     expect(hit).toBeDefined();
@@ -1915,7 +1915,7 @@ describe("recallQuery + forget (SDK-backed)", () => {
   test("recall with fullBody:true returns the untruncated body (bgf)", async () => {
     const { remember, recallQuery } = await import("../src/engine.js");
     const longBody = "Postgres tuning note. " + "padding ".repeat(120);
-    await remember(store, root, { fact: longBody, type: "project" });
+    await remember(store, root, { fact: longBody, type: "project", project: "global" });
     const hits = await recallQuery(store, root, "Postgres", { lexOnly: true, fullBody: true });
     const hit = hits.find(h => h.description.startsWith("Postgres tuning note"));
     expect(hit!.body).toBe(longBody.trim());
@@ -1924,7 +1924,7 @@ describe("recallQuery + forget (SDK-backed)", () => {
 
   test("a short body is attached whole, with no ellipsis (bgf)", async () => {
     const { remember, recallQuery } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Short fact about Qdrant", type: "project" });
+    await remember(store, root, { fact: "Short fact about Qdrant", type: "project", project: "global" });
     const hits = await recallQuery(store, root, "Qdrant", { lexOnly: true });
     const hit = hits.find(h => h.slug === "short-fact-about-qdrant");
     expect(hit!.body).toBe("Short fact about Qdrant");
@@ -1933,7 +1933,7 @@ describe("recallQuery + forget (SDK-backed)", () => {
   test("recall with skim:true omits the body but keeps description + canonical type (r0u)", async () => {
     const { remember, recallQuery } = await import("../src/engine.js");
     const longBody = "Redis ACL note. " + "padding ".repeat(120); // body would normally be attached
-    await remember(store, root, { fact: longBody, type: "project" });
+    await remember(store, root, { fact: longBody, type: "project", project: "global" });
     const hits = await recallQuery(store, root, "Redis", { lexOnly: true, skim: true });
     const hit = hits.find(h => h.description.startsWith("Redis ACL note"));
     expect(hit).toBeDefined();
@@ -1943,7 +1943,7 @@ describe("recallQuery + forget (SDK-backed)", () => {
 
   test("skim:true takes precedence over fullBody (r0u)", async () => {
     const { remember, recallQuery } = await import("../src/engine.js");
-    await remember(store, root, { fact: "Minio bucket note here", type: "project" });
+    await remember(store, root, { fact: "Minio bucket note here", type: "project", project: "global" });
     const hits = await recallQuery(store, root, "Minio", { lexOnly: true, skim: true, fullBody: true });
     const hit = hits.find(h => h.slug === "minio-bucket-note-here");
     expect(hit!.body).toBeUndefined();
@@ -2144,7 +2144,7 @@ describe("unreadable/corrupt fact surfacing (e5h)", () => {
     const { remember } = await import("../src/engine.js");
     const store = { async searchLex() { return []; }, async update() { /* no-op */ } } as unknown as QMDStore;
     await plantUnreadable("project", "corrupt.md"); // an unreadable dedup candidate
-    const res = await remember(store, root, { fact: "A brand new distinct fact about Qdrant vectors", type: "project" });
+    const res = await remember(store, root, { fact: "A brand new distinct fact about Qdrant vectors", type: "project", project: "global" });
     expect(res.wrote).toBe(true);          // the new fact still lands
     expect(res.dedupSkipped).toBe(1);      // but the corruption-driven dedup gap is visible
   });
@@ -2152,7 +2152,7 @@ describe("unreadable/corrupt fact surfacing (e5h)", () => {
   test("remember reports dedupSkipped:0 for a clean corpus", async () => {
     const { remember } = await import("../src/engine.js");
     const store = { async searchLex() { return []; }, async update() { /* no-op */ } } as unknown as QMDStore;
-    const res = await remember(store, root, { fact: "Another entirely distinct fact about Redis", type: "project" });
+    const res = await remember(store, root, { fact: "Another entirely distinct fact about Redis", type: "project", project: "global" });
     expect(res.dedupSkipped).toBe(0);
   });
 });
@@ -2671,10 +2671,59 @@ describe("remember reindex best-effort (fake store) (1ro)", () => {
     } as unknown as QMDStore;
     const tmp = await mkt(join(tmpdir(), "qmemd-1ro-"));
     try {
-      const res = await remember(store, tmp, { fact: "Durable under reindex failure", type: "project" });
+      const res = await remember(store, tmp, { fact: "Durable under reindex failure", type: "project", project: "global" });
       expect(res.wrote).toBe(true);
       expect(calls).toContain("update");
       expect(existsSync(join(tmp, "project", `${res.slug}.md`))).toBe(true);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("remember requires project for a new fact (SC-24/SC-25)", () => {
+  function fakeStore() {
+    const calls: string[] = [];
+    const store = {
+      async searchLex() { calls.push("searchLex"); return []; },
+      async update() { calls.push("update"); return {}; },
+    } as unknown as QMDStore;
+    return { store, calls };
+  }
+
+  // covers: SC-24
+  test("a blank project on a new fact throws before any write, undefined/empty/whitespace alike", async () => {
+    const { remember, ClientError } = await import("../src/engine.js");
+    const { store, calls } = fakeStore();
+    const tmp = await mkt(join(tmpdir(), "qmemd-sc24-"));
+    try {
+      for (const project of [undefined, "", "  "]) {
+        await expect(remember(store, tmp, { fact: "Needs a project to land somewhere", type: "project", project }))
+          .rejects.toThrow('project is required for a new fact; pass a repo name or "global"');
+      }
+      await expect(remember(store, tmp, { fact: "Needs a project to land somewhere", type: "project", project: "" }))
+        .rejects.toBeInstanceOf(ClientError);
+      expect(existsSync(join(tmp, "project"))).toBe(false);
+      expect(calls).toEqual([]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // covers: SC-25
+  test("replace with a blank project keeps the fact's stored scope; an explicit project re-homes it", async () => {
+    const { remember, getFact } = await import("../src/engine.js");
+    const { store } = fakeStore();
+    const tmp = await mkt(join(tmpdir(), "qmemd-sc25-"));
+    try {
+      const seeded = await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo", type: "project", project: "omnimailcore" });
+      expect(seeded.wrote).toBe(true);
+
+      await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo", type: "project", replace: seeded.slug });
+      expect(getFact(tmp, seeded.slug)!.frontmatter.project).toBe("omnimailcore");
+
+      await remember(store, tmp, { fact: "Omnimailcore ships from the mono repo", type: "project", replace: seeded.slug, project: "global" });
+      expect(getFact(tmp, seeded.slug)!.frontmatter.project).toBe("global");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
@@ -2690,7 +2739,7 @@ describe("remember indexed signal (32x)", () => {
     } as unknown as QMDStore;
     const tmp = await mkt(join(tmpdir(), "qmemd-32x-"));
     try {
-      const res = await remember(store, tmp, { fact: "Unindexed fact", type: "project" });
+      const res = await remember(store, tmp, { fact: "Unindexed fact", type: "project", project: "global" });
       // Don't regress 1ro: the write still happens and wrote stays true.
       expect(res.wrote).toBe(true);
       expect(res.indexed).toBe(false);
@@ -2708,7 +2757,7 @@ describe("remember indexed signal (32x)", () => {
     } as unknown as QMDStore;
     const tmp = await mkt(join(tmpdir(), "qmemd-32x-ok-"));
     try {
-      const res = await remember(store, tmp, { fact: "Indexed fact", type: "project" });
+      const res = await remember(store, tmp, { fact: "Indexed fact", type: "project", project: "global" });
       expect(res.wrote).toBe(true);
       expect(res.indexed).toBe(true);
     } finally {
@@ -2724,10 +2773,10 @@ describe("remember indexed signal (32x)", () => {
     } as unknown as QMDStore;
     const tmp = await mkt(join(tmpdir(), "qmemd-32x-dup-"));
     try {
-      const first = await remember(store, tmp, { fact: "Dedup fact", type: "project" });
+      const first = await remember(store, tmp, { fact: "Dedup fact", type: "project", project: "global" });
       expect(first.wrote).toBe(true);
       // Same slug already on disk → Tier-1 dedup, nothing newly written.
-      const second = await remember(store, tmp, { fact: "Dedup fact", type: "project" });
+      const second = await remember(store, tmp, { fact: "Dedup fact", type: "project", project: "global" });
       expect(second.wrote).toBe(false);
       expect(second.indexed).toBe(true);
     } finally {
@@ -2750,7 +2799,7 @@ describe("remember sync signal (ddr)", () => {
         if (args[0] === "commit") return 128;   // unconfigured identity → commit fails
         return 0;
       };
-      const res = await remember(okStore(), tmp, { fact: "Sync-fail fact alpha", type: "project" }, { run });
+      const res = await remember(okStore(), tmp, { fact: "Sync-fail fact alpha", type: "project", project: "global" }, { run });
       expect(res.wrote).toBe(true);
       expect(res.synced).toBe(false);
       expect(res.syncWarning).toBeTruthy();
@@ -2770,7 +2819,7 @@ describe("remember sync signal (ddr)", () => {
         if (args[0] === "push") return 1;       // push fails
         return 0;
       };
-      const res = await remember(okStore(), tmp, { fact: "Push-fail fact beta", type: "project" }, { run });
+      const res = await remember(okStore(), tmp, { fact: "Push-fail fact beta", type: "project", project: "global" }, { run });
       expect(res.synced).toBe(false);
       expect(res.syncWarning).toMatch(/push/i);
     } finally { await rm(tmp, { recursive: true, force: true }); }
@@ -2780,7 +2829,7 @@ describe("remember sync signal (ddr)", () => {
     const { remember } = await import("../src/engine.js");
     const tmp = await mkt(join(tmpdir(), "qmemd-ddr-norepo-"));
     try {
-      const res = await remember(okStore(), tmp, { fact: "No-repo fact gamma", type: "project" });
+      const res = await remember(okStore(), tmp, { fact: "No-repo fact gamma", type: "project", project: "global" });
       expect(res.synced).toBe(true);
       expect(res.syncWarning).toBeFalsy();
     } finally { await rm(tmp, { recursive: true, force: true }); }
@@ -2796,7 +2845,7 @@ describe("remember sync signal (ddr)", () => {
         if (args[0] === "diff") return 0;       // NOTHING staged
         return 0;
       };
-      const res = await remember(okStore(), tmp, { fact: "No-op fact delta", type: "project" }, { run });
+      const res = await remember(okStore(), tmp, { fact: "No-op fact delta", type: "project", project: "global" }, { run });
       expect(res.synced).toBe(true);
       expect(res.syncWarning).toBeFalsy();
     } finally { await rm(tmp, { recursive: true, force: true }); }
@@ -2815,7 +2864,7 @@ describe("remember sync signal (ddr)", () => {
         if (args[0] === "diff") return 1;       // staged
         return 0;
       };
-      const res = await remember(okStore(), tmp, { fact: "Pathspec fact zeta", type: "project" }, { run });
+      const res = await remember(okStore(), tmp, { fact: "Pathspec fact zeta", type: "project", project: "global" }, { run });
       const rel = `project/${res.slug}.md`;
       expect(calls).toContainEqual(["add", "-A", "--", rel]);
       expect(calls).toContainEqual(["commit", "-m", `remember: ${res.slug}`, "--", rel]);
@@ -2832,7 +2881,7 @@ describe("remember sync signal (ddr)", () => {
     try {
       // Seed a fact with no repo (write succeeds, synced n/a), THEN make it a repo and
       // forget with a failing commit runner.
-      const res = await remember(okStore(), tmp, { fact: "Forget-fail fact epsilon", type: "project" });
+      const res = await remember(okStore(), tmp, { fact: "Forget-fail fact epsilon", type: "project", project: "global" });
       await mkdir(join(tmp, ".git"), { recursive: true });
       const run = (args: string[]) => {
         if (args[0] === "rev-parse") return 0;
@@ -2903,7 +2952,7 @@ describe("forget reclaims tombstone + orphaned rows (2dh)", () => {
     const dbDir = await mkt(join(tmpdir(), "qmemd-2dhdb-"));
     const store = await openQmd({ dbPath: join(dbDir, "i.sqlite"), config: { collections: { memory: { path: tmp, pattern: "**/*.md" } } } });
     try {
-      const w = await remember(store, tmp, { fact: "Reclaimable fact", type: "project", as: "reclaim-x" });
+      const w = await remember(store, tmp, { fact: "Reclaimable fact", type: "project", as: "reclaim-x", project: "global" });
       expect(w.wrote).toBe(true);
       const db = (store.internal as unknown as { db: RawDB }).db;
       const count = (sql: string) => db.prepare(sql).get().c;
@@ -2931,7 +2980,7 @@ describe("forget reclaims tombstone + orphaned rows (2dh)", () => {
     const dbDir = await mkt(join(tmpdir(), "qmemd-ovo-idxdb-"));
     const store = await openQmd({ dbPath: join(dbDir, "i.sqlite"), config: { collections: { memory: { path: tmp, pattern: "**/*.md" } } } });
     try {
-      await remember(store, tmp, { fact: "Relocatable fact", type: "feedback", as: "movee" });
+      await remember(store, tmp, { fact: "Relocatable fact", type: "feedback", as: "movee", project: "global" });
       const db = (store.internal as unknown as { db: RawDB }).db;
       const count = (sql: string) => db.prepare(sql).get().c;
       expect(count("SELECT COUNT(*) AS c FROM documents")).toBe(1);
@@ -3406,21 +3455,21 @@ describe("remember platforms (SDK-backed)", () => {
 
   test("platforms are written to the fact frontmatter", async () => {
     const { remember, getFact } = await import("../src/engine.js");
-    const res = await remember(store, root, { fact: "Metal embed load fails on this mac", type: "project", platforms: ["macos"] });
+    const res = await remember(store, root, { fact: "Metal embed load fails on this mac", type: "project", platforms: ["macos"], project: "global" });
     expect(res.wrote).toBe(true);
     expect(getFact(root, res.slug)!.frontmatter.platforms).toEqual(["macos"]);
   });
 
   test("platforms are inherited on --replace when not passed (like tags/project)", async () => {
     const { remember, getFact } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "Systemd user units serve the daemon", type: "project", platforms: ["linux"] });
+    const first = await remember(store, root, { fact: "Systemd user units serve the daemon", type: "project", platforms: ["linux"], project: "global" });
     await remember(store, root, { fact: "Systemd user units serve the qmemd daemon", replace: first.slug });
     expect(getFact(root, first.slug)!.frontmatter.platforms).toEqual(["linux"]);
   });
 
   test("an explicit platforms on --replace overrides the inherited value", async () => {
     const { remember, getFact } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "fact a", type: "project", platforms: ["linux"] });
+    const first = await remember(store, root, { fact: "fact a", type: "project", platforms: ["linux"], project: "global" });
     await remember(store, root, { fact: "fact a revised", replace: first.slug, platforms: ["linux", "macos"] });
     expect(getFact(root, first.slug)!.frontmatter.platforms).toEqual(["linux", "macos"]);
   });
@@ -3430,14 +3479,14 @@ describe("remember platforms (SDK-backed)", () => {
   // all rely on this engine guarantee, so pin it down.
   test("an explicit empty platforms array on --replace clears scope back to cross-platform (qmemd-t0z)", async () => {
     const { remember, getFact } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "fact b", type: "project", platforms: ["macos"] });
+    const first = await remember(store, root, { fact: "fact b", type: "project", platforms: ["macos"], project: "global" });
     await remember(store, root, { fact: "fact b revised", replace: first.slug, platforms: [] });
     expect(getFact(root, first.slug)!.frontmatter.platforms).toEqual([]);
   });
 
   test("an unknown platform token is rejected before any write", async () => {
     const { remember, getFact } = await import("../src/engine.js");
-    await expect(remember(store, root, { fact: "bad", type: "project", platforms: ["freebsd" as Platform] }))
+    await expect(remember(store, root, { fact: "bad", type: "project", platforms: ["freebsd" as Platform], project: "global" }))
       .rejects.toThrow(/invalid platform/);
     // Nothing was written.
     expect(getFact(root, slugify("bad"))).toBeNull();
@@ -3465,7 +3514,7 @@ describe("remember --replace preserves created (qmemd-sr3, SDK-backed)", () => {
 
   test("a real created date survives --replace verbatim", async () => {
     const { remember } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "The daemon restarts via systemd", type: "project" });
+    const first = await remember(store, root, { fact: "The daemon restarts via systemd", type: "project", project: "global" });
     await rewriteCreated(first.path, "2020-01-01");
     await remember(store, root, { fact: "The daemon restarts via systemd user units", replace: first.slug });
     expect(getFact(root, first.slug)!.frontmatter.created).toBe("2020-01-01");
@@ -3473,7 +3522,7 @@ describe("remember --replace preserves created (qmemd-sr3, SDK-backed)", () => {
 
   test("an empty created is preserved, not silently replaced with today()", async () => {
     const { remember } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "The daemon logs to the cache dir", type: "project" });
+    const first = await remember(store, root, { fact: "The daemon logs to the cache dir", type: "project", project: "global" });
     await rewriteCreated(first.path, "");
     await remember(store, root, { fact: "The daemon logs into the cache directory", replace: first.slug });
     expect(getFact(root, first.slug)!.frontmatter.created).toBe("");
@@ -3861,7 +3910,7 @@ describe("Tier-2 dedup skips a malformed index row (qp-tier2-malformed-row-abort
   test("a malformed top lex hit does not abort the write; the new fact is stored", async () => {
     const { remember, getFact } = await import("../src/engine.js");
     const res = await remember(malformedTopHitStore("qmd://memory/user/.md"), root, {
-      fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project",
+      fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project", project: "global",
     });
     expect(res.wrote).toBe(true);
     expect(res.slug).not.toContain("/"); // never the malformed multi-segment path
@@ -3872,7 +3921,7 @@ describe("Tier-2 dedup skips a malformed index row (qp-tier2-malformed-row-abort
     const { remember } = await import("../src/engine.js");
     // Valid slug, but the type segment ('junk') is not a MemoryType — a corrupt/stale row.
     const res = await remember(malformedTopHitStore("qmd://memory/junk/orphan.md"), root, {
-      fact: "The night shift starts at 22:00 sharp", type: "project",
+      fact: "The night shift starts at 22:00 sharp", type: "project", project: "global",
     });
     expect(res.wrote).toBe(true);
     expect(res.duplicateOf).toBeUndefined();
@@ -3901,7 +3950,7 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const res = await remember(ghostTopHitStore("qmd://memory/project/vanished-fact.md"), root, {
-        fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project",
+        fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project", project: "global",
       });
       expect(res.wrote).toBe(true);
       expect(res.duplicateOf).toBeUndefined();
@@ -3922,7 +3971,7 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const res = await remember(ghostTopHitStore("qmd://memory/project/vanished-fact.md"), root, {
-        fact: "Redpanda broker runs on lab pi node", type: "project",
+        fact: "Redpanda broker runs on lab pi node", type: "project", project: "global",
       });
       // Dropping the ghost must not weaken dedup: the disk scan is immune to index rot.
       expect(res.wrote).toBe(false);
@@ -3939,7 +3988,7 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
     // it — and it must keep blocking. Only the nothing-is-there ghost may fall through.
     await mkdir(join(root, "project", "unreadable-fact.md"), { recursive: true });
     const res = await remember(ghostTopHitStore("qmd://memory/project/unreadable-fact.md"), root, {
-      fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project",
+      fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project", project: "global",
     });
     expect(res.wrote).toBe(false);
     expect(res.disposition).toBe("duplicate");
@@ -3958,7 +4007,7 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const res = await remember(ghostTopHitStore("qmd://memory/project/foo.md"), root, {
-        fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project",
+        fact: "Widgets ship from the Antwerp depot on Tuesdays", type: "project", project: "global",
       });
       expect(res.wrote).toBe(true);
       expect(res.duplicateOf).toBeUndefined();
@@ -3981,7 +4030,7 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const res = await remember(ghostTopHitStore("qmd://memory/project/redpanda-broker-runs-on-the-lab-pi-server.md"), root, {
-        fact: "Redpanda broker runs on lab pi node", type: "project",
+        fact: "Redpanda broker runs on lab pi node", type: "project", project: "global",
       });
       expect(res.wrote).toBe(false);
       expect(res.duplicateOf).toBe("redpanda-broker-runs-on-the-lab-pi-server");
@@ -4003,7 +4052,7 @@ describe("Tier-2 dedup skips a GHOST index row (qp-ghost-index-dedup-block-uss)"
     await writeFile(join(root, "user", "cache-ttl.md"),
       "---\nname: cache-ttl\ndescription: The cache TTL is 60 seconds\ntype: user\ntags: []\nproject: global\ncreated: 2026-01-01\npinned: false\nsource: obs 2026-06-01\n---\n\nThe cache TTL is 60 seconds\n");
     const res = await remember(ghostTopHitStore("qmd://memory/user/cache-ttl.md"), root, {
-      fact: "The cache TTL is 120 seconds", type: "project", source: "obs 2026-06-08",
+      fact: "The cache TTL is 120 seconds", type: "project", source: "obs 2026-06-08", project: "global",
     });
     expect(res.wrote).toBe(false);
     expect(res.disposition).toBe("conflict");
@@ -4129,7 +4178,7 @@ describe("remember --supersedes (bri)", () => {
   it("stamps supersedes on the new fact and superseded_by on the old, in one commit", async () => {
     const { remember, getFact } = await import("../src/engine.js");
     await seed("old-truth");
-    const res = await remember(store, root, { fact: "the new truth about ports", type: "project", supersedes: "old-truth" }, git);
+    const res = await remember(store, root, { fact: "the new truth about ports", type: "project", supersedes: "old-truth", project: "global" }, git);
     expect(res.wrote).toBe(true);
     expect(res.supersededSlug).toBe("old-truth");
     const neu = getFact(root, res.slug)!;
@@ -4148,20 +4197,20 @@ describe("remember --supersedes (bri)", () => {
   it("skips dedup (the successor would otherwise near-dup its predecessor)", async () => {
     const { remember } = await import("../src/engine.js");
     await seed("old-truth", "build with jdk 21 only");
-    const res = await remember(store, root, { fact: "build with jdk 21 only", type: "project", as: "new-truth", supersedes: "old-truth" }, git);
+    const res = await remember(store, root, { fact: "build with jdk 21 only", type: "project", as: "new-truth", supersedes: "old-truth", project: "global" }, git);
     expect(res.wrote).toBe(true); // Tier-2.5 would have blocked this as a duplicate
   });
 
   it("rejects a missing target", async () => {
     const { remember } = await import("../src/engine.js");
-    await expect(remember(store, root, { fact: "x y z", supersedes: "nope" }, git))
+    await expect(remember(store, root, { fact: "x y z", supersedes: "nope", project: "global" }, git))
       .rejects.toThrow("no fact named 'nope' to supersede");
   });
 
   it("rejects self-supersession and the --replace combination", async () => {
     const { remember } = await import("../src/engine.js");
     await seed("self-slug");
-    await expect(remember(store, root, { fact: "irrelevant", as: "self-slug", supersedes: "self-slug" }, git))
+    await expect(remember(store, root, { fact: "irrelevant", as: "self-slug", supersedes: "self-slug", project: "global" }, git))
       .rejects.toThrow(/cannot supersede itself/);
     await expect(remember(store, root, { fact: "irrelevant", replace: "self-slug", supersedes: "self-slug" }, git))
       .rejects.toThrow(/cannot be combined with replace/);
@@ -4176,7 +4225,7 @@ describe("remember --supersedes (bri)", () => {
     await mkdir(join(root, "reference"), { recursive: true });
     await writeFile(join(root, "reference", "victim-slug.md"),
       `---\nname: victim-slug\ndescription: d\ntype: reference\ntags: []\nproject: global\ncreated: 2019-01-01\npinned: false\nsuperseded_by: something-else\n---\n\nthe unrelated victim body\n`);
-    await expect(remember(store, root, { fact: "brand new durable fact", type: "project", as: "victim-slug", supersedes: "old-truth" }, git))
+    await expect(remember(store, root, { fact: "brand new durable fact", type: "project", as: "victim-slug", supersedes: "old-truth", project: "global" }, git))
       .rejects.toThrow(/slug 'victim-slug' already names a different fact/);
     // The victim is byte-identical — never overwritten.
     expect(readFileSync(join(root, "reference", "victim-slug.md"), "utf-8"))
@@ -4192,7 +4241,7 @@ describe("remember --supersedes (bri)", () => {
     const fenceless = "Setup notes\n---\nstep 1\n---\nstep 2\n";
     await mkdir(join(root, "project"), { recursive: true });
     await writeFile(join(root, "project", "old-truth.md"), fenceless);
-    const res = await remember(store, root, { fact: "the new truth about ports", type: "project", supersedes: "old-truth" }, git);
+    const res = await remember(store, root, { fact: "the new truth about ports", type: "project", supersedes: "old-truth", project: "global" }, git);
     expect(res.wrote).toBe(true); // the new fact itself is still written
     expect(res.supersedeWarning).toMatch(/no frontmatter fence/);
     // Old file byte-identical — never corrupted, never falsely stamped.
@@ -4331,7 +4380,7 @@ describe("force records conflicts_with (cr4)", () => {
     // --as "kafka-port-v2": slugs tokenize to {kafka,port,v2} vs {kafka,port} — identifier sets
     // {v2,9093} vs {9092} are non-subset (identifiersConflict) over an equal residual topic,
     // so lowSimilarityConflict fires (Dice 0.727 < DEDUP_DICE keeps the high-sim path out).
-    const res = await remember(store, root, { fact: "kafka broker listens on port 9093", type: "project", as: "kafka-port-v2", force: true }, git);
+    const res = await remember(store, root, { fact: "kafka broker listens on port 9093", type: "project", as: "kafka-port-v2", force: true, project: "global" }, git);
     expect(res.wrote).toBe(true);
     expect(res.conflictsWith).toBe("kafka-port");
     expect(getFact(root, "kafka-port-v2")!.frontmatter.conflictsWith).toBe("kafka-port");
@@ -4344,7 +4393,7 @@ describe("force records conflicts_with (cr4)", () => {
     await mkdir(join(root, "project"), { recursive: true });
     await writeFile(join(root, "project", "redis-acl.md"),
       "---\nname: redis-acl\ndescription: redis acl locks the default user\ntype: project\ntags: []\nproject: global\ncreated: 2020-01-01\npinned: false\n---\n\nredis acl locks the default user\n");
-    const res = await remember(store, root, { fact: "entirely unrelated topic about cheese", force: true }, git);
+    const res = await remember(store, root, { fact: "entirely unrelated topic about cheese", force: true, project: "global" }, git);
     expect(res.conflictsWith).toBeUndefined();
     expect(getFact(root, res.slug)!.frontmatter.conflictsWith).toBeUndefined();
   });
@@ -4541,33 +4590,33 @@ describe("remember review_by / ttl (9su, SDK-backed)", () => {
 
   test("remember with reviewBy stores review_by in frontmatter", async () => {
     const { remember } = await import("../src/engine.js");
-    const res = await remember(store, root, { fact: "Redis port is 6379", type: "project", reviewBy: "2026-12-01" });
+    const res = await remember(store, root, { fact: "Redis port is 6379", type: "project", reviewBy: "2026-12-01", project: "global" });
     expect(res.wrote).toBe(true);
     expect(getFact(root, res.slug)!.frontmatter.reviewBy).toBe("2026-12-01");
   });
 
   test("remember with ttl computes review_by = today + N", async () => {
     const { remember } = await import("../src/engine.js");
-    const res = await remember(store, root, { fact: "LM Studio token rotates quarterly", type: "project", ttl: "90d" });
+    const res = await remember(store, root, { fact: "LM Studio token rotates quarterly", type: "project", ttl: "90d", project: "global" });
     expect(res.wrote).toBe(true);
     expect(getFact(root, res.slug)!.frontmatter.reviewBy).toBe(reviewByFromTtl("90d"));
   });
 
   test("remember rejects ttl combined with reviewBy", async () => {
     const { remember } = await import("../src/engine.js");
-    await expect(remember(store, root, { fact: "x y z", reviewBy: "2026-12-01", ttl: "90d" }))
+    await expect(remember(store, root, { fact: "x y z", reviewBy: "2026-12-01", ttl: "90d", project: "global" }))
       .rejects.toThrow(/^invalid ttl/);
   });
 
   test("remember rejects a malformed reviewBy", async () => {
     const { remember } = await import("../src/engine.js");
-    await expect(remember(store, root, { fact: "x y z", reviewBy: "soon" }))
+    await expect(remember(store, root, { fact: "x y z", reviewBy: "soon", project: "global" }))
       .rejects.toThrow(/^invalid review_by/);
   });
 
   test("replace inherits review_by when not passed; empty string clears it (q65 pattern)", async () => {
     const { remember } = await import("../src/engine.js");
-    const first = await remember(store, root, { fact: "Qdrant REST is 6333", type: "project", reviewBy: "2026-12-01" });
+    const first = await remember(store, root, { fact: "Qdrant REST is 6333", type: "project", reviewBy: "2026-12-01", project: "global" });
     const updated = await remember(store, root, { fact: "Qdrant REST is 6333 (verified)", replace: first.slug });
     expect(getFact(root, updated.slug)!.frontmatter.reviewBy).toBe("2026-12-01");
     const cleared = await remember(store, root, { fact: "Qdrant REST is 6333 (timeless)", replace: first.slug, reviewBy: "" });
@@ -4731,7 +4780,7 @@ describe("markReviewed (s4w, SDK-backed)", () => {
 
   test("forward-sets review_by and leaves updated byte-identical", async () => {
     const { remember, markReviewed } = await import("../src/engine.js");
-    const r = await remember(store, root, { fact: "Vault token rotates monthly", type: "project" });
+    const r = await remember(store, root, { fact: "Vault token rotates monthly", type: "project", project: "global" });
     const before = readFileSync(getFact(root, r.slug)!.path, "utf-8");
     const updatedBefore = getFact(root, r.slug)!.frontmatter.updated;
     const res = await markReviewed(store, root, r.slug, { ttl: "30d" });
@@ -4744,7 +4793,7 @@ describe("markReviewed (s4w, SDK-backed)", () => {
 
   test("bare reviewed on a durable type sets review_by: never", async () => {
     const { remember, markReviewed } = await import("../src/engine.js");
-    const r = await remember(store, root, { fact: "Always prefer Bun over npm here", type: "feedback" });
+    const r = await remember(store, root, { fact: "Always prefer Bun over npm here", type: "feedback", project: "global" });
     const res = await markReviewed(store, root, r.slug, {});
     expect(res.reviewBy).toBe("never");
     expect(getFact(root, r.slug)!.frontmatter.reviewBy).toBe("never");
@@ -4772,7 +4821,7 @@ describe("markReviewed (s4w, SDK-backed)", () => {
     // Pins the guard design: the failure predicate is locateFences()=null, NOT
     // written-bytes equality — a same-value restamp writes identical bytes and is fine.
     const { remember, markReviewed } = await import("../src/engine.js");
-    const r = await remember(store, root, { fact: "Vault token rotates monthly", type: "project" });
+    const r = await remember(store, root, { fact: "Vault token rotates monthly", type: "project", project: "global" });
     const first = await markReviewed(store, root, r.slug, { reviewBy: "2027-01-01" });
     expect(first.reviewBy).toBe("2027-01-01");
     const second = await markReviewed(store, root, r.slug, { reviewBy: "2027-01-01" });

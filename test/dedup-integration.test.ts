@@ -31,7 +31,7 @@ describe("dedup against a real qmd index", () => {
 
   test("a ghost row in a real index does not block the write, and the write sweeps it", async () => {
     const first = await remember(store, root, {
-      fact: "Redpanda broker runs on the lab pi server", type: "project",
+      fact: "Redpanda broker runs on the lab pi server", type: "project", project: "global",
     });
     expect(first.wrote).toBe(true);
 
@@ -42,7 +42,7 @@ describe("dedup against a real qmd index", () => {
     expect(ghostRows.some(r => r.filepath.endsWith(`project/${first.slug}.md`))).toBe(true); // the row really does survive
 
     // A term-subset of the ghost's text, so the BM25 AND-query matches it.
-    const second = await remember(store, root, { fact: "Redpanda broker runs on lab pi", type: "project" });
+    const second = await remember(store, root, { fact: "Redpanda broker runs on lab pi", type: "project", project: "global" });
     expect(second.wrote).toBe(true);
     expect(existsSync(join(root, "project", `${second.slug}.md`))).toBe(true);
 
@@ -53,13 +53,13 @@ describe("dedup against a real qmd index", () => {
 
   test("a byte-identical URL fact is blocked even under a different --as slug", async () => {
     const fact = "Metrics live at https://grafana.pi.local:3000/d/abc";
-    const first = await remember(store, root, { fact, type: "project" });
+    const first = await remember(store, root, { fact, type: "project", project: "global" });
     expect(first.wrote).toBe(true);
     // Tier-1 misses (different slug). Tier-2 used to miss too, because the URL was searched as
     // one concatenated token. Tier-2.5 also misses: its slug+firstLine token sets diverge once
     // --as swaps the slug in (measured dice 0.7778 vs the 0.82 floor), so the identical fact was
     // written twice.
-    const second = await remember(store, root, { fact, type: "project", as: "ops-note" });
+    const second = await remember(store, root, { fact, type: "project", as: "ops-note", project: "global" });
     expect(second.wrote).toBe(false);
     expect(second.disposition).toBe("duplicate");
     expect(second.duplicateOf).toBe(first.slug);
@@ -68,7 +68,7 @@ describe("dedup against a real qmd index", () => {
   test("a fact quoting a CLI flag matches itself through the index (negation leg)", async () => {
     const { lexDedupQuery } = await import("../src/engine.js");
     const fact = "Use --force to bypass the dedup guard on remember";
-    await remember(store, root, { fact, type: "project" });
+    await remember(store, root, { fact, type: "project", project: "global" });
     // Raw: the leading dash became FTS5 negation (NOT "force"*), so the fact excluded itself.
     expect(await store.searchLex(fact, { limit: 5, collection: "memory" })).toHaveLength(0);
     expect(await store.searchLex(lexDedupQuery(fact), { limit: 5, collection: "memory" })).toHaveLength(1);

@@ -40,7 +40,7 @@ describe("real-store concurrency (k9q)", () => {
       "LLDAP is the directory service", "MinIO stores cold backups",
     ];
     const results = await Promise.all(
-      topics.map(fact => remember(store, root, { fact, type: "project" })),
+      topics.map(fact => remember(store, root, { fact, type: "project", project: "global" })),
     );
     for (const [i, res] of results.entries()) {
       expect(res.wrote, `'${topics[i]}' did not write`).toBe(true);
@@ -55,14 +55,14 @@ describe("real-store concurrency (k9q)", () => {
   });
 
   test("parallel forgets + remembers settle to the markdown end state", async () => {
-    await remember(store, root, { fact: "Old fact alpha about rabbitmq", type: "project" });
-    await remember(store, root, { fact: "Old fact beta about clickhouse", type: "project" });
+    await remember(store, root, { fact: "Old fact alpha about rabbitmq", type: "project", project: "global" });
+    await remember(store, root, { fact: "Old fact beta about clickhouse", type: "project", project: "global" });
 
     const [f1, f2, r1, r2] = await Promise.all([
       forget(store, root, "old-fact-alpha-about-rabbitmq"),
       forget(store, root, "old-fact-beta-about-clickhouse"),
-      remember(store, root, { fact: "New fact gamma about gitea", type: "project" }),
-      remember(store, root, { fact: "New fact delta about dolt", type: "project" }),
+      remember(store, root, { fact: "New fact gamma about gitea", type: "project", project: "global" }),
+      remember(store, root, { fact: "New fact delta about dolt", type: "project", project: "global" }),
     ]);
     expect(f1.removed).toBe(true);
     expect(f2.removed).toBe(true);
@@ -82,10 +82,10 @@ describe("real-store concurrency (k9q)", () => {
   });
 
   test("a lex recall racing a remember never crashes and returns a well-formed result", async () => {
-    await remember(store, root, { fact: "Steady fact about kafka topics", type: "project" });
+    await remember(store, root, { fact: "Steady fact about kafka topics", type: "project", project: "global" });
     const [recallRes, rememberRes] = await Promise.all([
       recallQueryWithStatus(store, root, "kafka topics", { lexOnly: true }),
-      remember(store, root, { fact: "Racing fact about schema registry", type: "project" }),
+      remember(store, root, { fact: "Racing fact about schema registry", type: "project", project: "global" }),
     ]);
     expect(Array.isArray(recallRes.hits)).toBe(true);
     expect(recallRes.degraded).toBe(false); // lexOnly never degrades

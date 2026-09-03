@@ -108,7 +108,7 @@ export async function seedGoldenStore(
   const golden = await loadGoldenSet(goldenSetPath);
   const tmp = await createTmpMemoryStore(opts);
   for (const entry of golden.corpus) {
-    const res = await remember(tmp.store, tmp.root, { fact: entry.fact, type: entry.type });
+    const res = await remember(tmp.store, tmp.root, { fact: entry.fact, type: entry.type, project: "global" });
     if (!res.wrote) throw new Error(`corpus fact '${entry.slug}' deduped against '${res.duplicateOf}'`);
     if (res.slug !== entry.slug) throw new Error(`corpus fact wrote slug '${res.slug}', expected '${entry.slug}'`);
   }

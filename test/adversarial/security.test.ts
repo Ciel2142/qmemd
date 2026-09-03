@@ -62,7 +62,7 @@ describe("adversarial: traversal slugs against the real engine surfaces (fd8)", 
   });
 
   test("remember --supersedes rejects a traversal target", async () => {
-    await expect(remember(store, root, { fact: "poison", type: "user", supersedes: "../../canary" }))
+    await expect(remember(store, root, { fact: "poison", type: "user", supersedes: "../../canary", project: "global" }))
       .rejects.toThrow(/unsafe slug/);
     await expect(readFile(canary, "utf-8")).resolves.toContain(CANARY_BODY);
   });

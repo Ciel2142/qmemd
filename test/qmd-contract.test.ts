@@ -22,7 +22,7 @@ describe("qmd SDK searchLex field-shape contract (k9q)", () => {
     await mkdir(root, { recursive: true });
     await mkdir(join(parent, "idx"), { recursive: true });
     store = await openQmd({ dbPath: join(parent, "idx", "i.sqlite"), config: { collections: { memory: { path: root, pattern: "**/*.md" } } } });
-    await remember(store, root, { fact: "Contract pin fact about redpanda broker", type: "project" });
+    await remember(store, root, { fact: "Contract pin fact about redpanda broker", type: "project", project: "global" });
   });
   afterAll(async () => {
     await store.close();
