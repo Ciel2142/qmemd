@@ -848,6 +848,7 @@ describe("recallSession", () => {
     expect(out).not.toContain("Project fact 0");
   });
 
+  // covers: SC-77
   test("the footer accounts for every withheld fact under the pinned-only default", async () => {
     await mkdir(join(root, "project"), { recursive: true });
     for (let i = 0; i < 4; i++) await writeProject(root, i, `2026-06-1${i}`, ["jdk"]);
@@ -855,19 +856,7 @@ describe("recallSession", () => {
       { name: "g-0", description: "Global fact", type: "project", tags: ["infra"], project: "global", created: "2026-06-01", pinned: false }, "body"));
     const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
     expect(out).toContain("5 project facts in scope for alpha = 4 repo + 1 global (0 shown, 5 more)");
-    expect(out).toContain("Unshown tags: jdk(4) infra(1)");
-  });
-
-  test("the unshown-tag histogram is capped at 12 tags plus a remainder, not the budget", async () => {
-    // With the sliced lanes off, `unshown` is the whole in-scope corpus; a fit-to-budget-only
-    // histogram just absorbs the bytes those lanes used to spend (3.6 KB observed on a real
-    // corpus). Cap the tag count and name the remainder.
-    for (let i = 0; i < 20; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, [`tag${String(i).padStart(2, "0")}`]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 8000 });
-    const hist = out.split("\n").find(l => l.startsWith("Unshown tags:"))!;
-    expect(hist).toBeDefined();
-    expect(hist.match(/\w+\(\d+\)/g)!.length).toBe(12);
-    expect(hist).toContain("(+8 more)");
+    expect(out).not.toContain("Unshown tags:");
   });
 
   test("a corpus of only unpinned project facts still emits its footer, never ''", async () => {
@@ -879,42 +868,19 @@ describe("recallSession", () => {
     expect(out).toContain("3 project facts in scope for alpha = 3 repo + 0 global (0 shown, 3 more)");
   });
 
+  // covers: SC-77
   test("no unshown footer when in-scope facts fit within projectLimit (e3i)", async () => {
     for (let i = 0; i < 3; i++) await writeProject(root, i, `2026-06-0${i + 1}`, []);
     const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
     expect(out).not.toContain("shown,");
-    expect(out).not.toContain("Unshown tags:");
   });
 
-  test("unshown-tag histogram lists hidden facts' tags by frequency, desc (e3i)", async () => {
-    // 5 newest (shown) carry no tags; the 9 older (unshown) carry the tags we histogram.
-    for (let i = 0; i < 5; i++) await writeProject(root, i, `2026-06-2${i}`, []);
-    for (let i = 0; i < 4; i++) await writeProject(root, 100 + i, `2026-06-0${i + 1}`, ["security"]);
-    for (let i = 0; i < 3; i++) await writeProject(root, 200 + i, `2026-06-1${i}`, ["jdk"]);
-    for (let i = 0; i < 2; i++) await writeProject(root, 300 + i, `2026-05-2${i}`, ["crypto"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
-    expect(out).toContain("Unshown tags: security(4) jdk(3) crypto(2)");
-  });
-
+  // covers: SC-77
   test("unshown footer is dropped (not overflowed) when the budget has no room (e3i)", async () => {
     for (let i = 0; i < 14; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, ["jdk"]);
     const out = await recallSession(root, { project: "alpha", budgetBytes: 100, projectLimit: 5 });
     expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(100);
     expect(out).not.toContain("more)");
-    expect(out).not.toContain("Unshown tags:");
-  });
-
-  test("histogram never appears without its count footer when budget drops the footer (e3i)", async () => {
-    // 5 newest (shown) tagless; 1 oldest (unshown) tagged. Budget fits neither the
-    // ~93-byte footer nor the project lines, but the short histogram WOULD fit alone —
-    // it must not orphan itself above a missing count footer.
-    for (let i = 0; i < 5; i++) await writeProject(root, i, `2026-06-1${i}`, []);
-    await writeProject(root, 99, "2026-06-01", ["security"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 50, projectLimit: 5 });
-    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(50);
-    expect(out).not.toContain("Unshown tags:");
-    // General invariant: a histogram is only meaningful beneath its count footer.
-    if (out.includes("Unshown tags:")) expect(out).toMatch(/\d+ more\)/);
   });
 
   test("footer 'shown' count reflects facts actually emitted, not the slice length, under budget pressure (e3i)", async () => {
@@ -969,94 +935,26 @@ describe("recallSession", () => {
     expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(2000);
   });
 
-  test("Unshown-tags histogram survives the same feedback flood the footer survives (a1d)", async () => {
-    // Same flood as the mqt test: always-on feedback bodies large enough to fill the 2000-byte
-    // cap. The mqt fix reserved the footer's bytes so the gap COUNT survives; a1d extends the
-    // reservation to the histogram so the topic HINT survives too instead of being dropped after
-    // the footer. All unshown facts share one tag so the histogram content is deterministic.
-    await mkdir(join(root, "feedback"), { recursive: true });
-    for (let i = 0; i < 8; i++) {
-      const body = `Feedback fact ${i}. ` + "x".repeat(250);
-      await writeFile(join(root, "feedback", `fb-${i}.md`), serializeMemory(
-        { name: `fb-${i}`, description: body, type: "feedback", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false },
-        body));
-    }
-    for (let i = 0; i < 14; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, ["win"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 2000 });
-    expect(out).toMatch(/\(\d+ shown, \d+ more\)/);     // footer (mqt) still present
-    expect(out).toMatch(/Unshown tags: win\(\d+\)/);    // histogram hint survives (a1d)
-    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(2000);
-  });
-
-  test("the histogram is capped to a fitting tag prefix when the full set exceeds the reserve (a1d)", async () => {
-    // A diverse unshown tag vocabulary whose full "Unshown tags:" line (~173 bytes) exceeds the
-    // bounded reserve cap (120). Under a feedback flood the emit-time cap-to-fit must keep the
-    // highest-count tags and trim the long tail rather than drop the whole hint — exercising the
-    // prefix-shrink branch (review finding), not just the full-fit path the single-tag test covers.
-    await mkdir(join(root, "feedback"), { recursive: true });
-    for (let i = 0; i < 6; i++) {
-      const body = `Feedback fact ${i}. ` + "x".repeat(250);
-      await writeFile(join(root, "feedback", `fb-${i}.md`), serializeMemory(
-        { name: `fb-${i}`, description: body, type: "feedback", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false }, body));
-    }
+  // covers: SC-77
+  test("removing the histogram reservation admits one more pinned fact at the deciding budget margin", async () => {
+    // 20 project facts, each carrying a distinct tag, so the removed histogram reserve would
+    // have capped out at its full 120-byte max (that vocabulary's line ran ~430 bytes, always
+    // over the cap) — freeing those 120 bytes lets one more 87-byte pinned one-liner fit.
+    // Verified against the pre-removal code at this exact budget: 8 pinned facts rendered with
+    // the reservation in place, 9 without it — this assertion fails if it comes back.
     await mkdir(join(root, "project"), { recursive: true });
-    const mk = (i: number, created: string, tags: string[]) => writeFile(join(root, "project", `p-${i}.md`), serializeMemory(
-      { name: `p-${i}`, description: `Project fact ${i}`, type: "project", tags, project: "alpha", created, pinned: false }, "body"));
-    for (let i = 0; i < 5; i++) await mk(900 + i, `2026-06-2${i}`, []);              // newest 5 shown, tagless
-    for (let i = 0; i < 3; i++) await mk(100 + i, `2026-06-1${i}`, ["topcommon"]);   // count 3 (sorts first)
-    for (let i = 0; i < 7; i++) await mk(200 + i, `2026-05-0${i + 1}`, [`distincttaglong0${i}`]); // count 1 each
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 1500 });
-    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(1500);
-    expect(out).toMatch(/\(\d+ shown, \d+ more\)/);              // footer present
-    expect(out).toContain("Unshown tags: topcommon(3)");        // highest-count tag kept, first
-    expect(out).not.toContain("distincttaglong06");             // long tail trimmed (truncation ran)
-    const histLine = out.split("\n").find(l => l.startsWith("Unshown tags:")) ?? "";
-    expect((histLine.match(/distincttaglong/g) ?? []).length).toBeLessThan(7); // strict prefix, not all
-  });
-
-  test("Unshown-tags histogram survives a second lane's budget-drop footer at the default budget (qmemd-trp)", async () => {
-    // Regression for qmemd-trp. a1d reserved bytes for the histogram, but reserveFooter only
-    // reserved a lane's footer on SLICE-OVERFLOW (inScope > projectLimit). A footer ALSO fires
-    // when a lane is BUDGET-DROPPED (its slice fit count-wise but bytes pushed the one-liners
-    // out). Here the reference lane has only 2 facts (<= projectLimit 5, so it was never
-    // reserved), yet the tight default budget drops one -> its UNRESERVED footer fires and ate
-    // the histogram's reserved tail, leaving the bare "(N shown, M more)" nag with no topic
-    // hint -- the exact failure e3i/a1d exist to prevent (postmortem 2026-06-09).
-    //
-    // Corpus mirrors the wild trigger: 2 always-on feedback bodies + 1 pinned project + a
-    // 20-fact project lane (slice-overflow -> reserved footer + histogram reserve) + a 2-fact
-    // reference lane that budget-drops. The filler length lands bodies at the budget edge where
-    // the reference footer competes with the histogram (qmemd-trp byte-ledger, budget=2000).
-    await mkdir(join(root, "feedback"), { recursive: true });
-    await writeFile(join(root, "feedback", "fb-short.md"), serializeMemory(
-      { name: "fb-short", description: "Short feedback.", type: "feedback", tags: [], project: "global", created: "2026-06-09", pinned: false }, "Short feedback body."));
-    const filler = "Filler feedback fact. " + "x".repeat(375);
-    await writeFile(join(root, "feedback", "fb-filler.md"), serializeMemory(
-      { name: "fb-filler", description: filler, type: "feedback", tags: [], project: "global", created: "2026-06-08", pinned: false }, filler));
-
-    await mkdir(join(root, "project"), { recursive: true });
-    await writeFile(join(root, "project", "p-pin.md"), serializeMemory(
-      { name: "p-pin", description: "Pinned project fact " + "z".repeat(120), type: "project", tags: [], project: "alpha", created: "2026-06-07", pinned: true }, "body"));
-    const ptags = ["alpha", "beta", "gamma"];
-    for (let i = 0; i < 20; i++) {
-      await writeFile(join(root, "project", `p-${i}.md`), serializeMemory(
-        { name: `p-${i}`, description: `Project fact ${i} ` + "q".repeat(120), type: "project", tags: [ptags[i % 3]], project: "alpha", created: `2026-05-${String(i + 1).padStart(2, "0")}`, pinned: false }, "body"));
+    for (let i = 0; i < 30; i++) {
+      const name = `pin-${String(i).padStart(3, "0")}`;
+      await writeFile(join(root, "project", `${name}.md`), serializeMemory(
+        { name, description: "D".repeat(60), type: "project", tags: [], project: "alpha", created: `2026-06-${String(i + 1).padStart(2, "0")}`, pinned: true },
+        "body"));
     }
-    await mkdir(join(root, "reference"), { recursive: true });
-    for (let i = 0; i < 2; i++) {
-      await writeFile(join(root, "reference", `r-${i}.md`), serializeMemory(
-        { name: `r-${i}`, description: `Reference fact ${i} ` + "y".repeat(40), type: "reference", tags: ["refwin"], project: "alpha", created: `2026-06-0${i + 1}`, pinned: false }, "body"));
-    }
-
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 2000 });
-    // Both lanes fire a footer: project via slice-overflow, reference via budget-drop. The
-    // reference lane has only 2 facts, so its footer can ONLY be a budget-drop footer.
+    for (let i = 0; i < 20; i++) await writeProject(root, i, `2026-05-${String(i + 1).padStart(2, "0")}`, [`distincttaglong${String(i).padStart(2, "0")}`]);
+    const out = await recallSession(root, { project: "alpha", budgetBytes: 1000, projectLimit: 5 });
+    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(1000);
+    expect(out.split("\n").filter(l => l.startsWith("[pinned:project]")).length).toBe(9);
     expect(out).toMatch(/\d+ project facts in scope for alpha = \d+ repo \+ \d+ global \(\d+ shown, \d+ more\)/);
-    expect(out).toMatch(/\d+ reference facts in scope for alpha = \d+ repo \+ \d+ global \(\d+ shown, \d+ more\)/);
-    // The topic hint must survive the second footer -- the bug dropped it here.
-    expect(out).toMatch(/Unshown tags:/);
-    // ...without ever exceeding the hard cap.
-    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(2000);
+    expect(out).not.toContain("Unshown tags:");
   });
 });
 

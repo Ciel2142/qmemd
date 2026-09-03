@@ -732,13 +732,12 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
   reserveFooter("project", projectsInScope);
   reserveFooter("reference", referencesInScope);
   // qmemd-trp: a footer ALSO fires when a lane is budget-DROPPED (its slice fit count-wise but
-  // bytes pushed its one-liners out), not only on slice-overflow. Such a footer emits in the same
-  // tail as the histogram, yet reserveFooter above never reserved it — so a second lane's
-  // budget-drop footer stole the histogram's reserved bytes and starved the topic hint (the a1d
-  // failure, one lane over). This only matters once a histogram is in play (reserve > 0 ⇒ a lane
-  // overflowed); then reserve a footer slot for any OTHER in-scope lane small enough to escape the
-  // slice-overflow reservation but still able to budget-drop, so the histogram reserve below
-  // survives it. Gated on reserve > 0 so a footer-free small corpus pays nothing.
+  // bytes pushed its one-liners out), not only on slice-overflow. reserveFooter above never
+  // reserved that case, so a second lane's budget-drop footer could steal a first lane's already-
+  // reserved bytes (the a1d failure, one lane over). This only matters once a footer reservation
+  // is in play (reserve > 0 ⇒ a lane overflowed); then reserve a footer slot for any OTHER
+  // in-scope lane small enough to escape the slice-overflow reservation but still able to
+  // budget-drop. Gated on reserve > 0 so a footer-free small corpus pays nothing.
   if (reserve > 0) {
     const reserveDropFooter = (label: "project" | "reference", inScopeList: ParsedMemory[]) => {
       if (inScopeList.length === 0 || inScopeList.length > projectLimit) return; // empty ⇒ no footer; overflow ⇒ already reserved
@@ -747,28 +746,9 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
     reserveDropFooter("project", projectsInScope);
     reserveDropFooter("reference", referencesInScope);
   }
-  // qmemd-a1d: when a slice-gap is being reserved (reserve > 0 ⇒ a footer will fire), also
-  // reserve bytes for the single "Unshown tags:" histogram line so the topic hint survives a
-  // feedback flood instead of being best-effort-dropped after the footer (qmemd-mqt only saved
-  // the count). Cap the reserve so a large tag vocabulary can't starve the always-on bodies; the
-  // emit-time cap-to-fit below trims the histogram to whatever room actually remains.
-  const HIST_RESERVE_MAX = 120; // "Unshown tags: " (14) + ~a dozen short tag(count) entries
-  if (reserve > 0) {
-    // Worst-case unshown set = EVERY in-scope fact (budget pressure can drop the sliced ones too,
-    // not just the slice-tail) — size the reserve from that so a later budget-drop can't widen the
-    // emitted histogram past what was reserved (e.g. "win(9)" reserved, "win(14)" emitted). Capped
-    // so a large tag vocabulary can't starve the always-on bodies; the emit-time cap-to-fit trims
-    // to whatever room actually remains.
-    const worstCaseTags = [...projectsInScope, ...referencesInScope].map(m => m.frontmatter.tags);
-    const histLine = formatTagHistogram(tagHistogram(worstCaseTags));
-    if (histLine) {
-      reserve += Math.min(HIST_RESERVE_MAX, Buffer.byteLength(`Unshown tags: ${histLine}`, "utf-8") + 1 /* join "\n" */);
-    }
-  }
   // qmemd-b1a: reserve the platform-hidden user/feedback signal alongside the e3i footers — it
   // is the same over-trust failure class (the agent treats user/feedback as exhaustive), so it
-  // must not be a body-flood casualty. Added after the histogram reserve so a hidden signal on
-  // its own never spuriously triggers the slice-gap histogram reservation above.
+  // must not be a body-flood casualty.
   if (platformHiddenLine) reserve += Buffer.byteLength(platformHiddenLine, "utf-8") + 1 /* join "\n" */;
   // Only reserve if it still leaves room for the header plus some bodies; otherwise fall back
   // to the best-effort path (preserves the tiny-budget behaviour where the footer is dropped,
@@ -797,7 +777,7 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
     lines.push(truncateToBytes(block, avail) + ELLIPSIS);
   };
   // dropped: facts the budget pushed out of a one-line block, so the e3i footer can
-  // count what was *actually* emitted (not merely attempted) and tag-histogram them.
+  // count what was *actually* emitted (not merely attempted).
   const oneLine = (m: ParsedMemory, label: string, dropped?: ParsedMemory[]) => {
     const block = `[${label}] ${m.frontmatter.description} (${m.frontmatter.name})`;
     if (Buffer.byteLength(lines.concat(block).join("\n"), "utf-8") > workBudget) { truncated++; dropped?.push(m); return; }
@@ -819,7 +799,6 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
   // last, dropped wholesale if no room.
   const fits = (line: string): boolean =>
     Buffer.byteLength(lines.concat(line).join("\n"), "utf-8") <= budget;
-  const unshown: ParsedMemory[] = [];
   const countFooter = (label: "project" | "reference", inScopeList: ParsedMemory[], sliced: ParsedMemory[], dropped: ParsedMemory[]) => {
     const shown = sliced.length - dropped.length; // emitted, not merely attempted
     const hidden = inScopeList.length - shown;
@@ -828,32 +807,11 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
     // non-repo remainder is the `global` lane.
     const repo = inScopeList.filter(m => m.frontmatter.project === curProject).length;
     const line = footerLine(label, inScopeList.length, shown, hidden, repo, inScopeList.length - repo);
-    if (!fits(line)) return; // no room: drop the footer AND its histogram contribution (no orphan "Unshown tags:")
+    if (!fits(line)) return; // no room: drop the footer
     lines.push(line);
-    // The hidden set = facts beyond the slice + sliced facts the budget dropped.
-    unshown.push(...inScopeList.slice(sliced.length), ...dropped);
   };
   countFooter("project", projectsInScope, projects, projDropped);
   countFooter("reference", referencesInScope, references, refDropped);
-  if (unshown.length > 0) {
-    // Histogram of the unshown facts' tags — a topic hint for what's hidden. The raw
-    // count above is the primary signal; facts with tags:[] contribute nothing here.
-    // The reservation above guarantees room for a bounded line, but budget-dropped facts
-    // can push the full histogram past the reserve, so emit the longest highest-count tag
-    // prefix that fits rather than dropping the whole hint (qmemd-a1d).
-    // Cap the tag COUNT, not just the bytes: with the sliced lanes off, `unshown` is the whole
-    // in-scope corpus, so a fit-to-budget-only loop grew this line to 3.6 KB of single-count
-    // tags — it simply absorbed the bytes the project/reference lanes used to spend. Twelve
-    // tags plus a "(+N more)" remainder, matching the beacon's overview. Still shrunk further
-    // when even that does not fit.
-    const HIST_MAX_TAGS = 12;
-    const hist = tagHistogram(unshown.map(m => m.frontmatter.tags));
-    for (let n = Math.min(hist.length, HIST_MAX_TAGS); n > 0; n--) {
-      const dropped = hist.length - n;
-      const line = `Unshown tags: ${formatTagHistogram(hist.slice(0, n))}${dropped > 0 ? ` (+${dropped} more)` : ""}`;
-      if (fits(line)) { lines.push(line); break; }
-    }
-  }
 
   // qmemd-b1a: surface user/feedback facts the host platform gate hid, so an "exhaustive" lane
   // is never silently trimmed. Bytes reserved above, so this fits even after a body flood.
@@ -2837,8 +2795,8 @@ export async function markReviewed(
 
 // =============================================================================
 // tagHistogram / projectOverview — model-free corpus shape (tfu).
-// Shared by the session snapshot's "Unshown tags:" line and the memory-presence
-// beacon / `qmemd tags`. Single source for the tag-frequency rendering.
+// Shared by the memory-presence beacon and `qmemd tags`. Single source for the
+// tag-frequency rendering.
 // =============================================================================
 
 /** Tag frequency over a set of tag-lists, sorted by count desc then tag name asc.
