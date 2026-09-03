@@ -9,6 +9,7 @@ import { gitPullFfOnly, sessionSyncWarning, type GitDeps } from "../git.js";
 import { rootHash } from "../client.js";
 import { DAEMON_TOKEN_HEADER, readOrCreateDaemonToken, tokenMatches } from "../token.js";
 import { shouldAutoResolve, autoRecallMode, resolveExplicitMode, type RecallMode } from "../capability.js";
+import { defaultProjectFor, isBlankProject } from "../scope.js";
 import { basename } from "node:path";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -115,6 +116,10 @@ function sanitizeToolError(err: unknown): CallToolResult {
   return { content: [{ type: "text", text }], isError: true };
 }
 
+export type WriteProjectPolicy = "cwd-default" | "required";
+
+const WRITE_PROJECT_DESCRIPTION = "Scope of this fact: the basename of your working directory (the repo you are in), or `global` for a fact true in every repo.";
+
 export interface MemoryServerOptions {
   /**
    * Default project for the session snapshot when the caller passes none (qmemd-wdf). The
@@ -132,6 +137,15 @@ export interface MemoryServerOptions {
   warmServer?: boolean;
   /** Injectable auto-mode resolver (tests). Production uses capability.autoRecallMode. */
   resolveAutoMode?: () => Promise<RecallMode>;
+  /**
+   * How the remember tool obtains its write scope (qmemd-due). "cwd-default" (the stdio
+   * default) resolves a blank project from the type + cwd, like the CLI. The HTTP daemon
+   * passes "required": its cwd is HOME, not a repo, so it has nothing to default from and
+   * demands an explicit scope through the input schema instead.
+   */
+  writeProjectPolicy?: WriteProjectPolicy;
+  /** Working directory the cwd-default write scope derives from (tests); default process.cwd(). */
+  cwd?: string;
 }
 
 /**
@@ -142,6 +156,11 @@ export interface MemoryServerOptions {
  */
 export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: string, opts: MemoryServerOptions = {}): McpServer {
   const server = new McpServer({ name: "qmemd", version: VERSION });
+  // Under "required" the schema itself rejects a missing/blank/non-string scope, so the tool
+  // handler never runs and nothing is written — the daemon has no cwd to fall back to.
+  const writeProject = opts.writeProjectPolicy === "required"
+    ? z.string().refine(p => !isBlankProject(p), { message: "project must not be blank" }).describe(WRITE_PROJECT_DESCRIPTION)
+    : z.string().optional().describe(`${WRITE_PROJECT_DESCRIPTION} Default: 'global' for user/feedback facts, the working-directory basename for project/reference facts.`);
 
   server.registerTool("remember", {
     title: "Remember",
@@ -151,7 +170,7 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
       fact: z.string().describe("The fact to remember, as a self-contained sentence."),
       type: MEMORY_TYPES_Z.optional().describe("Default: reference. On replace: omit to keep the existing type, or pass a different one to retype the fact (it moves folders). Note user/feedback facts are injected into every session; project/reference are not."),
       tags: z.array(z.string()).optional(),
-      project: z.string().optional().describe("Project name, or 'global' (default)."),
+      project: writeProject,
       pin: z.boolean().optional().describe("Pin to always surface at session start."),
       source: z.string().optional().describe("Where this fact came from (URL, 'user, <date>', or the producing tool). Fill it for provenance — it's shown when a write conflicts with an existing fact so you can judge which wins."),
       as: z.string().optional().describe("Explicit slug."),
@@ -165,7 +184,13 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
   }, async ({ fact, type, tags, project, pin, source, as: asSlug, replace, supersedes, force, platforms, ttl, reviewBy }) => {
     try {
       const store = await getStore();
-      const res = await remember(store, root, { fact, type, tags, project, pinned: pin, source, as: asSlug, replace, supersedes, force, platforms, ttl, reviewBy });
+      // Blank (absent or whitespace-only) project defaults per type+cwd (qmemd-due), mirroring
+      // the CLI. `replace` is an in-place update, so a blank there stays undefined and the engine
+      // keeps the fact's stored scope. Under "required" the schema guarantees a non-blank value,
+      // so the default never fires.
+      const explicitProject = isBlankProject(project) ? undefined : project;
+      const writeScope = replace ? explicitProject : explicitProject ?? defaultProjectFor(type ?? "reference", opts.cwd ?? process.cwd());
+      const res = await remember(store, root, { fact, type, tags, project: writeScope, pinned: pin, source, as: asSlug, replace, supersedes, force, platforms, ttl, reviewBy });
       let text: string;
       if (res.wrote) {
         text = `Remembered '${res.slug}' (${res.type}).`;
@@ -600,7 +625,7 @@ export async function startMcpHttpServer(
   // tools, no IO/model); the store stays shared + warm. Daemon snapshot default 'global'
   // (qmemd-wdf): the daemon cwd is HOME, not a project.
   async function dispatchMcp(request: Request, parsedBody: unknown): Promise<Response> {
-    const server = buildMemoryServer(store, root, { sessionDefaultProject: "global", warmServer: true });
+    const server = buildMemoryServer(store, root, { sessionDefaultProject: "global", warmServer: true, writeProjectPolicy: "required" });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -762,6 +787,9 @@ export async function startMcpHttpServer(
           ttl?: unknown; reviewBy?: unknown;
         };
         if (!body.fact || typeof body.fact !== "string") { sendJson(nodeRes, 400, { error: "Missing required field: fact" }); return; }
+        // The daemon's cwd is HOME, not a repo, so it has nothing to default a write scope from
+        // (qmemd-due): demand one rather than silently landing the fact in 'global'.
+        if (typeof body.project !== "string" || isBlankProject(body.project)) { sendJson(nodeRes, 400, { error: "Missing required field: project" }); return; }
         if (body.type !== undefined && !(MEMORY_TYPES as string[]).includes(body.type)) {
           sendJson(nodeRes, 400, { error: `invalid type '${body.type}'. Use one of: ${MEMORY_TYPES.join(" | ")}` });
           return;
@@ -791,18 +819,17 @@ export async function startMcpHttpServer(
           return;
         }
         // Type parity with the MCP zod layer (qp-rest-remember-typecheck-parity-scj): pin/force
-        // are booleans and project/source/as/replace/supersedes are strings there. Passed
-        // verbatim, a mistyped value silently CORRUPTS the fact — pin:"yes" serializes
-        // `pinned: yes` which parseMemory reads as NOT pinned (wrote:true, but unpinned), and
-        // project:123 scopes the fact to a name no basename(cwd)/global recall gate ever matches
-        // (stored yet permanently invisible). Reject a mismatch with 400, like the checks above.
+        // are booleans and source/as/replace/supersedes are strings there. Passed verbatim, a
+        // mistyped value silently CORRUPTS the fact — pin:"yes" serializes `pinned: yes` which
+        // parseMemory reads as NOT pinned (wrote:true, but unpinned). Reject a mismatch with
+        // 400, like the checks above. `project` is covered by the required-scope guard above.
         for (const k of ["pin", "force"] as const) {
           if (body[k] !== undefined && typeof body[k] !== "boolean") {
             sendJson(nodeRes, 400, { error: `${k} must be a boolean` });
             return;
           }
         }
-        for (const k of ["project", "source", "as", "replace", "supersedes"] as const) {
+        for (const k of ["source", "as", "replace", "supersedes"] as const) {
           if (body[k] !== undefined && typeof body[k] !== "string") {
             sendJson(nodeRes, 400, { error: `${k} must be a string` });
             return;

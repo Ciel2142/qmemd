@@ -171,7 +171,7 @@ describe("HTTP server: REST verbs", () => {
     // remember
     const rem = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fact: "qmemd rest cycle marker alpha", type: "project" }),
+      body: JSON.stringify({ fact: "qmemd rest cycle marker alpha", type: "project", project: "global" }),
     });
     expect(rem.status).toBe(200);
     const remJson = await rem.json() as any;
@@ -239,7 +239,7 @@ describe("HTTP server: REST verbs", () => {
   test("remember with invalid type -> 400", async () => {
     const res = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fact: "x", type: "bogus" }),
+      body: JSON.stringify({ fact: "x", type: "bogus", project: "global" }),
     });
     expect(res.status).toBe(400);
   });
@@ -247,7 +247,7 @@ describe("HTTP server: REST verbs", () => {
   test("remember replace with a nonexistent slug -> 400, not a silent create (acm)", async () => {
     const res = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fact: "Updated body", replace: "no-such-slug-http" }),
+      body: JSON.stringify({ fact: "Updated body", replace: "no-such-slug-http", project: "global" }),
     });
     expect(res.status).toBe(400);
     expect((await res.json() as any).error).toMatch(/no fact named/);
@@ -258,7 +258,7 @@ describe("HTTP server: REST verbs", () => {
     // catch-all 500 the old message-prefix allowlist produced by omission.
     const res = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fact: "</fact>\n<parameter name=\"type\">project", type: "reference" }),
+      body: JSON.stringify({ fact: "</fact>\n<parameter name=\"type\">project", type: "reference", project: "global" }),
     });
     expect(res.status).toBe(400);
     expect((await res.json() as any).error).toMatch(/entirely leaked tool-call markup/);
@@ -334,8 +334,8 @@ describe("HTTP server: input validation parity (qmemd-4hh)", () => {
   const J = { "Content-Type": "application/json" };
 
   test("recall clamps a non-positive limit instead of slicing to an empty result", async () => {
-    await fetch(`${baseUrl}/remember`, { method: "POST", headers: J, body: JSON.stringify({ fact: "clamptest fact one alpha", type: "project", as: "clamp-a" }) });
-    await fetch(`${baseUrl}/remember`, { method: "POST", headers: J, body: JSON.stringify({ fact: "clamptest fact two beta", type: "project", as: "clamp-b" }) });
+    await fetch(`${baseUrl}/remember`, { method: "POST", headers: J, body: JSON.stringify({ fact: "clamptest fact one alpha", type: "project", as: "clamp-a", project: "global" }) });
+    await fetch(`${baseUrl}/remember`, { method: "POST", headers: J, body: JSON.stringify({ fact: "clamptest fact two beta", type: "project", as: "clamp-b", project: "global" }) });
     // limit:0 — unclamped this is store.searchLex(limit:0) + hits.slice(0,0) => 0 hits.
     // Clamped to >=1 it returns the top hit.
     const res = await fetch(`${baseUrl}/recall`, { method: "POST", headers: J, body: JSON.stringify({ query: "clamptest", lexOnly: true, limit: 0 }) });
@@ -349,12 +349,12 @@ describe("HTTP server: input validation parity (qmemd-4hh)", () => {
   });
 
   test("remember with non-array tags -> 400", async () => {
-    const res = await fetch(`${baseUrl}/remember`, { method: "POST", headers: J, body: JSON.stringify({ fact: "tagcheck fact", type: "project", tags: "notanarray" }) });
+    const res = await fetch(`${baseUrl}/remember`, { method: "POST", headers: J, body: JSON.stringify({ fact: "tagcheck fact", type: "project", tags: "notanarray", project: "global" }) });
     expect(res.status).toBe(400);
   });
 
   test("remember with non-string tag elements -> 400", async () => {
-    const res = await fetch(`${baseUrl}/remember`, { method: "POST", headers: J, body: JSON.stringify({ fact: "tagcheck fact two", type: "project", tags: ["ok", 123] }) });
+    const res = await fetch(`${baseUrl}/remember`, { method: "POST", headers: J, body: JSON.stringify({ fact: "tagcheck fact two", type: "project", tags: ["ok", 123], project: "global" }) });
     expect(res.status).toBe(400);
   });
 });
@@ -433,7 +433,7 @@ describe("HTTP server: REST input-validation parity, part 2 (qp-rest-recall-limi
   test("3y5: {limit:null} is treated as unset (engine default), not silently coerced to 1", async () => {
     // Seed three lexically-matching facts (model-free lex writes) under a unique token.
     for (const s of ["alpha", "beta", "gamma"]) {
-      await post("/remember", { fact: `wibbletoken scoping marker ${s}`, type: "project" });
+      await post("/remember", { fact: `wibbletoken scoping marker ${s}`, type: "project", project: "global" });
     }
     // null is the common "unset" idiom. The bug coerced Number(null)=0 -> Math.max(1,..)=1, so
     // the caller got ONE hit + moreMatches>0 (looks like legit top-N) and missed the rest.
@@ -444,7 +444,7 @@ describe("HTTP server: REST input-validation parity, part 2 (qp-rest-recall-limi
   });
 
   test("scj: pin as a non-boolean -> 400 (would else serialize `pinned: yes` and read back NOT pinned)", async () => {
-    expect((await post("/remember", { fact: "pin-parity marker", type: "project", pin: "yes" })).status).toBe(400);
+    expect((await post("/remember", { fact: "pin-parity marker", type: "project", pin: "yes", project: "global" })).status).toBe(400);
   });
 
   test("scj: project as a non-string -> 400 (would else scope the fact invisible to every recall)", async () => {
@@ -452,7 +452,7 @@ describe("HTTP server: REST input-validation parity, part 2 (qp-rest-recall-limi
   });
 
   test("scj: a well-typed pin:true still writes (no over-rejection)", async () => {
-    const res = await post("/remember", { fact: "well-typed pin sanity marker unique-xq7", type: "project", pin: true });
+    const res = await post("/remember", { fact: "well-typed pin sanity marker unique-xq7", type: "project", pin: true, project: "global" });
     expect(res.status).toBe(200);
     expect((await res.json() as { wrote: boolean }).wrote).toBe(true);
   });
@@ -497,7 +497,7 @@ describe("HTTP server: localhost guard, end-to-end (qmemd-1z9)", () => {
     const res = await rawRequest(handle.port, {
       method: "POST", path: "/remember",
       headers: { Host: "evil.example.com", "Content-Type": "application/json" },
-      body: JSON.stringify({ fact: "csrf injection marker", type: "project" }),
+      body: JSON.stringify({ fact: "csrf injection marker", type: "project", project: "global" }),
     });
     expect(res.status).toBe(403);
   });
@@ -506,7 +506,7 @@ describe("HTTP server: localhost guard, end-to-end (qmemd-1z9)", () => {
     const res = await rawRequest(handle.port, {
       method: "POST", path: "/remember",
       headers: { Host: `127.0.0.1:${handle.port}`, Origin: "http://evil.example.com", "Content-Type": "application/json" },
-      body: JSON.stringify({ fact: "csrf injection marker", type: "project" }),
+      body: JSON.stringify({ fact: "csrf injection marker", type: "project", project: "global" }),
     });
     expect(res.status).toBe(403);
   });
@@ -515,7 +515,7 @@ describe("HTTP server: localhost guard, end-to-end (qmemd-1z9)", () => {
     const res = await rawRequest(handle.port, {
       method: "POST", path: "/remember",
       headers: { Host: `127.0.0.1:${handle.port}`, "Content-Type": "text/plain" },
-      body: JSON.stringify({ fact: "csrf injection marker", type: "project" }),
+      body: JSON.stringify({ fact: "csrf injection marker", type: "project", project: "global" }),
     });
     expect(res.status).toBe(415);
   });
@@ -573,7 +573,7 @@ describe("HTTP server: daemon token auth (mio)", () => {
 
   test("POST /remember with no token -> 401 (no unauthenticated writes either)", async () => {
     const res = await rawFetch(`${baseUrl}/remember`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fact: "unauthenticated write marker", type: "project" }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fact: "unauthenticated write marker", type: "project", project: "global" }),
     });
     expect(res.status).toBe(401);
   });
@@ -636,25 +636,25 @@ describe("HTTP server: daemon session scope (wdf)", () => {
 
 describe("REST platform scoping", () => {
   test("/remember accepts a valid platforms array", async () => {
-    const r = await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "systemd serves the daemon on linux", type: "project", platforms: ["linux"] }) });
+    const r = await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "systemd serves the daemon on linux", type: "project", platforms: ["linux"], project: "global" }) });
     expect(r.status).toBe(200);
     const j = await r.json();
     expect((j as any).wrote).toBe(true);
   });
 
   test("/remember rejects a non-enum platforms token with 400", async () => {
-    const r = await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "bad", type: "project", platforms: ["freebsd"] }) });
+    const r = await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "bad", type: "project", platforms: ["freebsd"], project: "global" }) });
     expect(r.status).toBe(400);
   });
 
   test("/remember rejects a non-array platforms with 400", async () => {
-    const r = await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "bad", type: "project", platforms: "linux" }) });
+    const r = await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "bad", type: "project", platforms: "linux", project: "global" }) });
     expect(r.status).toBe(400);
   });
 
   test("/list?platform=linux filters and labels", async () => {
-    await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "a mac fact about gizmos", type: "project", platforms: ["macos"] }) });
-    await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "a cross fact about gizmos", type: "project" }) });
+    await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "a mac fact about gizmos", type: "project", platforms: ["macos"], project: "global" }) });
+    await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "a cross fact about gizmos", type: "project", project: "global" }) });
     const r = await fetch(`${baseUrl}/list?platform=linux`);
     expect(r.status).toBe(200);
     const j = await r.json() as any;
@@ -670,14 +670,14 @@ describe("REST platform scoping", () => {
   });
 
   test("/recall allPlatforms:true returns the macos fact (host gate disabled)", async () => {
-    await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "a mac fact about sprockets", type: "project", platforms: ["macos"] }) });
+    await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "a mac fact about sprockets", type: "project", platforms: ["macos"], project: "global" }) });
     const r = await fetch(`${baseUrl}/recall`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query: "sprockets", lexOnly: true, allPlatforms: true }) });
     const j = await r.json() as any;
     expect(j.hits.some((h: { slug: string }) => h.slug === "a-mac-fact-about-sprockets")).toBe(true);
   });
 
   test("/remember accepts mixed-case platforms and stores canonical lowercase (qmemd-fvv)", async () => {
-    const r = await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "rest mixed case windows fact", type: "project", platforms: ["Windows"] }) });
+    const r = await fetch(`${baseUrl}/remember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fact: "rest mixed case windows fact", type: "project", platforms: ["Windows"], project: "global" }) });
     expect(r.status).toBe(200); // not a 400 — case-insensitive, mirroring the lowercasing CLI/write path
     // stored lowercase: visible under ?platform=windows
     const win = await (await fetch(`${baseUrl}/list?platform=windows`)).json() as any;
@@ -697,7 +697,7 @@ describe("REST remember: supersedes param (bri)", () => {
     // Seed the old fact.
     const seed = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: J,
-      body: JSON.stringify({ fact: "Old bri rest truth about auth tokens", type: "project", as: "bri-old-fact" }),
+      body: JSON.stringify({ fact: "Old bri rest truth about auth tokens", type: "project", as: "bri-old-fact", project: "global" }),
     });
     expect(seed.status).toBe(200);
     expect(((await seed.json()) as { wrote: boolean }).wrote).toBe(true);
@@ -705,7 +705,7 @@ describe("REST remember: supersedes param (bri)", () => {
     // Write successor, superseding the old one.
     const res = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: J,
-      body: JSON.stringify({ fact: "New bri rest truth about auth tokens (revised)", type: "project", as: "bri-new-fact", supersedes: "bri-old-fact" }),
+      body: JSON.stringify({ fact: "New bri rest truth about auth tokens (revised)", type: "project", as: "bri-new-fact", supersedes: "bri-old-fact", project: "global" }),
     });
     expect(res.status).toBe(200);
     const body = await res.json() as { wrote: boolean; slug: string; supersededSlug?: string; conflictsWith?: string; supersedeWarning?: string };
@@ -720,7 +720,7 @@ describe("REST remember: supersedes param (bri)", () => {
   test("POST /remember supersedes a missing slug -> 400 with no-fact-named message (bri)", async () => {
     const res = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: J,
-      body: JSON.stringify({ fact: "Replacement fact bri", supersedes: "no-such-slug-bri-http" }),
+      body: JSON.stringify({ fact: "Replacement fact bri", supersedes: "no-such-slug-bri-http", project: "global" }),
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toMatch(/no fact named/);
@@ -729,7 +729,7 @@ describe("REST remember: supersedes param (bri)", () => {
   test("POST /remember supersedes cannot combine with replace -> 400 (bri)", async () => {
     const res = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: J,
-      body: JSON.stringify({ fact: "Combo test bri", replace: "some-slug", supersedes: "other-slug" }),
+      body: JSON.stringify({ fact: "Combo test bri", replace: "some-slug", supersedes: "other-slug", project: "global" }),
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toMatch(/supersedes.*combine|combine.*supersede/i);
@@ -739,7 +739,7 @@ describe("REST remember: supersedes param (bri)", () => {
     // Seed the fact.
     const seed = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: J,
-      body: JSON.stringify({ fact: "Self-slug HTTP original", type: "project", as: "self-slug-bri-http" }),
+      body: JSON.stringify({ fact: "Self-slug HTTP original", type: "project", as: "self-slug-bri-http", project: "global" }),
     });
     expect(seed.status).toBe(200);
     expect(((await seed.json()) as { wrote: boolean }).wrote).toBe(true);
@@ -747,7 +747,7 @@ describe("REST remember: supersedes param (bri)", () => {
     // A fact cannot supersede itself — the catch block maps "a fact cannot supersede itself" to 400.
     const res = await fetch(`${baseUrl}/remember`, {
       method: "POST", headers: J,
-      body: JSON.stringify({ fact: "Self-slug HTTP updated", type: "project", as: "self-slug-bri-http", supersedes: "self-slug-bri-http" }),
+      body: JSON.stringify({ fact: "Self-slug HTTP updated", type: "project", as: "self-slug-bri-http", supersedes: "self-slug-bri-http", project: "global" }),
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toMatch(/cannot supersede itself/);
@@ -761,7 +761,7 @@ describe("REST recall completeness counters (40h)", () => {
     for (const fact of ["fortyh redpanda broker nine", "fortyh grafana dashboard alpha", "fortyh qdrant collection beta"]) {
       const rem = await fetch(`${baseUrl}/remember`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fact, type: "project" }),
+        body: JSON.stringify({ fact, type: "project", project: "global" }),
       });
       expect(rem.status).toBe(200);
       slugs.push(((await rem.json()) as { slug: string }).slug);
@@ -808,7 +808,7 @@ describe("HTTP server: warm-daemon delegation surface (qmemd-vuk)", () => {
     ] as const) {
       const rem = await fetch(`${baseUrl}/remember`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fact, type: "project", platforms }),
+        body: JSON.stringify({ fact, type: "project", platforms, project: "global" }),
       });
       expect(rem.status).toBe(200);
       slugs.push(((await rem.json()) as { slug: string }).slug);
@@ -849,5 +849,31 @@ describe("HTTP server: warm-daemon delegation surface (qmemd-vuk)", () => {
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toMatch(/mutually exclusive/i);
+  });
+});
+
+describe("REST /remember requires an explicit project (qmemd-due)", () => {
+  // The daemon's cwd is HOME, so it has no repo to default a write scope from: an unscoped
+  // write would land in 'global' and follow the agent into every repo. Reject it up front,
+  // before the engine, so nothing is written.
+  const post = (body: unknown) => fetch(`${baseUrl}/remember`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+
+  // covers: SC-31
+  test("a missing, blank or non-string project -> 400 with the missing-field body, nothing written", async () => {
+    for (const project of [undefined, "", "   ", 123]) {
+      const res = await post({ fact: "REST write without a scope", type: "project", as: "rest-scope-guard", ...(project !== undefined && { project }) });
+      expect(res.status).toBe(400);
+      expect(await res.text()).toBe('{"error":"Missing required field: project"}');
+    }
+    expect((await fetch(`${baseUrl}/get?slug=rest-scope-guard`)).status).toBe(404);
+  });
+
+  // covers: SC-31
+  test("an explicit project writes and the DTO echoes the written scope", async () => {
+    const res = await post({ fact: "REST write with an explicit scope", type: "project", project: "rest-scope-proj", as: "rest-scope-ok" });
+    expect(res.status).toBe(200);
+    expect(await res.json() as { wrote: boolean; project?: string }).toMatchObject({ wrote: true, project: "rest-scope-proj" });
   });
 });

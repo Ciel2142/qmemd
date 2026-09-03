@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { createStore as openQmd, type QMDStore } from "@tobilu/qmd";
@@ -995,5 +996,87 @@ describe("MCP recall capability gate", () => {
     await store.close();
     await rm(root, { recursive: true, force: true });
     await rm(dbDir, { recursive: true, force: true });
+  });
+});
+
+describe("MCP write scope policy (qmemd-due)", () => {
+  // The stdio server writes for the repo the agent is in, so a project/reference fact
+  // defaults to basename(cwd) and a user/feedback fact to 'global'. The daemon's cwd is
+  // HOME, so it has no repo to default from and must demand an explicit scope instead.
+  let root: string;
+  let dbDir: string;
+  let store: QMDStore;
+  let client: Client;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "qmemd-mcp-scope-"));
+    dbDir = await mkdtemp(join(tmpdir(), "qmemd-mcp-scopedb-"));
+    store = await openQmd({
+      dbPath: join(dbDir, "i.sqlite"),
+      config: { collections: { memory: { path: root, pattern: "**/*.md" } } },
+    });
+  });
+
+  afterEach(async () => {
+    await client.close();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  });
+
+  async function connect(opts: Parameters<typeof buildMemoryServer>[2]): Promise<void> {
+    const server = buildMemoryServer(store, root, opts);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    client = new Client({ name: "test-client", version: "1.0.0" });
+    await client.connect(clientTransport);
+  }
+
+  // covers: SC-29
+  test("cwd-default scopes a project write to the cwd basename and a user write to global", async () => {
+    await connect({ cwd: "/x/repo-a" });
+
+    const proj = await client.callTool({ name: "remember", arguments: { fact: "Repo A pins the broker to port 9092", type: "project", as: "scope-proj" } });
+    expect((proj.structuredContent as { project?: string }).project).toBe("repo-a");
+    expect(await readFile(join(root, "project", "scope-proj.md"), "utf-8")).toContain("\nproject: repo-a\n");
+
+    const user = await client.callTool({ name: "remember", arguments: { fact: "Prefers tabs over spaces everywhere", type: "user", as: "scope-user" } });
+    expect((user.structuredContent as { project?: string }).project).toBe("global");
+    expect(await readFile(join(root, "user", "scope-user.md"), "utf-8")).toContain("\nproject: global\n");
+  });
+
+  // covers: SC-29
+  test("cwd-default leaves a replace without project on the fact's stored scope", async () => {
+    await connect({ cwd: "/x/repo-a" });
+    await client.callTool({ name: "remember", arguments: { fact: "Old truth about the auth gateway", type: "project", project: "kept-proj", as: "scope-replace" } });
+
+    const res = await client.callTool({ name: "remember", arguments: { fact: "New truth about the auth gateway", replace: "scope-replace" } });
+    expect((res.structuredContent as { wrote: boolean; project?: string }).wrote).toBe(true);
+    expect((res.structuredContent as { project?: string }).project).toBe("kept-proj");
+    expect(await readFile(join(root, "project", "scope-replace.md"), "utf-8")).toContain("\nproject: kept-proj\n");
+  });
+
+  // covers: SC-30
+  test("the 'required' policy rejects a missing, blank or non-string project before anything is written", async () => {
+    await connect({ writeProjectPolicy: "required" });
+    for (const project of [undefined, "", "   ", 123]) {
+      const res = await client.callTool({
+        name: "remember",
+        arguments: { fact: "Daemon write without a scope", type: "project", as: "scope-required", ...(project !== undefined && { project }) },
+      });
+      expect(res.isError).toBe(true);
+      expect((res.content as { text: string }[])[0].text).toContain("project");
+    }
+    expect(existsSync(join(root, "project", "scope-required.md"))).toBe(false);
+  });
+
+  // covers: SC-30
+  test("the 'required' policy writes when an explicit project is given", async () => {
+    await connect({ writeProjectPolicy: "required" });
+    const res = await client.callTool({ name: "remember", arguments: { fact: "Daemon write with an explicit scope", type: "project", project: "global", as: "scope-required-ok" } });
+    const sc = res.structuredContent as { wrote: boolean; project?: string };
+    expect(sc.wrote).toBe(true);
+    expect(sc.project).toBe("global");
+    expect(await readFile(join(root, "project", "scope-required-ok.md"), "utf-8")).toContain("\nproject: global\n");
   });
 });
