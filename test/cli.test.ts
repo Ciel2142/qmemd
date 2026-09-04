@@ -715,21 +715,21 @@ describe("CLI hook probe e2e", () => {
 
   const failure = JSON.stringify({
     session_id: "s1", cwd: "/work/repo-a", tool_name: "Bash", is_interrupt: false,
-    error: "Exit code 1\nnpm ERR! ERESOLVE unable to resolve dependency tree",
+    error: "Exit code 1\nnpm ERR! ERESOLVE key=value conflict",
     tool_input: { command: "npm ci" },
   });
 
   // covers: SC-65
   test("a matching failure prints a PostToolUseFailure envelope naming the fact", () => {
     const seed = runCli(["remember",
-      "npm ci fails with npm ERR! ERESOLVE unable to resolve dependency tree when peer deps conflict",
-      "--type", "project", "--project", "repo-a", "--as", "npm-ci-eresolve"], root);
+      "npm ci fails with npm ERR! ERESOLVE key=value conflict",
+      "--type", "project", "--project", "repo-a", "--as", "npm-ci-eresolve-key-value"], root);
     expect(seed.status, seed.stderr).toBe(0);
     const res = runProbeHook(failure, root, cache);
     expect(res.status).toBe(0);
     const out = JSON.parse(res.stdout);
     expect(out.hookSpecificOutput.hookEventName).toBe("PostToolUseFailure");
-    expect(out.hookSpecificOutput.additionalContext).toContain("npm-ci-eresolve");
+    expect(out.hookSpecificOutput.additionalContext).toContain("npm-ci-eresolve-key-value");
   });
 
   // covers: INV-4

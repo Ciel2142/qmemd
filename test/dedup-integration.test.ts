@@ -99,9 +99,9 @@ describe("probe against a real qmd index", () => {
 
   // covers: SC-65
   test("the probe names the in-scope fact and not its byte-identical twin in another repo", async () => {
-    const fact = "npm ci fails with npm ERR! ERESOLVE unable to resolve dependency tree when peer deps conflict";
+    const fact = "npm ci fails with npm ERR! ERESOLVE key=value conflict";
     const seed = await openStore();
-    const mine = await remember(seed, root, { fact, type: "project", project: "repo-a", as: "npm-ci-eresolve-peer-deps" });
+    const mine = await remember(seed, root, { fact, type: "project", project: "repo-a", as: "npm-ci-eresolve-key-value" });
     const theirs = await remember(seed, root, { fact, type: "project", project: "repo-b", as: "npm-ci-eresolve-other-repo", force: true });
     expect(mine.wrote && theirs.wrote).toBe(true);
     await reindexMemory(seed);
@@ -109,11 +109,11 @@ describe("probe against a real qmd index", () => {
 
     const block = await runProbe(JSON.stringify({
       session_id: "s1", cwd: "/work/repo-a", tool_name: "Bash", is_interrupt: false,
-      error: "Exit code 1\nnpm ERR! ERESOLVE unable to resolve dependency tree",
+      error: "Exit code 1\nnpm ERR! ERESOLVE key=value conflict",
       tool_input: { command: "npm ci" },
     }), { memoryRoot: root, cacheDir: cache, openStore });
 
-    expect(block).toContain("npm-ci-eresolve-peer-deps");
+    expect(block).toContain("npm-ci-eresolve-key-value");
     expect(block).not.toContain("npm-ci-eresolve-other-repo");
   });
 });

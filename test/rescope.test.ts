@@ -90,7 +90,7 @@ describe("planRescope — planner (w2-rescope)", () => {
     await writeFact(root, "zzz", { project: "global", tags: ["check", "check-new"] });
     await writeFact(root, "untagged-slug", { project: "global", tags: ["checkx"] });
 
-    const plan = planRescope(root, { known: ["a", "check", "check-new"] });
+    const plan = planRescope(root, { known: ["a", "b", "check", "check-new"] });
 
     expect(plan.rows.find((r) => r.slug === "a-foo")).toMatchObject({ to: "a", reason: "slug-prefix" });
     expect(plan.rows.find((r) => r.slug === "zzz")).toMatchObject({ to: "check-new", reason: "tag" });
@@ -425,20 +425,47 @@ describe("applyRescope — apply (w2-rescope)", () => {
   test("apply changes only the project: value; tags, supersedes, review_by, pinned, and a multi-paragraph body stay byte-identical", async () => {
     const dir = join(root, "project");
     await mkdir(dir, { recursive: true });
-    const fm: MemoryFrontmatter = {
-      name: "widget-anchor",
-      description: "fact widget-anchor",
-      type: "project",
-      tags: ["needs quoting: yes", "plain"],
-      project: "global",
-      created: "2026-06-10",
-      pinned: true,
-      supersedes: "widget-older",
-      reviewBy: "2027-01-01",
-    };
-    const body = "First paragraph of the fact.\n\nSecond paragraph with more detail and a list:\n- one\n- two\n";
-    await writeFile(join(dir, "widget-anchor.md"), serializeMemory(fm, body));
-    const before = readFileSync(join(dir, "widget-anchor.md"), "utf-8");
+    const before = [
+      "---",
+      "description: fact widget-anchor",
+      "name: widget-anchor",
+      'tags: ["needs quoting: yes", plain]',
+      "type: project",
+      "supersedes: widget-older",
+      "project: global",
+      "review_by: 2027-01-01",
+      "pinned: true",
+      "created: 2026-06-10",
+      "---",
+      "",
+      "First paragraph of the fact.",
+      "",
+      "Second paragraph with more detail and a list:",
+      "- one",
+      "- two",
+      "",
+    ].join("\n");
+    const expected = [
+      "---",
+      "description: fact widget-anchor",
+      "name: widget-anchor",
+      'tags: ["needs quoting: yes", plain]',
+      "type: project",
+      "supersedes: widget-older",
+      "project: widget",
+      "review_by: 2027-01-01",
+      "pinned: true",
+      "created: 2026-06-10",
+      "---",
+      "",
+      "First paragraph of the fact.",
+      "",
+      "Second paragraph with more detail and a list:",
+      "- one",
+      "- two",
+      "",
+    ].join("\n");
+    await writeFile(join(dir, "widget-anchor.md"), before);
     const rows: RescopeRow[] = [{ slug: "widget-anchor", type: "project", from: "global", to: "widget", reason: "slug-prefix" }];
     const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
     const { store } = fakeStore();
@@ -446,17 +473,7 @@ describe("applyRescope — apply (w2-rescope)", () => {
     const res = await applyRescope(store, root, plan);
 
     expect(res.applied).toBe(1);
-    const after = readFileSync(join(dir, "widget-anchor.md"), "utf-8");
-    const beforeLines = before.split("\n");
-    const afterLines = after.split("\n");
-    expect(afterLines.length).toBe(beforeLines.length);
-    for (let i = 0; i < beforeLines.length; i++) {
-      if (/^project\s*:/.test(beforeLines[i]!)) {
-        expect(afterLines[i]).toBe("project: widget");
-      } else {
-        expect(afterLines[i]).toBe(beforeLines[i]);
-      }
-    }
+    expect(readFileSync(join(dir, "widget-anchor.md"), "utf-8")).toBe(expected);
     const entries = readdirSync(dir);
     expect(entries.some((f) => f.endsWith(".bak"))).toBe(false);
     expect(entries.some((f) => f.endsWith(".tmp"))).toBe(false);
@@ -672,7 +689,14 @@ describe("applyRescope — apply (w2-rescope)", () => {
 
   // covers: SC-42
   test("a plan row with a traversal slug or a newline slug rejects the whole plan and writes nothing outside <root>/<type>/", async () => {
-    await writeFact(root, "a", { project: "global" });
+    const memoryRoot = join(root, "memory");
+    await writeFact(memoryRoot, "a", { project: "global" });
+    await writeFact(memoryRoot, "../../x", { project: "global" });
+    await writeFact(memoryRoot, "bad\nslug", { project: "global" });
+    const traversalPath = join(memoryRoot, "project", "../../x.md");
+    const newlinePath = join(memoryRoot, "project", "bad\nslug.md");
+    const traversalBefore = readFileSync(traversalPath, "utf-8");
+    const newlineBefore = readFileSync(newlinePath, "utf-8");
     const rows: RescopeRow[] = [
       { slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
       { slug: "../../x", type: "project", from: "global", to: "widget", reason: "slug-prefix" },
@@ -681,12 +705,13 @@ describe("applyRescope — apply (w2-rescope)", () => {
     const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
     const { store, calls } = fakeStore();
 
-    const res = await applyRescope(store, root, plan);
+    const res = await applyRescope(store, memoryRoot, plan);
 
     expect(res.applied).toBe(0);
     expect(res.rejected).toEqual([rows[1], rows[2]]);
-    expect(readFileSync(join(root, "project", "a.md"), "utf-8")).toContain("project: global");
-    expect(existsSync(join(tmpdir(), "x.md"))).toBe(false);
+    expect(readFileSync(join(memoryRoot, "project", "a.md"), "utf-8")).toContain("project: global");
+    expect(readFileSync(traversalPath, "utf-8")).toBe(traversalBefore);
+    expect(readFileSync(newlinePath, "utf-8")).toBe(newlineBefore);
     expect(calls).toEqual([]);
   });
 
