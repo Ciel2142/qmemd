@@ -69,9 +69,12 @@ Layers (`src/`):
 - `git.ts` — best-effort, gated git sync: `gitCommit` / `gitPush` / `gitPullFfOnly` over an injectable `GitRun` runner. Repo/upstream-gated, 5s-timeout, never throws.
 - `store.ts` — `openMemoryStore()` wraps `createStore` over the single `memory` collection; pins the embed model (`$QMEMD_EMBED_MODEL`) to the index via a sidecar marker.
 - `engine.ts` — core: frontmatter serialize/parse, `recallSession()` (filesystem-only snapshot, no model), `remember()` (write + three-tier dedup/conflict surfacing + supersession + reindex), `recallQuery()` (lex or hybrid search), `staleFacts()` (review_by staleness pass, read-only), `forget()` (delete + reclaim orphans). `reindexMemory()` = `store.update()`.
-- `cli/qmemd.ts` — CLI: `remember | recall | forget | reviewed | show(/get) | list | tags | stale | hook | status | embed | reindex | doctor | rescope | mcp` (+ `mcp install-service | uninstall-service | stop`).
+- `cli/qmemd.ts` — CLI: `remember | recall | forget | reviewed | show(/get) | list | tags | stale | hook beacon|probe|write-beacon|stats | status | embed | reindex | doctor | rescope | mcp` (+ `mcp install-service | uninstall-service | stop`).
 - `doctor.ts` — frontmatter integrity audit (qmemd-61h): `auditFact`/`fixContent` (pure) + `auditMemory`/`fixMemory` (fs walkers). doctor is the separate validation pass that lenient `parseMemory` is not: it flags fence/type/name/null-byte/platform/link/review_by divergence from physical truth, and `--fix` repairs the mechanical subset surgically, writing a `.bak`. Filesystem-only, no model.
-- `beacon.ts` — PreToolUse memory-presence beacon (`qmemd hook beacon`): non-blocking nudge with the repo's unloaded-fact tag histogram; throttled, fail-open.
+- `beacon.ts` — PreToolUse hook (`qmemd hook beacon`): a once-per-repo-per-session pivot block plus an overlap block for a command matching a fact; non-blocking, fail-open.
+- `overlap.ts` — command↔fact token overlap: builds a per-repo token map (tags + slug head) from the corpus and scores a Bash command's tokens against it (DF-capped, stoplisted); backs both the beacon's overlap block and the probe.
+- `probe.ts` — PostToolUseFailure hook (`qmemd hook probe`): queries recall from a failed command + its first error line, lex-only, fail-open.
+- `hookstats.ts` / `stats.ts` — hook event log (`~/.cache/qmemd/hook/events.jsonl`) + `qmemd hook stats`: fired/matched/used/acted per kind with Wilson intervals.
 - `service.ts` — `install-service` artifacts: systemd --user / launchd unit generation + env capture.
 - `mcp/server.ts` — MCP server exposing `remember | recall | forget | reviewed | get | list` tools; stdio by default, `--http` serves stateless MCP-over-HTTP plus a REST surface (localhost-guarded against DNS rebinding/CSRF).
 

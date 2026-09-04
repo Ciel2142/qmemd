@@ -26,7 +26,10 @@ Don't assume the session-start snapshot already handed you the relevant facts �
 - **When the user references past context** → `recall "<topic>"`.
 
 ### The snapshot is partial — pull for the rest
-If the SessionStart hook (`qmemd recall --session`) is configured, the snapshot is injected automatically; otherwise run it yourself at task start. It carries every `user` + `feedback` fact (full body) + pinned facts **in scope** (current project + `global` — pin with `project: global` to surface in every repo). Unpinned `project` and `reference` facts are **not** injected at all: pinning is the only route a fact of those types takes to session start. When the snapshot ends with a footer like `14 project facts in scope for <proj> = 4 repo + 10 global (0 shown, 14 more) — qmemd list --type project --project <proj>` (optionally followed by `Unshown tags: …`), those 14 are real facts you have **not** seen — `recall "<topic>"` or `qmemd list` to pull them. An empty or footer-less snapshot is not proof that no relevant facts exist. (`QMEMD_SESSION_PROJECT_LIMIT=5` restores the five most recent unpinned facts per lane.)
+If the SessionStart hook (`qmemd recall --session`) is configured, the snapshot is injected automatically; otherwise run it yourself at task start. It carries every `user` + `feedback` fact (full body) + pinned facts **in scope** (current project + `global` — pin with `project: global` to surface in every repo). Unpinned `project` and `reference` facts are **not** injected at all: pinning is the only route a fact of those types takes to session start. When the snapshot ends with a footer like `14 project facts in scope for <proj> = 4 repo + 10 global (0 shown, 14 more) — qmemd list --type project --project <proj>`, those 14 are real facts you have **not** seen — `recall "<topic>"` or `qmemd list` to pull them. An empty or footer-less snapshot is not proof that no relevant facts exist. (`QMEMD_SESSION_PROJECT_LIMIT=5` restores the five most recent unpinned facts per lane.)
+
+### Content-derived hooks: beacon and probe
+Two more hooks push memory without a `recall` call, each printing a `💡 qmemd` block around a Bash command — read either with `qmemd show <slug>`. The **beacon** (`PreToolUse`/Bash) fires a once-per-repo-per-session pivot block on the first Bash call in a repo (repo + global fact counts, then up to ten facts or a tag histogram), plus an overlap block whenever a command's tokens match a fact's tags/slug; each fact surfaces at most once per session. The **probe** (`PostToolUseFailure`/Bash) fires after a failed Bash call and names facts matching the command and its first error line; the same failure probes once per session. `qmemd hook stats` reports how often each kind fires and gets acted on.
 
 ## Routing rule vs br
 True regardless of what you're working on → qmemd memory. Only meaningful inside the
@@ -49,6 +52,8 @@ qmemd forget <slug>
 qmemd reindex                                 # re-index after hand-editing a fact file (lex; no model)
 qmemd doctor [--fix] [--json]                 # audit frontmatter integrity after a hand-edit; --fix repairs mechanical issues (writes .bak; no model)
 qmemd rescope [--known a,b] [--alias old=new]... [--json] [--apply [plan.json|-]]  # migrate global project/reference facts to their inferred project (dry run by default; no model)
+qmemd hook probe                              # PostToolUseFailure hook envelope — reads a failed Bash command + error from stdin (wired by hooks, not run by hand)
+qmemd hook stats [--since <N>h|<N>d|<N>w] [--json]  # beacon/overlap/probe fired|matched|used|acted counts from the event log, default 7d (no model)
 ```
 Prefer the MCP tools (`remember`/`recall`/`forget`/`reviewed`/`get`/`list`) when the qmemd MCP server is running; the CLI commands above work identically otherwise (the MCP `get` tool ↔ the CLI `show` verb, which also accepts `get` as an alias).
 

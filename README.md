@@ -137,7 +137,6 @@ Not found? The fix depends on **how** you installed:
 | `QMEMD_EMBED_MODEL` | `embeddinggemma-300M` (Q8 GGUF) | Embedding model for hybrid recall — independent of qmd's own `QMD_EMBED_MODEL`; pinned to the index via a sidecar marker, mismatches warn at open |
 | `QMEMD_EMBED_TIMEOUT_MS` | `6000` | Bound on the lazy embed barrier in hybrid recall; on timeout recall fails open to lexical search (flagged `degraded`) |
 | `QMEMD_HTTP_PORT` | `8182` | Port for `qmemd mcp --http` / the installed service (CLI `--port` wins) |
-| `QMEMD_BEACON_EVERY` | `40` | Re-fire cadence of the PreToolUse memory-presence beacon (every N Bash calls; a repo pivot always fires) |
 | `QMEMD_SESSION_BUDGET` | `2000` | Byte cap on the session snapshot (`recall --session` and the MCP/REST session paths); invalid values fall back to the default |
 | `QMEMD_SESSION_PROJECT_LIMIT` | `0` | Recent unpinned project/reference facts in the session snapshot. `0` (the default) makes the snapshot pinned-only; set `5` to restore the recency-sliced lanes. Invalid values fall back to the default |
 | `QMEMD_TTL_<TYPE>` | `project` 90d · `reference` 180d · `user`/`feedback` durable | Per-type default review window applied when a fact has no explicit `review_by` (e.g. `QMEMD_TTL_PROJECT=180d`, or `never`); an unparseable value falls back to the built-in default. Surfaces via `qmemd stale` — never auto-expires |
@@ -186,7 +185,38 @@ qmemd status                    # show store status as JSON
 qmemd doctor [--fix] [--json]   # audit frontmatter integrity; --fix repairs mechanical issues (writes .bak, model-free)
 qmemd rescope [--known a,b] [--alias old=new]... [--json] [--apply [plan.json|-]]   # migrate global project/reference facts to their inferred project (dry run by default, model-free)
 qmemd mcp                       # start the stdio MCP server (--http for the daemon; install-service for a durable unit)
+qmemd hook beacon               # PreToolUse(Bash) hook — pivot + overlap blocks (wired via hook config, reads a hook event JSON on stdin)
+qmemd hook probe                # PostToolUseFailure(Bash) hook — names facts matching a failed command (wired via hook config, reads a hook event JSON on stdin)
+qmemd hook write-beacon         # Stop hook — write-side capture nudge (unchanged; wired via hook config)
+qmemd hook stats [--since <N>h|<N>d|<N>w] [--json]   # hook trigger/uptake stats from the event log, default 7d (model-free)
 ```
+
+### Content-derived hooks
+
+Two `PreToolUse`(Bash) blocks and one `PostToolUseFailure`(Bash) probe push memory
+without a `recall` call, each printed as a `💡 qmemd` block around the Bash tool call —
+read any named fact with `qmemd show <slug>`.
+
+- **Pivot block** — fires once per repo per session, on the first Bash call in that
+  repo: `💡 qmemd · <repo> — R repo + G global memories`, then either up to ten
+  `[type] description (slug)` lines or one `repo: tag(count) …` histogram line, then
+  `→ qmemd recall "<repo> <topic>" before diagnosing`. A repo with no in-scope facts
+  stays silent and unmarked, so the first pivot after facts appear still fires.
+- **Overlap block** — fires on any Bash call whose command tokens overlap a fact's
+  tags/slug: `💡 qmemd · <repo> — facts matching this command:`, up to three fact
+  lines, then `→ qmemd show <slug> for the full fact`. A fact surfaces at most once
+  per session; on the pivot call the two blocks join with one blank line.
+- **Probe** — `hooks/hooks.json`'s `PostToolUseFailure`/`Bash` entry (`qmemd hook
+  probe`, `timeout: 10`) runs after a failed Bash call, builds a query from the
+  command and the first line of the error (dropping an `Exit code N` header), and
+  returns a `PostToolUseFailure` envelope naming matching in-scope facts. Each
+  distinct failure probes once per session; the store opens lex-only, and any
+  failure — bad input, a store error, a timeout — fails open (no output).
+- **`qmemd hook stats`** — reads `~/.cache/qmemd/hook/events.jsonl` and prints one row
+  per kind (`pivot`, `overlap`, `probe`) with `fired matched used acted` counts and
+  the two proportions (`used/matched`, `acted/fired`) with 95% Wilson intervals. A
+  missing or damaged event log never exits non-zero; `--json` emits the same numbers
+  as JSON.
 
 `remember` warns on a near-duplicate instead of writing — use `--replace <slug>` to update in place, `--supersedes <slug>` to retire the old fact under this new one (hidden from recall, kept on disk + git), or `--force` to write a new entry anyway. Dedup runs in three tiers: exact slug, FTS (BM25), then a model-free token-set near-dup pass whose contradiction classifier tells a true paraphrase (blocked as a duplicate) from a likely update — a differing version/number, polarity flip, or antonym — which is **surfaced as a conflict** with a type-derived authority comparison for you to resolve; qmemd never auto-resolves.
 
@@ -232,6 +262,8 @@ A freshly remembered fact is lex-searchable immediately. Vector (semantic) recal
 Over stdio, `remember`'s `project` is optional and scopes to the current repo when omitted (`project`/`reference` → cwd basename; `user`/`feedback` → `global`); pass `project: "global"` for something true in every repo. A cwd at the filesystem root has no basename, so it falls back to `global` too. `replace` keeps the fact's stored scope rather than re-homing it. The shared HTTP daemon (below) has no cwd to fall back to, so it requires `project` explicitly.
 
 **Breaking changes:** the daemon `remember` tool (`--http`) now requires `project` — a call that omitted it used to default to `global` and now fails validation. Pass the repo basename or `global` explicitly.
+
+**Breaking changes:** `QMEMD_BEACON_EVERY` is removed — the PreToolUse beacon no longer re-fires on a timer, only once per repo per session (the pivot block) plus on a content match (the overlap block); a script or env setting relying on the old N-call re-fire cadence has no effect.
 
 Register it under `mcpServers` in your MCP client config (e.g. `~/.claude.json`), using any server name (here `qmemd`):
 

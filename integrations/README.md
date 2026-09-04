@@ -72,16 +72,20 @@ and a logo; fill those into `plugin.json` before submitting.
 > pull-only by default and points at its platform's optional hooks (below). If
 > `../claude/qmemd.md` changes, re-apply the edits by hand — don't blind-copy over them.
 
-## Optional: Claude-style hooks (auto snapshot + beacon)
+## Optional: Claude-style hooks (auto snapshot + beacon + probe)
 
 The MCP + rule above make memory **pull-only** — the agent must call `recall` itself. Claude
-Code also wires two hooks that push memory automatically: a **SessionStart** snapshot
-(`qmemd recall --session`) and a **PreToolUse** beacon (`qmemd hook beacon`). Cursor, Codex CLI,
-and Windsurf have since shipped hook engines that run the same two commands. Both emit a
-`hookSpecificOutput.additionalContext` JSON envelope (verified against `../src/cli/qmemd.ts`).
-E2E-test in your client before relying on it — hook schemas move fast.
+Code also wires three hooks that push memory automatically: a **SessionStart** snapshot
+(`qmemd recall --session`), a **PreToolUse** beacon (`qmemd hook beacon`, content-derived —
+a once-per-repo pivot block plus an overlap block for a command that matches a fact), and a
+**PostToolUseFailure** probe (`qmemd hook probe`) that names facts matching a failed Bash
+command and its error. Cursor, Codex CLI, and Windsurf have since shipped hook engines that
+run the snapshot and beacon; neither host's failure-hook event carries the probe forward
+(see each host's section below). All three emit a `hookSpecificOutput.additionalContext`
+JSON envelope (verified against `../src/cli/qmemd.ts`). E2E-test in your client before
+relying on it — hook schemas move fast.
 
-### Codex CLI — full parity
+### Codex CLI — snapshot + beacon parity, no failure probe
 
 1. Enable the hooks engine: add a `[features]` section with `codex_hooks = true` to
    `~/.codex/config.toml` (already in `codex/config.toml.example`). Needs a recent Codex CLI
@@ -90,7 +94,12 @@ E2E-test in your client before relying on it — hook schemas move fast.
    `SessionStart` → snapshot, `PreToolUse` (Bash) → beacon. Codex reads `additionalContext` from
    the same envelope Claude does.
 
-### Cursor — full parity
+Codex has no `PostToolUseFailure` event: its `PostToolUse` also runs on a non-zero Bash exit,
+but the outcome lives inside an untyped `tool_response` rather than the `error`/`is_interrupt`
+fields the probe reads, so `codex/hooks/hooks.json` ships no probe entry — a
+`PostToolUse`-shaped adapter is a tracked follow-up, not this wave.
+
+### Cursor — snapshot + beacon parity, no failure probe
 
 - **Reuse your Claude wiring (zero config):** if you already run qmemd's Claude hooks
   (`.claude/settings.json`), enable Cursor Settings → *third-party skills*. Cursor maps
@@ -98,10 +107,15 @@ E2E-test in your client before relying on it — hook schemas move fast.
   so the snapshot + beacon fire unchanged.
 - **Or native:** copy `cursor/hooks.json` to `.cursor/hooks.json` (or install the plugin above).
 
+Cursor has a dedicated `postToolUseFailure` event, but its output block accepts no fields —
+the probe's `additionalContext` would be discarded — so `cursor/hooks.json` ships no probe
+entry either.
+
 ### Windsurf — partial (no session-start event)
 
 Windsurf's Cascade hooks have **no session-start event**, so there is no one-shot snapshot.
 `windsurf/hooks.json.example` wires `pre_user_prompt` to inject the snapshot **before each
 prompt** instead — it strips qmemd's JSON envelope to raw text (via `node`), since Windsurf
 shows hook stdout verbatim. Copy it to `.windsurf/hooks.json` (repo) or
-`~/.codeium/windsurf/hooks.json` (global). The `PreToolUse` beacon has no Windsurf equivalent.
+`~/.codeium/windsurf/hooks.json` (global). The `PreToolUse` beacon and the `PostToolUseFailure`
+probe both have no Windsurf equivalent.
