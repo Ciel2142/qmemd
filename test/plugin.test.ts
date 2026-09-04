@@ -186,9 +186,9 @@ describe("run-qmemd.mjs (PATH→npx fallback proxy)", () => {
     expect(r.status, r.stderr).toBe(0);
   });
 
-  // covers: INV-4
   // A PreToolUse hook exiting non-zero blocks the tool call, so a crashing qmemd (or a
   // failed npx fallback) must not reach Claude Code as the proxy's own status.
+  // covers: INV-4
   test.skipIf(process.platform === "win32")("a child exiting non-zero still exits 0, output passed through", () => {
     const dir = mkdtempSync(join(tmpdir(), "qmemd-proxy-"));
     try {

@@ -324,7 +324,7 @@ export function runBeacon(stdinText: string, deps: BeaconDeps): string | null {
       const tokens = commandTokens(cmd);
       if (tokens.length > 0) {
         const mapPath = mapCachePath(deps.cacheDir, deps.memoryRoot, repo);
-        const builtAt = state.mapBuiltAtCall[repo];
+        const builtAt = Object.hasOwn(state.mapBuiltAtCall, repo) ? state.mapBuiltAtCall[repo] : undefined;
         const force = pivoted || builtAt === undefined || state.callCount - builtAt >= MAP_REBUILD_EVERY_N_CALLS;
         const map = loadOrBuildTokenMap(mapPath, deps.memoryRoot, repo, force);
         // Only a forced build resets the cadence (R-3): loadOrBuildTokenMap reports no rebuild
