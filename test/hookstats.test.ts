@@ -60,6 +60,26 @@ describe("event log is fail-open (INV-4)", () => {
     expect(events).toEqual([good1, good2]);
     expect(skipped).toBe(1);
   });
+
+  // covers: SC-68
+  test("a bad kind, a non-array slugs and an unparsable ts are skipped and counted, never fed to computeStats", () => {
+    const path = eventLogPath(dir);
+    mkdirSync(join(dir, "hook"), { recursive: true });
+    const good = mkEvent({ kind: "overlap", ts: "2026-01-01T00:00:00.000Z", session: "s1", slugs: ["a"] });
+    const lines = [
+      JSON.stringify(good),
+      JSON.stringify({ v: 1, ts: "2026-01-01T00:00:00.000Z", session: "s1", repo: "r", kind: "probe", slugs: {} }),
+      JSON.stringify({ v: 1, ts: "2026-01-01T00:00:01.000Z", session: "s1", repo: "r", kind: "banana" }),
+      JSON.stringify({ v: 1, ts: "not-a-timestamp", session: "s1", repo: "r", kind: "followup", slugs: ["a"] }),
+      JSON.stringify({ v: 1, ts: "2026-01-01T00:00:02.000Z", session: "s1", repo: "r", kind: "followup", slugs: {} }),
+    ];
+    writeFileSync(path, lines.join("\n") + "\n");
+
+    const { events, skipped } = readEvents(path, 0);
+    expect(events).toEqual([good]);
+    expect(skipped).toBe(4);
+    expect(() => computeStats(events, FOLLOWUP_WINDOW_MS, new Date(0))).not.toThrow();
+  });
 });
 
 describe("pruneEvents", () => {

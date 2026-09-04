@@ -8,7 +8,8 @@
 // fallback, and it avoids POSIX shell operators (`||`, `2>`) that break when
 // cmd.exe runs the hook string on Windows.
 //
-// Fail-open: any spawn failure → exit 0. A hook must never block Bash or a session.
+// Fail-open: any spawn failure, and any child exit status, → exit 0. A hook must never
+// block Bash or a session.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, delimiter } from "node:path";
@@ -40,8 +41,10 @@ function main(args) {
   // user-controlled to escape. stdio is inherited so the beacon's stdin payload
   // and the snapshot's stdout pass straight through.
   const child = spawn(command, rest, { stdio: "inherit", shell: process.platform === "win32" });
+  // Exit 0 whatever the child did: a non-zero PreToolUse hook status blocks the tool call,
+  // so a crashing qmemd or a failed npx fallback must never propagate (fail-open).
   child.on("error", () => process.exit(0));
-  child.on("exit", (code) => process.exit(typeof code === "number" ? code : 0));
+  child.on("exit", () => process.exit(0));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {

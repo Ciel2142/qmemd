@@ -23,7 +23,9 @@ export interface BeaconState {
   /** Slugs already shown this session by the beacon or the probe — never shown twice. */
   surfacedSlugs: string[];
   probedKeys: string[];
-  mapBuiltAtCall: number;
+  /** Call count of the last forced token-map build, per repo — the map cache is per repo,
+   *  so one scalar would let a pivot in repo B postpone repo A's insurance rebuild. */
+  mapBuiltAtCall: Record<string, number>;
 }
 
 /** Cap on surfacedSlugs and probedKeys: oldest entries drop out first. */
@@ -49,7 +51,7 @@ export function decideBeacon(prev: BeaconState | null, repo: string): BeaconDeci
     perRepo: prev?.perRepo ?? {},
     surfacedSlugs: prev?.surfacedSlugs ?? [],
     probedKeys: prev?.probedKeys ?? [],
-    mapBuiltAtCall: prev?.mapBuiltAtCall ?? 0,
+    mapBuiltAtCall: prev?.mapBuiltAtCall ?? {},
   };
   return { fire, next };
 }
@@ -152,8 +154,10 @@ export function isCaptureCommand(cmd: string): boolean {
 
 export type Followup = { kind: "recall"; query: string } | { kind: "show"; slugs: string[] };
 
-// Unanchored so a wrapper-rewritten command ("rtk qmemd recall …") still counts.
-const FOLLOWUP_RE = /\bqmemd\s+(recall|show|get)\s+/;
+// `qmemd` must be the command word — at the start or right after a shell connective, past any
+// env assignments and the wrapper words stripWrappers knows. Unanchored, `echo qmemd show s`
+// and `grep "qmemd recall" notes.md` counted as followups and inflated acted/used.
+const FOLLOWUP_RE = /(?:^|[;&|])\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S*|sudo|rtk|npx|env|time|nice)\s+)*qmemd\s+(recall|show|get)\s+/;
 // The recall flags that take a value: their argument is not the query.
 const VALUE_FLAGS = new Set(["--type", "--platform", "--limit", "--min-score"]);
 
@@ -204,7 +208,8 @@ export function readState(path: string): BeaconState | null {
       // them (rather than rejecting) keeps an in-flight session's pivot state (SC-58).
       if (!Array.isArray(s.surfacedSlugs)) s.surfacedSlugs = [];
       if (!Array.isArray(s.probedKeys)) s.probedKeys = [];
-      if (typeof s.mapBuiltAtCall !== "number") s.mapBuiltAtCall = 0;
+      // Pre-feature markers carry no field; markers from the scalar shape carry a number.
+      if (typeof s.mapBuiltAtCall !== "object" || s.mapBuiltAtCall === null || Array.isArray(s.mapBuiltAtCall)) s.mapBuiltAtCall = {};
       return s;
     }
     return null;
@@ -319,11 +324,12 @@ export function runBeacon(stdinText: string, deps: BeaconDeps): string | null {
       const tokens = commandTokens(cmd);
       if (tokens.length > 0) {
         const mapPath = mapCachePath(deps.cacheDir, deps.memoryRoot, repo);
-        const force = pivoted || state.callCount - state.mapBuiltAtCall >= MAP_REBUILD_EVERY_N_CALLS;
+        const builtAt = state.mapBuiltAtCall[repo];
+        const force = pivoted || builtAt === undefined || state.callCount - builtAt >= MAP_REBUILD_EVERY_N_CALLS;
         const map = loadOrBuildTokenMap(mapPath, deps.memoryRoot, repo, force);
         // Only a forced build resets the cadence (R-3): loadOrBuildTokenMap reports no rebuild
         // flag, so a fingerprint-driven one costs at most one redundant force within 40 calls.
-        if (force) state = { ...state, mapBuiltAtCall: state.callCount };
+        if (force) state = { ...state, mapBuiltAtCall: { ...state.mapBuiltAtCall, [repo]: state.callCount } };
         const hits = matchCommand(tokens, map, new Set(state.surfacedSlugs));
         if (hits.length > 0) {
           const slugs = hits.map(h => h.slug);

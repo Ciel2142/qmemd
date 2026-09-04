@@ -29,8 +29,22 @@ export function appendEvent(path: string, ev: HookEvent): void {
   }
 }
 
+const EVENT_KINDS: readonly string[] = ["pivot", "overlap", "probe", "followup"];
+
+const isString = (v: unknown): boolean => typeof v === "string";
+const isOptional = (v: unknown, ok: (x: unknown) => boolean): boolean => v === undefined || ok(v);
+
+/** Full shape check: computeStats reads `kind` and `slugs` without re-checking them, so a
+ *  record that parses as JSON but carries the wrong types must be dropped here, not there. */
 function isValidEvent(e: Record<string, unknown>): boolean {
-  return e.v === 1 && typeof e.ts === "string" && typeof e.session === "string" && typeof e.kind === "string";
+  return e.v === 1
+    && isString(e.session)
+    && isString(e.kind) && EVENT_KINDS.includes(e.kind as string)
+    && isString(e.ts) && Number.isFinite(Date.parse(e.ts as string))
+    && isOptional(e.repo, isString)
+    && isOptional(e.slugs, (v) => Array.isArray(v) && v.every(isString))
+    && isOptional(e.query, isString)
+    && isOptional(e.cmdHash, isString);
 }
 
 function parseEventLine(line: string): HookEvent | null {

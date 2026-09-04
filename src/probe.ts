@@ -85,7 +85,7 @@ export interface ProbeDeps {
 
 const freshState = (repo: string): BeaconState => ({
   repo, callCount: 0, lastBeaconAtCall: 0, beaconedRepos: [], perRepo: {},
-  surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: 0,
+  surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: {},
 });
 
 /** Orchestrate one PostToolUseFailure event → probe text or null (silent). The only hook

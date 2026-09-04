@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 // Plugin hook scripts are plain runtime .mjs (outside src/, so tsc/typecheck ignore
 // them — see tsconfig.typecheck.json). We import their pure helpers directly and
@@ -183,5 +184,24 @@ describe("run-qmemd.mjs (PATH→npx fallback proxy)", () => {
   test("is syntactically valid (node --check)", () => {
     const r = spawnSync(process.execPath, ["--check", join(REPO, "hooks", "run-qmemd.mjs")], { encoding: "utf8" });
     expect(r.status, r.stderr).toBe(0);
+  });
+
+  // covers: INV-4
+  // A PreToolUse hook exiting non-zero blocks the tool call, so a crashing qmemd (or a
+  // failed npx fallback) must not reach Claude Code as the proxy's own status.
+  test.skipIf(process.platform === "win32")("a child exiting non-zero still exits 0, output passed through", () => {
+    const dir = mkdtempSync(join(tmpdir(), "qmemd-proxy-"));
+    try {
+      const fake = join(dir, "qmemd");
+      writeFileSync(fake, "#!/bin/sh\necho proxied-output\nexit 3\n");
+      chmodSync(fake, 0o755);
+      const r = spawnSync(process.execPath, [join(REPO, "hooks", "run-qmemd.mjs"), "hook", "beacon"], {
+        encoding: "utf8", env: { ...process.env, PATH: dir },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("proxied-output");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -14,7 +14,7 @@ import type { RecallHit, RecallOptions, RecallResult } from "../src/engine.js";
 
 const st = (over: Partial<BeaconState> = {}): BeaconState => ({
   repo: "repo-a", callCount: 3, lastBeaconAtCall: 1, beaconedRepos: ["repo-a"], perRepo: {},
-  surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: 0, ...over,
+  surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: {}, ...over,
 });
 
 const hit = (slug: string, over: Partial<RecallHit> = {}): RecallHit => ({

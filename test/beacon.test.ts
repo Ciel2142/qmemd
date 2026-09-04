@@ -15,7 +15,7 @@ import { join, dirname } from "node:path";
 
 const st = (over: Partial<BeaconState> = {}): BeaconState => ({
   repo: "x", callCount: 0, lastBeaconAtCall: 0, beaconedRepos: [], perRepo: {},
-  surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: 0, ...over,
+  surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: {}, ...over,
 });
 
 const lines = (n: number): FactLine[] =>
@@ -72,11 +72,11 @@ describe("decideBeacon (pivot-only, w3)", () => {
 
   // covers: SC-57
   test("carries the surfaced/probed/map fields forward unchanged", () => {
-    const prev = st({ repo: "repo-a", callCount: 3, beaconedRepos: ["repo-a"], surfacedSlugs: ["s1"], probedKeys: ["k1"], mapBuiltAtCall: 2 });
+    const prev = st({ repo: "repo-a", callCount: 3, beaconedRepos: ["repo-a"], surfacedSlugs: ["s1"], probedKeys: ["k1"], mapBuiltAtCall: { "repo-a": 2 } });
     const d = decideBeacon(prev, "repo-a");
     expect(d.next.surfacedSlugs).toEqual(["s1"]);
     expect(d.next.probedKeys).toEqual(["k1"]);
-    expect(d.next.mapBuiltAtCall).toBe(2);
+    expect(d.next.mapBuiltAtCall).toEqual({ "repo-a": 2 });
   });
 });
 
@@ -186,6 +186,15 @@ describe("followupOf / commandHash (w3)", () => {
     expect(followupOf("mvn test")).toBeNull();
   });
 
+  // covers: SC-71
+  test("qmemd must be the command word: echoed, quoted and grepped mentions are not followups", () => {
+    expect(followupOf("echo qmemd show a-slug")).toBeNull();
+    expect(followupOf('grep "qmemd recall" notes.md')).toBeNull();
+    expect(followupOf("git commit -m 'qmemd recall gradle'")).toBeNull();
+    expect(followupOf("cd x && qmemd show s")).toEqual({ kind: "show", slugs: ["s"] });
+    expect(followupOf("FOO=1 sudo qmemd recall gradle")).toEqual({ kind: "recall", query: "gradle" });
+  });
+
   // covers: SC-70
   test("commandHash is 12 hex characters, stable per command and distinct across commands", () => {
     expect(commandHash("mvn test")).toMatch(/^[0-9a-f]{12}$/);
@@ -199,10 +208,11 @@ describe("beacon marker IO (tfu)", () => {
   beforeEach(async () => { cache = await mkdtemp(join(tmpdir(), "qmemd-cache-")); });
   afterEach(async () => { await rm(cache, { recursive: true, force: true }); });
 
+  // covers: SC-58
   test("readState returns null when absent; round-trips after writeState", () => {
     const p = stateFilePath(cache, "sess-1");
     expect(readState(p)).toBeNull();
-    const s = st({ repo: "x", callCount: 3, lastBeaconAtCall: 1, beaconedRepos: ["x"], perRepo: { x: { calls: 3, captures: 1, writeFired: false } }, surfacedSlugs: ["a"], probedKeys: ["k"], mapBuiltAtCall: 3 });
+    const s = st({ repo: "x", callCount: 3, lastBeaconAtCall: 1, beaconedRepos: ["x"], perRepo: { x: { calls: 3, captures: 1, writeFired: false } }, surfacedSlugs: ["a"], probedKeys: ["k"], mapBuiltAtCall: { x: 3 } });
     writeState(p, s);
     expect(readState(p)).toEqual(s);
   });
@@ -215,6 +225,14 @@ describe("beacon marker IO (tfu)", () => {
     const s = readState(p)!;
     expect(s).toEqual(st({ repo: "beta", callCount: 12, lastBeaconAtCall: 1, beaconedRepos: ["beta"], perRepo: { beta: { calls: 12, captures: 0, writeFired: false } } }));
     expect(decideBeacon(s, "beta").fire).toBe(false); // an already-beaconed repo does not re-pivot
+  });
+
+  // covers: SC-58
+  test("a marker carrying the old scalar mapBuiltAtCall reads with the per-repo default", () => {
+    const p = stateFilePath(cache, "scalar-map");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ repo: "beta", callCount: 41, lastBeaconAtCall: 1, beaconedRepos: ["beta"], perRepo: {}, surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: 41 }));
+    expect(readState(p)).toEqual(st({ repo: "beta", callCount: 41, lastBeaconAtCall: 1, beaconedRepos: ["beta"] }));
   });
 
   // Write-beacon (qmemd-yl3): markers written before perRepo existed must still parse,
@@ -440,16 +458,29 @@ describe("runBeacon orchestration (w3)", () => {
     writeFileSync(mapPath, JSON.stringify(buildTokenMap(root, "beta")));
     // In-place rewrite: same file count, same directory mtime → the fingerprint still matches.
     await writeFact(root, "project", "jdk", { project: "beta", tags: ["jdk", "build", "zebra"], description: "jdk toolchain notes" });
-    writeState(stateFilePath(cache, "s1"), st({ repo: "beta", callCount: 39, beaconedRepos: ["beta"], mapBuiltAtCall: 1 }));
+    writeState(stateFilePath(cache, "s1"), st({ repo: "beta", callCount: 39, beaconedRepos: ["beta"], mapBuiltAtCall: { beta: 1 } }));
     expect(runBeacon(evt("zebra jdk"), deps())).toBeNull();     // call 40: 40-1 = 39 < 40 → cached map
     const out = runBeacon(evt("zebra jdk"), deps());            // call 41: 41-1 = 40 → forced rebuild
     expect(out).toContain("(jdk)");
-    expect(marker()!.mapBuiltAtCall).toBe(41);
+    expect(marker()!.mapBuiltAtCall).toEqual({ beta: 41 });
 
     // A fingerprint-driven rebuild on a non-forced call does not reset the cadence (R-3).
     await writeFact(root, "project", "orangutan", { project: "beta", tags: ["orangutan", "sanctuary"] });
     expect(runBeacon(evt("orangutan sanctuary"), deps())).toContain("(orangutan)");
-    expect(marker()!.mapBuiltAtCall).toBe(41);
+    expect(marker()!.mapBuiltAtCall).toEqual({ beta: 41 });
+  });
+
+  // covers: SC-48
+  test("a forced build in another repo does not postpone this repo's 40-call insurance", async () => {
+    const mapPath = mapCachePath(cache, root, "beta");
+    mkdirSync(dirname(mapPath), { recursive: true });
+    writeFileSync(mapPath, JSON.stringify(buildTokenMap(root, "beta")));
+    await writeFact(root, "project", "jdk", { project: "beta", tags: ["jdk", "build", "zebra"], description: "jdk toolchain notes" });
+    writeState(stateFilePath(cache, "s1"), st({ repo: "beta", callCount: 39, beaconedRepos: ["beta", "gamma"], mapBuiltAtCall: { beta: 1 } }));
+    runBeacon(evt("make build", { cwd: "/work/gamma" }), deps()); // call 40: gamma has no build of its own → forced, for gamma only
+    const out = runBeacon(evt("zebra jdk"), deps());              // call 41 in beta: 41-1 = 40 → beta rebuilds
+    expect(out).toContain("(jdk)");
+    expect(marker()!.mapBuiltAtCall).toEqual({ gamma: 40, beta: 41 });
   });
 
   // Write-beacon accounting (qmemd-yl3): runBeacon records per-repo work + captures on

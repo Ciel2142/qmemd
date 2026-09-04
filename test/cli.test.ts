@@ -877,6 +877,22 @@ describe("CLI hook stats (w3 task 6)", () => {
   });
 
   // covers: SC-76
+  test("malformed-but-parseable records are skipped; the rows still print and the exit stays 0", async () => {
+    const iso = new Date().toISOString();
+    await writeHookEvents(cache, [
+      JSON.stringify({ v: 1, ts: iso, session: "s1", repo: "r", kind: "pivot", slugs: ["a"] }),
+      JSON.stringify({ v: 1, ts: iso, session: "s1", repo: "r", kind: "probe", slugs: {} }),
+      JSON.stringify({ v: 1, ts: "not-a-timestamp", session: "s1", repo: "r", kind: "probe", slugs: ["b"] }),
+    ]);
+    const res = runStatsHook(["--json"], cache);
+    expect(res.status).toBe(0);
+    const stats = JSON.parse(res.stdout);
+    expect(stats.byKind.pivot).toEqual({ fired: 1, matched: 1, used: 0, acted: 0 });
+    expect(stats.byKind.probe).toEqual({ fired: 0, matched: 0, used: 0, acted: 0 });
+    expect(stats.skipped).toBe(2);
+  });
+
+  // covers: SC-76
   test("a missing event log exits 0 with all-zero rows and no skipped-lines footer", () => {
     const res = runStatsHook([], cache);
     expect(res.status).toBe(0);
