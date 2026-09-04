@@ -280,11 +280,13 @@ Register it under `mcpServers` in your MCP client config (e.g. `~/.claude.json`)
 
 ## Install as a Claude Code plugin (recommended)
 
-qmemd ships as a native Claude Code plugin that bundles the skill, both hooks
-(session snapshot + beacon), and the `/qmemd:*` commands in one install. It is the
-recommended path for most users: it wires the same SessionStart snapshot and beacon
-hooks the `scripts/` installers do, but works straight from an `npm i -g` install —
-no git checkout required.
+qmemd ships as a native Claude Code plugin that bundles the skill, all three hooks
+(session snapshot + beacon + failure probe), and the `/qmemd:*` commands in one
+install. It is the recommended path for most users: it wires the same SessionStart
+snapshot and beacon hooks the `scripts/` installers do — plus the
+`PostToolUseFailure` probe, which those installers do not wire yet (tracked as
+`qp-fe0`) — and works straight from an `npm i -g` install, no git checkout
+required.
 
 The plugin deliberately does **not** declare an MCP server. Register one yourself,
 either the stdio server ([MCP server](#mcp-server) above) or the shared HTTP daemon
@@ -322,8 +324,10 @@ model's context and letting the two drift to different versions.
    `qmemd status` confirms the CLI from step 1 (there is no `--version` flag).
 
 **Migrating from the bash installer?** The plugin and
-`scripts/install-claude-integration.sh` wire the *same* SessionStart + beacon hooks;
-running both double-fires the beacon. Remove the bash-installer wiring first:
+`scripts/install-claude-integration.sh` wire the *same* SessionStart + beacon hooks
+(the plugin adds the `PostToolUseFailure` probe on top; the bash and PowerShell
+installers wire snapshot + beacon only for now); running both double-fires the
+beacon. Remove the bash-installer wiring first:
 
 ```bash
 scripts/install-claude-integration.sh --uninstall

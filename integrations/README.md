@@ -79,11 +79,21 @@ Code also wires three hooks that push memory automatically: a **SessionStart** s
 (`qmemd recall --session`), a **PreToolUse** beacon (`qmemd hook beacon`, content-derived —
 a once-per-repo pivot block plus an overlap block for a command that matches a fact), and a
 **PostToolUseFailure** probe (`qmemd hook probe`) that names facts matching a failed Bash
-command and its error. Cursor, Codex CLI, and Windsurf have since shipped hook engines that
-run the snapshot and beacon; neither host's failure-hook event carries the probe forward
-(see each host's section below). All three emit a `hookSpecificOutput.additionalContext`
-JSON envelope (verified against `../src/cli/qmemd.ts`). E2E-test in your client before
-relying on it — hook schemas move fast.
+command and its error. Which of the three you actually get depends on where you install:
+
+| Host / install | Hooks wired |
+| --- | --- |
+| Claude Code plugin | snapshot + beacon + probe |
+| `scripts/install-claude-integration.sh`, `scripts/install-windows.ps1` | snapshot + beacon |
+| Codex CLI (`codex/hooks/hooks.json`) | snapshot + beacon |
+| Cursor (`cursor/hooks.json`, or reused Claude wiring) | snapshot + beacon |
+| Windsurf (`windsurf/hooks.json.example`) | prompt-time snapshot only |
+
+Every row but Windsurf's consumes qmemd's `hookSpecificOutput.additionalContext` JSON
+envelope (verified against `../src/cli/qmemd.ts`); Windsurf shows hook stdout verbatim, so
+its wiring strips the envelope to raw text. The per-host sections below say why the probe
+stops where it does. E2E-test in your client before relying on it — hook schemas move
+fast.
 
 ### Codex CLI — snapshot + beacon parity, no failure probe
 
