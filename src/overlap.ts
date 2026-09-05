@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, statSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { tokenizeForDedup, RECALL_BOOST_STOPLIST, listFacts, type MemoryType } from "./engine.js";
+import { tokenizeForDedup, RECALL_BOOST_STOPLIST, listFacts, injectionEligible, currentPlatform, isSafeSlug, memoryFilePath, parseMemory, type MemoryType, type Platform } from "./engine.js";
 
 export interface FactLine {
   type: MemoryType;
@@ -10,9 +10,10 @@ export interface FactLine {
 }
 
 export interface TokenMap {
-  version: 1;
+  version: 2;
   fingerprint: string;
   project: string;
+  platform: Platform | "all";
   facts: Record<string, { type: MemoryType; description: string; project: string }>;
   /** token → slugs (posting list); document frequency is `tokens[t].length`. */
   tokens: Record<string, string[]>;
@@ -82,9 +83,10 @@ const MAP_TYPES: readonly MemoryType[] = ["project", "reference"];
 export function buildTokenMap(root: string, project: string): TokenMap {
   const facts: TokenMap["facts"] = {};
   const tokens: Record<string, string[]> = {};
+  const platform = currentPlatform();
   for (const type of MAP_TYPES) {
     for (const e of listFacts(root, { type, project })) {
-      if (e.supersededBy) continue;
+      if (!isSafeSlug(e.slug) || !injectionEligible(e, project, platform)) continue;
       const factTokens = new Set<string>();
       for (const tag of e.tags) for (const t of tokenizeForDedup(tag)) factTokens.add(t);
       for (const t of tokenizeForDedup(e.slug).slice(0, OVERLAP_SLUG_HEAD_TOKENS)) factTokens.add(t);
@@ -95,13 +97,14 @@ export function buildTokenMap(root: string, project: string): TokenMap {
       }
     }
   }
-  return { version: 1, fingerprint: corpusFingerprint(root), project, facts, tokens };
+  return { version: 2, fingerprint: corpusFingerprint(root), project, platform, facts, tokens };
 }
 
 function readCachedMap(path: string, project: string, fingerprint: string): TokenMap | null {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8"));
-    if (parsed && parsed.version === 1 && parsed.project === project && parsed.fingerprint === fingerprint
+    if (parsed && parsed.version === 2 && parsed.project === project && parsed.platform === currentPlatform()
+        && parsed.fingerprint === fingerprint
         && parsed.facts && typeof parsed.facts === "object" && parsed.tokens && typeof parsed.tokens === "object") {
       return parsed as TokenMap;
     }
@@ -168,25 +171,30 @@ export interface OverlapHit {
   tokens: string[];
 }
 
+/** Rank cached postings, then read only matching candidates until the hit cap is filled.
+ *  The command-token and DF caps bound candidate reads; no fact-directory walk is needed.
+ *  Cached metadata supplies physical type/slug identity, never hand-editable frontmatter. */
 export function matchCommand(
+  root: string,
   tokens: string[],
   map: TokenMap,
   exclude: ReadonlySet<string>,
   opts?: { dfFraction?: number; minScore?: number },
 ): OverlapHit[] {
   const factCount = Object.keys(map.facts).length;
-  if (tokens.length === 0 || factCount === 0) return [];
+  const platform = currentPlatform();
+  if (tokens.length === 0 || factCount === 0 || map.version !== 2 || map.platform !== platform) return [];
   const dfFraction = opts?.dfFraction ?? OVERLAP_DF_FRACTION;
   const minScore = opts?.minScore ?? OVERLAP_MIN_SCORE;
   const dfCap = Math.max(3, Math.ceil(dfFraction * factCount));
   const perSlugTokens = new Map<string, Set<string>>();
-  for (const t of new Set(tokens)) {
+  for (const t of new Set(tokens.slice(0, OVERLAP_COMMAND_TOKEN_CAP))) {
     if (RECALL_BOOST_STOPLIST.has(t) || OVERLAP_COMMAND_STOPLIST.has(t)) continue;
     if (!Object.hasOwn(map.tokens, t)) continue;
     const slugs = map.tokens[t];
     if (slugs.length > dfCap) continue;
     for (const slug of slugs) {
-      if (exclude.has(slug)) continue;
+      if (exclude.has(slug) || !Object.hasOwn(map.facts, slug)) continue;
       let set = perSlugTokens.get(slug);
       if (!set) { set = new Set(); perSlugTokens.set(slug, set); }
       set.add(t);
@@ -198,7 +206,18 @@ export function matchCommand(
     if (score >= minScore) hits.push({ slug, score, tokens: [...tokSet] });
   }
   hits.sort((a, b) => b.score - a.score || a.slug.localeCompare(b.slug));
-  return hits.slice(0, OVERLAP_MAX_HITS);
+  const eligible: OverlapHit[] = [];
+  for (const hit of hits) {
+    const fact = map.facts[hit.slug];
+    if (!isSafeSlug(hit.slug) || !MAP_TYPES.includes(fact.type)) continue;
+    try {
+      const fm = parseMemory(readFileSync(memoryFilePath(root, fact.type, hit.slug), "utf-8")).frontmatter;
+      if (!injectionEligible(fm, map.project, platform)) continue;
+    } catch { continue; /* missing, unreadable, or invalid candidates cannot supply guidance */ }
+    eligible.push(hit);
+    if (eligible.length === OVERLAP_MAX_HITS) break;
+  }
+  return eligible;
 }
 
 export function formatFactLine(f: FactLine): string {

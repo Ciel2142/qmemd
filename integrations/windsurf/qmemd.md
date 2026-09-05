@@ -20,7 +20,7 @@ Durable knowledge lives in **qmemd memory** (knowledge lane); work/issue state l
 - **When a user instruction names a mechanism you're about to implement** — recall it before designing.
 - **When the user references past context.**
 
-When `recall` (or `qmemd list`) output ends with a footer like `14 project facts for <proj> (5 shown, 9 more) — qmemd list --type project --project <proj>`, more facts exist than it showed — re-run `qmemd list` or narrow the query to see them. A thin result is not proof a fact isn't stored.
+Every snapshot lane is budget-limited, including user/feedback and pinned facts. Shown user/feedback bodies are whole; project/reference entries are summaries (`qmemd show <slug>` for the full fact). Omission counts describe facts not delivered; pins do not guarantee delivery. Use `recall` or `qmemd list` to retrieve the rest. A compact partial notice, an empty snapshot, or a missing footer is not proof that no relevant facts exist.
 
 **Recall is project-scoped by default** (qmemd-due): a `recall` query returns only facts for the current project (cwd basename) + `global` — another project's facts no longer surface unlabeled. To search across all projects (e.g. "have I hit this error in another repo?"), pass `--cross-project` (CLI) or `cross_project:true` (MCP `recall`); foreign hits then come back labeled with their project. When the default scope hid relevant foreign matches, recall prints a `N cross-project matches hidden (--cross-project to include)` footer — so a thin or empty result may be a **scoping** effect, not a true miss; widen before concluding a fact isn't stored.
 

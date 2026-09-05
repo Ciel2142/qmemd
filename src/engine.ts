@@ -50,6 +50,17 @@ export function platformVisible(platforms: Platform[], current: Platform | "all"
   return current === "all" || platforms.length === 0 || platforms.includes(current);
 }
 
+/** Shared automatic-injection gate; undefined project preserves the global user/feedback lane. */
+export function injectionEligible(
+  fact: { project: string; platforms?: Platform[]; supersededBy?: string },
+  project: string | undefined,
+  platform: Platform | "all",
+): boolean {
+  return !fact.supersededBy
+    && platformVisible(fact.platforms ?? [], platform)
+    && (project === undefined || fact.project === project || fact.project === "global");
+}
+
 /** Reject an unknown platform token before it reaches frontmatter (qmemd-jzz sibling).
  *  Path-free message (starts "invalid platform") so the MCP/HTTP layers can surface it
  *  verbatim as a client error, mirroring assertSafeSlug / requireValidType. */
@@ -506,7 +517,7 @@ export function parseMemory(content: string): ParsedMemory {
 
 export interface SessionOptions {
   project?: string;      // current project name (cwd basename); "global" facts always included
-  projectLimit?: number; // max project facts (default $QMEMD_SESSION_PROJECT_LIMIT, then 5)
+  projectLimit?: number; // max unpinned facts per project/reference lane (env, then 0)
   budgetBytes?: number;  // hard cap on output size (default $QMEMD_SESSION_BUDGET, then 2000)
   platform?: Platform | "all"; // host OS gate (default currentPlatform()); "all" disables it
 }
@@ -579,13 +590,13 @@ export function* walkFactFiles(
   }
 }
 
-function readType(root: string, type: MemoryType, onUnreadable?: () => void): ParsedMemory[] {
-  const out: ParsedMemory[] = [];
+function readType(root: string, type: MemoryType, onUnreadable?: () => void): (ParsedMemory & { slug: string })[] {
+  const out: (ParsedMemory & { slug: string })[] = [];
   // A read/parse failure bumps the caller's unreadable counter (qmemd-8jt) so the every-
   // session snapshot folds the count into THIS pass instead of re-walking the whole corpus
   // through countUnreadableFacts afterwards (qmemd-e5h/j5i — single read on the hot path).
   for (const ff of walkFactFiles(root, { types: [type], onUnreadable: () => onUnreadable?.() })) {
-    try { out.push(parseMemory(ff.raw)); } catch { onUnreadable?.(); }
+    try { out.push({ ...parseMemory(ff.raw), slug: ff.slug }); } catch { onUnreadable?.(); }
   }
   return out;
 }
@@ -608,227 +619,127 @@ export function countUnreadableFacts(root: string): number {
 
 /** Filesystem-only session snapshot. No Store, no model — instant and deterministic. */
 export async function recallSession(root: string, opts: SessionOptions = {}): Promise<string> {
-  // Default 0 (was 5): the recency-sliced project/reference lanes are OFF, so pinning is the
-  // only way a project/reference fact reaches session start. Those lanes selected by `updated`
-  // date, not by relevance — on a large corpus they inject whatever happened to be written
-  // last, while the pinned block is the curated lane. Set QMEMD_SESSION_PROJECT_LIMIT=5 (or
-  // pass projectLimit) to bring the slice back. The lanes' code stays because the coverage
-  // footer's `shown` count reads from it; at 0 the footer just reports "0 shown, N more", so
-  // the hidden corpus is still announced (the qmemd-e3i anti-silent-omission contract).
   const projectLimit = opts.projectLimit ?? sessionEnvInt("QMEMD_SESSION_PROJECT_LIMIT") ?? 0;
   const budget = opts.budgetBytes ?? sessionEnvInt("QMEMD_SESSION_BUDGET") ?? 2000;
   const curProject = opts.project ?? "global";
   const plat = opts.platform ?? currentPlatform();
-  const onPlat = (m: ParsedMemory): boolean => platformVisible(m.frontmatter.platforms ?? [], plat);
-
-  // A superseded fact is retired (bri): hidden from EVERY snapshot lane, pinned included —
-  // supersession is explicit retirement, stronger than a pin. Filtered before the
-  // platform-hidden count below so a retired fact is never reported as platform-hidden.
-  const active = (m: ParsedMemory): boolean => !m.frontmatter.supersededBy;
-
-  // Fold the unreadable-file count into this single read of all four type folders (qmemd-8jt):
-  // every readType below shares this counter, so the snapshot no longer re-parses the entire
-  // corpus through countUnreadableFacts afterwards (qmemd-j5i hot-path single-read intent).
+  type SessionFact = ParsedMemory & { slug: string };
+  type Lane = {
+    label: string;
+    delivery: "bodies" | "summaries";
+    facts: SessionFact[];
+    limit: number;
+    shown: number;
+  };
   let unreadable = 0;
-  const bumpUnreadable = (): void => { unreadable++; };
-  const usersAll = readType(root, "user", bumpUnreadable);
-  const feedbackAll = readType(root, "feedback", bumpUnreadable);
-  // Retirement filter FIRST (bri spec): a retired fact is never reported as platform-hidden.
-  // Base the platform-hidden counter on active facts only, then apply the platform gate.
-  const usersActive = usersAll.filter(active);
-  const feedbackActive = feedbackAll.filter(active);
-  const users = usersActive.filter(onPlat);
-  const feedback = feedbackActive.filter(onPlat);
-  // user/feedback are the lanes the recall instructions call EXHAUSTIVE (claude/qmemd.md:
-  // "the snapshot injects every user + feedback fact"). The spec filters every lane by host
-  // platform, so a platform-bound user/feedback fact is correctly hidden here — but hiding it
-  // SILENTLY withholds guidance the agent is told it has in full. Count what the host gate
-  // removed from these two lanes and surface it as a footer below (qmemd-b1a).
-  // platformHiddenUF is baselined on active facts so retired facts are never reported as
-  // platform-hidden (bri): an active fact that is off-platform is hidden; a retired fact is not.
-  const platformHiddenUF = (usersActive.length - users.length) + (feedbackActive.length - feedback.length);
-  // Read the two largest type folders ONCE each; pinned and in-scope are derived by
-  // filtering the same parsed lists (qmemd-j5i — this path runs at every session start).
-  const projectAll = readType(root, "project", bumpUnreadable);
-  const referenceAll = readType(root, "reference", bumpUnreadable);
-  // Project = SCOPE (where a fact surfaces), pin = PRIORITY (never falls out of the recency
-  // slice WITHIN that scope) — two axes (57d). The pinned block therefore takes the same
-  // project gate as the sliced lanes; without it a repo-specific pinned fact injects into
-  // every session of every repo (the 3gv incident). Surfacing everywhere needs project:global.
-  const inProject = (m: ParsedMemory): boolean => m.frontmatter.project === curProject || m.frontmatter.project === "global";
-  const pinned = [...projectAll, ...referenceAll].filter(m => m.frontmatter.pinned && onPlat(m) && active(m) && inProject(m));
-  // In-scope = non-pinned, non-retired facts for the current project or global, newest first.
-  // Kept un-sliced so the slice drop below is countable (e3i); `.slice` is what the
-  // snapshot actually shows.
-  // Recency = updated (full instant, bri) falling back to created (day-granular legacy).
-  // ISO strings compare lexicographically; a bare day sorts before any same-day instant.
-  const recency = (m: ParsedMemory): string => m.frontmatter.updated ?? m.frontmatter.created;
-  const inScope = (facts: ParsedMemory[]): ParsedMemory[] => facts
-    .filter(m => !m.frontmatter.pinned && onPlat(m) && active(m) && inProject(m))
-    .sort((a, b) => recency(b).localeCompare(recency(a)));
-  const projectsInScope = inScope(projectAll);
-  const projects = projectsInScope.slice(0, projectLimit);
-  // Recent non-pinned references (mirrors the projects block) so a reference stored
-  // mid-session resurfaces at the next session start even when not pinned (bgf).
-  // Pinned references continue to appear via the `pinned` block; !pinned here avoids
-  // a double-count.
-  const referencesInScope = inScope(referenceAll);
-  const references = referencesInScope.slice(0, projectLimit);
+  let platformHiddenUF = 0;
+  const lanes: Lane[] = [];
+  // Each folder is read once. Physical type and slug, not editable frontmatter
+  // identity, determine the lane and the recovery address.
+  const scoped: { type: "project" | "reference"; facts: SessionFact[]; repo: number; lanes: [Lane, Lane] }[] = [];
+  for (const type of MEMORY_TYPES) {
+    const all = readType(root, type, () => unreadable++);
+    const bodyLane = type === "user" || type === "feedback";
+    const project = bodyLane ? undefined : curProject;
+    const facts = all.filter(m => injectionEligible(m.frontmatter, project, plat));
+    if (bodyLane) {
+      for (const m of all) {
+        if (injectionEligible(m.frontmatter, undefined, "all")
+          && !injectionEligible(m.frontmatter, undefined, plat)) platformHiddenUF++;
+      }
+      lanes.push({ label: type, delivery: "bodies", facts, limit: facts.length, shown: 0 });
+    } else {
+      const pinned: Lane = {
+        label: `pinned:${type}`, delivery: "summaries",
+        facts: facts.filter(m => m.frontmatter.pinned), limit: facts.length, shown: 0,
+      };
+      const unpinned: Lane = {
+        label: `unpinned:${type}`, delivery: "summaries",
+        facts: facts.filter(m => !m.frontmatter.pinned).sort((a, b) =>
+          (b.frontmatter.updated ?? b.frontmatter.created).localeCompare(a.frontmatter.updated ?? a.frontmatter.created)),
+        limit: projectLimit, shown: 0,
+      };
+      const repo = facts.reduce((n, m) => n + Number(m.frontmatter.project === curProject), 0);
+      scoped.push({ type, facts, repo, lanes: [pinned, unpinned] });
+    }
+  }
+  // Existing priority: user, feedback, all pins, then optional recency slices.
+  for (const scope of scoped) lanes.push(scope.lanes[0]);
+  for (const scope of scoped) lanes.push(scope.lanes[1]);
+  const populated = lanes.filter(lane => lane.facts.length > 0);
+  if (populated.length === 0 && unreadable === 0 && platformHiddenUF === 0) return "";
 
-  // `unreadable` (accumulated above during the single readType pass, qmemd-8jt) is surfaced
-  // as a footer below so a corrupt fact does not silently vanish from the snapshot (qmemd-e5h).
-  // Empty ONLY when there is nothing readable AND nothing unreadable to warn about — an
-  // all-unreadable corpus must still speak up (returning "" here is the silence e5h fixes).
-  // Counted on the IN-SCOPE lists, not the slices: with projectLimit 0 (the pinned-only
-  // default) the slices are always empty, so counting them would return "" for a corpus of
-  // hundreds of unpinned facts — the exact silent omission the e3i footer exists to prevent.
-  // A lane with in-scope facts and no shown ones still owes its "(0 shown, N more)" footer.
-  if (users.length + feedback.length + pinned.length + projectsInScope.length + referencesInScope.length === 0 && unreadable === 0 && platformHiddenUF === 0) return "";
+  // This is the minimum useful snapshot: it cannot be mistaken for delivered
+  // guidance, and its recovery command runs without any placeholder arguments.
+  const marker = "Memory partial; 0 bodies/summaries; qmemd list";
+  if (budget < Buffer.byteLength(marker, "utf-8")) return "";
+  const signals: string[] = [];
+  if (platformHiddenUF > 0) {
+    signals.push(`${platformHiddenUF} platform-scoped user/feedback facts hidden on ${plat} — qmemd list`);
+  }
+  if (unreadable > 0) signals.push(`${unreadable} facts unreadable — run qmemd doctor`);
+  const coverage = (reserve: boolean): string[] => populated.map(lane => {
+    const total = lane.facts.length;
+    const shown = reserve ? total : lane.shown;
+    const omitted = reserve ? total : total - lane.shown;
+    return `${lane.label} ${lane.delivery}: ${shown} shown, ${omitted} omitted / ${total} eligible`;
+  });
+  const recovery = "Recovery: qmemd list; full bodies: qmemd show <slug>";
+  const scopeNotice = scoped.some(scope => scope.facts.length > 0)
+    ? ["Scope: project/reference = current project + global."] : [];
+  const prefix = (reserve: boolean): string[] => [
+    `## Memory (qmemd; ${reserve || (unreadable === 0 && platformHiddenUF === 0
+      && populated.every(lane => lane.shown === lane.facts.length)) ? "complete" : "partial"})`,
+    ...coverage(reserve), ...scopeNotice, ...signals, recovery,
+  ];
+  // Reserve worst-case digit widths before any blocks. Counts shrink or retain
+  // their width after selection, so the actual prefix can never exceed this.
+  const reserved = prefix(true);
+  let used = Buffer.byteLength(reserved.join("\n"), "utf-8");
+  if (used > budget) return marker;
 
-  const HEADER = "## Memory (qmd)";
-  // The header is the floor of any non-empty snapshot; if it alone can't fit the
-  // hard cap, emit nothing rather than blow the budget on a header-only output.
-  if (Buffer.byteLength(HEADER, "utf-8") > budget) return "";
-  const lines: string[] = [HEADER];
-  let truncated = 0;
-
-  // qmemd-mqt: reserve room for the e3i coverage footer(s) BEFORE emitting the greedy
-  // always-on bodies. Without this, numerous feedback bodies fill the budget and the gap
-  // signal (emitted last) is dropped silently — defeating the postmortem-R1 purpose of
-  // surfacing that the snapshot is partial. The dominant gap is the slice-drop (in-scope >
-  // projectLimit), knowable up front; build the real footer line per gapped lane and reserve
-  // its bytes. Footer width depends on curProject (it appears twice), so measure the actual
-  // string with worst-case digit widths rather than hardcode. Reservation shrinks the budget
-  // for ALL earlier blocks (bodies + pinned + project/reference one-liners) — shrinking only
-  // the body loop would let the one-liners, which emit before the footer, steal the slack.
-  // The footer's `total` is the platform-FILTERED in-scope count (spec), so the suggested
-  // `list` must carry --platform to reproduce it — otherwise the un-scoped list shows MORE
-  // facts than the count promised (qmemd-b1a). Omit on an exotic host (plat === "all"): no
-  // filtering happened and "all" is not a real platform token.
   const platSuffix = plat === "all" ? "" : ` --platform ${plat}`;
-  // qp-62p: `total` is the SCOPE count — current project + `global` (inProject above) — but
-  // "N project facts for <project>" read as per-project, so a global-heavy corpus made the
-  // repo look like it owned hundreds of facts (417 "for qmemd-public" = 14 repo + 403 global).
-  // Name the scope and split the lanes, the way the beacon already does. When curProject IS
-  // "global" the repo lane is empty by definition, so the split is omitted rather than
-  // rendered as a confusing "0 repo + N global".
-  // The split sits OUTSIDE the "(N shown, M more)" group so that group stays the stable,
-  // greppable shape it has always been.
-  const splitPart = (repo: number, glob: number): string =>
-    curProject === "global" ? "" : ` = ${repo} repo + ${glob} global`;
-  const footerLine = (label: "project" | "reference", total: number, shown: number, hidden: number, repo: number, glob: number): string =>
-    `${total} ${label} facts in scope for ${curProject}${splitPart(repo, glob)} (${shown} shown, ${hidden} more) — qmemd list --type ${label} --project ${curProject}${platSuffix}`;
-  // The platform-hidden user/feedback signal (qmemd-b1a). plat is concrete here whenever
-  // platformHiddenUF > 0 (a fact can only be hidden when the host gate is active, i.e. not "all").
-  const platformHiddenLine = platformHiddenUF > 0
-    ? `${platformHiddenUF} platform-scoped user/feedback fact${platformHiddenUF === 1 ? "" : "s"} hidden on ${plat} — qmemd recall <topic> --all-platforms`
-    : "";
-  let reserve = 0;
-  const reserveFooter = (label: "project" | "reference", inScopeList: ParsedMemory[]) => {
-    if (inScopeList.length <= projectLimit) return; // gap only via budget-drop → best-effort, not reserved
-    // Worst-case digit widths: each lane of the qp-62p split is bounded by the in-scope total.
-    reserve += Buffer.byteLength(footerLine(label, inScopeList.length, projectLimit, inScopeList.length, inScopeList.length, inScopeList.length), "utf-8") + 1 /* the "\n" join() inserts before the footer */;
-  };
-  reserveFooter("project", projectsInScope);
-  reserveFooter("reference", referencesInScope);
-  // qmemd-trp: a footer ALSO fires when a lane is budget-DROPPED (its slice fit count-wise but
-  // bytes pushed its one-liners out), not only on slice-overflow. reserveFooter above never
-  // reserved that case, so a second lane's budget-drop footer could steal a first lane's already-
-  // reserved bytes (the a1d failure, one lane over). This only matters once a footer reservation
-  // is in play (reserve > 0 ⇒ a lane overflowed); then reserve a footer slot for any OTHER
-  // in-scope lane small enough to escape the slice-overflow reservation but still able to
-  // budget-drop. Gated on reserve > 0 so a footer-free small corpus pays nothing.
-  if (reserve > 0) {
-    const reserveDropFooter = (label: "project" | "reference", inScopeList: ParsedMemory[]) => {
-      if (inScopeList.length === 0 || inScopeList.length > projectLimit) return; // empty ⇒ no footer; overflow ⇒ already reserved
-      reserve += Buffer.byteLength(footerLine(label, inScopeList.length, projectLimit, inScopeList.length, inScopeList.length, inScopeList.length), "utf-8") + 1 /* the "\n" join() inserts before the footer */;
-    };
-    reserveDropFooter("project", projectsInScope);
-    reserveDropFooter("reference", referencesInScope);
+  // Quote unusual project names without exposing memory-store paths in commands.
+  const projectArg = /^[a-zA-Z0-9_.-]+$/.test(curProject)
+    ? curProject : `'${curProject.replace(/'/g, "'\\''")}'`;
+  const scopeLines = (reserve: boolean): string[] => scoped.filter(scope => scope.facts.length > 0).map(scope => {
+    const total = scope.facts.length;
+    const shown = reserve ? total : scope.lanes.reduce((n, lane) => n + lane.shown, 0);
+    const omitted = reserve ? total : total - shown;
+    const split = curProject === "global" ? "" : ` = ${scope.repo} repo + ${total - scope.repo} global`;
+    return `${total} ${scope.type} facts in scope for ${curProject}${split} (${shown} shown, ${omitted} more) — qmemd list --type ${scope.type} --project ${projectArg}${platSuffix}`;
+  });
+  const verbose = scopeLines(true);
+  const verboseBytes = verbose.reduce((n, line) => n + 1 + Buffer.byteLength(line, "utf-8"), 0);
+  // Long project names must not crowd out the compact accounting or short rules.
+  // Detailed repo/global coverage is optional; scope and lane totals above are not.
+  const includeVerbose = verboseBytes <= budget / 3 && used + verboseBytes <= budget;
+  if (includeVerbose) used += verboseBytes;
+
+  const blocks: string[] = [];
+  for (const lane of lanes) {
+    const limit = Math.min(lane.facts.length, Math.max(0, Math.trunc(lane.limit)));
+    for (let i = 0; i < limit; i++) {
+      const m = lane.facts[i];
+      let block: string;
+      if (lane.delivery === "bodies") {
+        const body = m.body.trim().replace(/\n/g, "\n  ");
+        block = m.frontmatter.description === firstLine(m.body)
+          ? `[${lane.label}] ${body}`
+          : `[${lane.label}] ${m.frontmatter.description}\n  ${body}`;
+      } else {
+        const label = lane.label.startsWith("unpinned:")
+          ? `${lane.label.slice("unpinned:".length)}:${curProject}` : lane.label;
+        block = `[${label}] ${m.frontmatter.description} (${m.slug})`;
+      }
+      const bytes = 1 + Buffer.byteLength(block, "utf-8");
+      if (used + bytes > budget) continue;
+      used += bytes;
+      blocks.push(block);
+      lane.shown++;
+    }
   }
-  // qmemd-b1a: reserve the platform-hidden user/feedback signal alongside the e3i footers — it
-  // is the same over-trust failure class (the agent treats user/feedback as exhaustive), so it
-  // must not be a body-flood casualty.
-  if (platformHiddenLine) reserve += Buffer.byteLength(platformHiddenLine, "utf-8") + 1 /* join "\n" */;
-  // Only reserve if it still leaves room for the header plus some bodies; otherwise fall back
-  // to the best-effort path (preserves the tiny-budget behaviour where the footer is dropped,
-  // not overflowed).
-  if (reserve >= budget - Buffer.byteLength(HEADER, "utf-8")) reserve = 0;
-  const workBudget = budget - reserve;
-
-  const withBody = (m: ParsedMemory, label: string) => {
-    const indentedBody = m.body.trim().replace(/\n/g, "\n  ");
-    // description defaults to firstLine(body) (engine.ts remember). When it still IS
-    // that first line, printing it above the body just repeats the body's opening
-    // line (8hk), so fold the label straight into the body and drop the description
-    // line. A curated description that differs from the first line is kept above.
-    const desc = m.frontmatter.description;
-    const block = desc === firstLine(m.body)
-      ? `[${label}] ${indentedBody}`
-      : `[${label}] ${desc}\n  ${indentedBody}`;
-    if (Buffer.byteLength(lines.concat(block).join("\n"), "utf-8") <= workBudget) { lines.push(block); return; }
-    // Over budget: truncate this block to fit (with an ellipsis) rather than drop
-    // it wholesale — user/feedback are the highest-priority always-on facts, so a
-    // single one larger than the budget must still appear, just truncated.
-    const used = Buffer.byteLength(lines.join("\n"), "utf-8");
-    const ELLIPSIS = "…";
-    const avail = workBudget - used - 1 /* the "\n" join() inserts before this block */ - Buffer.byteLength(ELLIPSIS, "utf-8");
-    if (avail <= 0) { truncated++; return; }
-    lines.push(truncateToBytes(block, avail) + ELLIPSIS);
-  };
-  // dropped: facts the budget pushed out of a one-line block, so the e3i footer can
-  // count what was *actually* emitted (not merely attempted).
-  const oneLine = (m: ParsedMemory, label: string, dropped?: ParsedMemory[]) => {
-    const block = `[${label}] ${m.frontmatter.description} (${m.frontmatter.name})`;
-    if (Buffer.byteLength(lines.concat(block).join("\n"), "utf-8") > workBudget) { truncated++; dropped?.push(m); return; }
-    lines.push(block);
-  };
-
-  users.forEach(m => withBody(m, "user"));
-  feedback.forEach(m => withBody(m, "feedback"));
-  pinned.forEach(m => oneLine(m, `pinned:${m.frontmatter.type}`));
-  const projDropped: ParsedMemory[] = [];
-  projects.forEach(m => oneLine(m, `project:${curProject}`, projDropped));
-  const refDropped: ParsedMemory[] = [];
-  references.forEach(m => oneLine(m, `reference:${curProject}`, refDropped));
-
-  // qmemd-e3i: announce facts not shown — dropped either by the projectLimit slice
-  // (happens BEFORE output) or by the byte budget above. Without this the omission is
-  // silent — an agent that believes memory was pushed to it won't pull more
-  // (postmortem 2026-06-04, R1). Lower priority than user/feedback bodies: appended
-  // last, dropped wholesale if no room.
-  const fits = (line: string): boolean =>
-    Buffer.byteLength(lines.concat(line).join("\n"), "utf-8") <= budget;
-  const countFooter = (label: "project" | "reference", inScopeList: ParsedMemory[], sliced: ParsedMemory[], dropped: ParsedMemory[]) => {
-    const shown = sliced.length - dropped.length; // emitted, not merely attempted
-    const hidden = inScopeList.length - shown;
-    if (hidden <= 0) return;
-    // qp-62p: split the scope total by lane. `inProject` admits exactly two projects, so the
-    // non-repo remainder is the `global` lane.
-    const repo = inScopeList.filter(m => m.frontmatter.project === curProject).length;
-    const line = footerLine(label, inScopeList.length, shown, hidden, repo, inScopeList.length - repo);
-    if (!fits(line)) return; // no room: drop the footer
-    lines.push(line);
-  };
-  countFooter("project", projectsInScope, projects, projDropped);
-  countFooter("reference", referencesInScope, references, refDropped);
-
-  // qmemd-b1a: surface user/feedback facts the host platform gate hid, so an "exhaustive" lane
-  // is never silently trimmed. Bytes reserved above, so this fits even after a body flood.
-  if (platformHiddenLine && fits(platformHiddenLine)) lines.push(platformHiddenLine);
-
-  // qmemd-e5h: surface unreadable/corrupt facts so the silent skip in readType does not hide
-  // them from recall. Best-effort like the other footers — dropped only if the budget is full.
-  if (unreadable > 0) {
-    const line = `${unreadable} fact${unreadable === 1 ? "" : "s"} unreadable — run \`qmemd doctor\``;
-    if (fits(line)) lines.push(line);
-  }
-
-  if (truncated > 0) {
-    const trail = `(${truncated} more — \`qmd recall\` to see)`;
-    if (Buffer.byteLength(lines.concat(trail).join("\n"), "utf-8") <= budget) lines.push(trail);
-  }
-  return lines.join("\n");
+  return [...prefix(false), ...(includeVerbose ? scopeLines(false) : []), ...blocks].join("\n");
 }
 
 // =============================================================================
@@ -1570,9 +1481,9 @@ export async function remember(
       // --replace names an existing fact, so an explicit --type on it means "this fact is
       // now that type" — the only first-class retype path there is (qp-replace-ignores-type-ovo).
       // Silently keeping the old type was a no-op on the one field with a session-token
-      // consequence: recallSession injects every `user`/`feedback` fact into EVERY session,
-      // while `project`/`reference` fall into the sliced pool, so a caller retyping to get a
-      // rule out of the unconditional snapshot appeared to succeed and changed nothing.
+      // consequence: recallSession prioritizes `user`/`feedback` bodies in every scope,
+      // while `project`/`reference` use scoped summary lanes. Retyping to leave the
+      // body lane appeared to succeed and changed nothing.
       // --type omitted still inherits (q65). --force is deliberately NOT a retype: its slug
       // collision is incidental (the slug comes from the fact text or --as, not from naming an
       // existing fact), so it keeps relocating into the existing folder instead (s5f).
@@ -2832,7 +2743,7 @@ export interface ProjectOverview {
 
 /** Model-free corpus overview for a project (project-scoped + global, mirroring
  *  listFacts). `types` defaults to all four; the beacon passes ["project","reference"]
- *  to exclude always-on user/feedback (already injected every session). `total`/`tags`
+ *  to exclude user/feedback (prioritized separately in session snapshots). `total`/`tags`
  *  stay mixed (pre-split JSON contract); `repo`/`global` carry the honest split. No fs
  *  path, no model — safe on a Bash hot path. */
 export function projectOverview(root: string, project: string, types: MemoryType[] = MEMORY_TYPES): ProjectOverview {

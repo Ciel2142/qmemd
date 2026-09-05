@@ -25,7 +25,6 @@ const REQUIRED_ASSETS = [
   "hooks/run-qmemd.mjs",
   "commands/stale.md",
   "claude/qmemd.md",
-  "integrations/cursor/qmemd.mdc",
 ];
 
 const die = (msg) => { console.error(`✗ clean-room smoke: ${msg}`); process.exit(1); };

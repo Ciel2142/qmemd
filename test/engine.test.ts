@@ -534,427 +534,242 @@ describe("recallSession", () => {
   beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "qmemd-")); });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
-  test("emits user + feedback bodies under a Memory header", async () => {
-    await mkdir(join(root, "user"), { recursive: true });
-    await writeFile(join(root, "user", "be-terse.md"), serializeMemory(
-      { name: "be-terse", description: "Be terse", type: "user", tags: [], project: "global", created: "2026-05-29", pinned: false },
-      "Always answer tersely."));
-    const out = await recallSession(root, { project: "global" });
-    expect(out).toContain("## Memory");
-    expect(out).toContain("Be terse");
+  async function put(type: MemoryType, slug: string, body: string, over: Partial<MemoryFrontmatter> = {}) {
+    await mkdir(join(root, type), { recursive: true });
+    await writeFile(join(root, type, `${slug}.md`), serializeMemory({
+      name: slug, description: `Description ${slug}`, type, tags: [],
+      project: "global", created: "2026-06-01", pinned: false, ...over,
+    }, body));
+  }
+
+  function counts(out: string, lane: string, delivery: "bodies" | "summaries") {
+    const line = out.split("\n").find(line => line.startsWith(`${lane} ${delivery}:`));
+    expect(line, `missing accounting for ${lane}`).toBeDefined();
+    const match = line!.match(/(\d+) shown, (\d+) omitted \/ (\d+) eligible/);
+    expect(match).not.toBeNull();
+    const [shown, omitted, eligible] = match!.slice(1).map(Number);
+    expect(shown + omitted).toBe(eligible);
+    return { shown, omitted, eligible };
+  }
+
+  test("delivers complete bodies and pinned summaries when the corpus fits", async () => {
+    const body = "Keep memories in a dedicated repo.\nDo not mix specs into the store.";
+    await put("user", "terse", "Always answer tersely.");
+    await put("feedback", "hygiene", body, { description: firstLine(body) });
+    await put("project", "pin", "Full pinned instructions require explicit retrieval.", { pinned: true });
+    const out = await recallSession(root);
     expect(out).toContain("Always answer tersely.");
+    expect(out).toContain(body.replace(/\n/g, "\n  "));
+    expect(out.split(firstLine(body)).length - 1).toBe(1);
+    expect(out).toContain("Description pin");
+    expect(out).not.toContain("Full pinned instructions");
+    expect(counts(out, "user", "bodies")).toEqual({ shown: 1, omitted: 0, eligible: 1 });
+    expect(counts(out, "feedback", "bodies")).toEqual({ shown: 1, omitted: 0, eligible: 1 });
+    expect(counts(out, "pinned:project", "summaries")).toEqual({ shown: 1, omitted: 0, eligible: 1 });
   });
 
   test("empty store yields empty string", async () => {
-    expect(await recallSession(root, {})).toBe("");
+    expect(await recallSession(root)).toBe("");
   });
 
-  test("default description (= body's first line) is not echoed above the body (8hk)", async () => {
-    await mkdir(join(root, "feedback"), { recursive: true });
-    const body = "Keep memories in a dedicated repo.\nDo not mix specs into the store.";
-    // description equals the body's first line — the firstLine() default.
-    await writeFile(join(root, "feedback", "dup.md"), serializeMemory(
-      { name: "dup", description: "Keep memories in a dedicated repo.", type: "feedback", tags: [], project: "global", created: "2026-06-04", pinned: false },
-      body));
-    const out = await recallSession(root, { project: "global" });
-    // First line appears exactly once — folded into the label, not repeated above the body.
-    expect(out.split("Keep memories in a dedicated repo.").length - 1).toBe(1);
-    expect(out).toContain("[feedback] Keep memories in a dedicated repo.");
-    expect(out).toContain("Do not mix specs into the store."); // rest of body still present
+  test("skips an oversized early user body without hiding shorter users, feedback or pins", async () => {
+    await put("user", "a-large", "X".repeat(2200));
+    await put("user", "z-short", "Keep the shorter later rule.");
+    await put("feedback", "rule", "Ask before deleting a branch.");
+    await put("project", "pin", "Unshown pin body.", { pinned: true });
+    const out = await recallSession(root, { platform: "linux" });
+    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(2000);
+    expect(out).not.toContain("Description a-large");
+    expect(out).not.toContain("XXX");
+    expect(out).toContain("Keep the shorter later rule.");
+    expect(out).toContain("Ask before deleting a branch.");
+    expect(out).toContain("Description pin");
+    expect(out).toContain("partial");
+    expect(out).toContain("qmemd list");
+    expect(counts(out, "user", "bodies")).toEqual({ shown: 1, omitted: 1, eligible: 2 });
+    expect(counts(out, "feedback", "bodies").shown).toBe(1);
+    expect(counts(out, "pinned:project", "summaries").shown).toBe(1);
   });
 
-  test("a curated description (differs from body's first line) is still shown above the body (8hk)", async () => {
-    await mkdir(join(root, "feedback"), { recursive: true });
-    await writeFile(join(root, "feedback", "curated.md"), serializeMemory(
-      { name: "curated", description: "Memory hygiene", type: "feedback", tags: [], project: "global", created: "2026-06-04", pinned: false },
-      "Keep memories in a dedicated repo."));
-    const out = await recallSession(root, { project: "global" });
-    expect(out).toContain("[feedback] Memory hygiene");
-    expect(out).toContain("Keep memories in a dedicated repo.");
-  });
-
-  test("over-budget user fact is truncated with ellipsis, not dropped (vwp)", async () => {
-    await mkdir(join(root, "user"), { recursive: true });
-    await writeFile(join(root, "user", "big.md"), serializeMemory(
-      { name: "big", description: "Big user fact", type: "user", tags: [], project: "global", created: "2026-05-31", pinned: false },
-      "X".repeat(5000)));
-    const out = await recallSession(root, { project: "global", budgetBytes: 500 });
-    expect(out).toContain("Big user fact");
-    expect(out).toContain("…");
-    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(500);
-    expect(out).not.toContain("X".repeat(5000));
-  });
-
-  test("trailing '(N more)' line never pushes output past the hard byte budget (vwp)", async () => {
-    await mkdir(join(root, "user"), { recursive: true });
-    await writeFile(join(root, "user", "a.md"), serializeMemory(
-      { name: "a", description: "Fact A", type: "user", tags: [], project: "global", created: "2026-05-31", pinned: false },
-      "X".repeat(5000)));
-    await writeFile(join(root, "user", "b.md"), serializeMemory(
-      { name: "b", description: "Fact B", type: "user", tags: [], project: "global", created: "2026-05-31", pinned: false },
-      "Y".repeat(5000)));
-    // First fact truncates to fill the budget; the second is dropped → a trailing
-    // "(1 more …)" line would overflow unless it is itself budget-guarded.
-    const out = await recallSession(root, { project: "global", budgetBytes: 300 });
-    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(300);
-  });
-
-  test("budget smaller than the header yields empty string, never an over-cap header (62p)", async () => {
-    await mkdir(join(root, "user"), { recursive: true });
-    await writeFile(join(root, "user", "x.md"), serializeMemory(
-      { name: "x", description: "X", type: "user", tags: [], project: "global", created: "2026-05-31", pinned: false },
-      "body"));
-    // "## Memory (qmd)" is 15 bytes; any budget below that must NOT emit it.
-    for (const b of [1, 5, 10, 14]) {
-      const out = await recallSession(root, { project: "global", budgetBytes: b });
-      expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(b);
-    }
-  });
-
-  describe("env overrides QMEMD_SESSION_BUDGET / QMEMD_SESSION_PROJECT_LIMIT (y6s)", () => {
-    const saved: Record<string, string | undefined> = {};
-    beforeEach(() => {
-      saved.budget = process.env.QMEMD_SESSION_BUDGET;
-      saved.limit = process.env.QMEMD_SESSION_PROJECT_LIMIT;
-    });
-    afterEach(() => {
-      if (saved.budget === undefined) delete process.env.QMEMD_SESSION_BUDGET; else process.env.QMEMD_SESSION_BUDGET = saved.budget;
-      if (saved.limit === undefined) delete process.env.QMEMD_SESSION_PROJECT_LIMIT; else process.env.QMEMD_SESSION_PROJECT_LIMIT = saved.limit;
-    });
-
-    const seedUser = async (name: string, body: string) => {
-      await mkdir(join(root, "user"), { recursive: true });
-      await writeFile(join(root, "user", `${name}.md`), serializeMemory(
-        { name, description: `Fact ${name}`, type: "user", tags: [], project: "global", created: "2026-05-31", pinned: false },
-        body));
-    };
-    const seedProject = async (name: string, created: string) => {
-      await mkdir(join(root, "project"), { recursive: true });
-      await writeFile(join(root, "project", `${name}.md`), serializeMemory(
-        { name, description: `Project fact ${name}`, type: "project", tags: [], project: "demo", created, pinned: false },
-        `Body of ${name}`));
-    };
-
-    test("QMEMD_SESSION_BUDGET caps output like budgetBytes", async () => {
-      await seedUser("big", "X".repeat(5000));
-      process.env.QMEMD_SESSION_BUDGET = "300";
-      const out = await recallSession(root, { project: "global" });
-      expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(300);
-      expect(out).toContain("## Memory");
-    });
-
-    test("explicit budgetBytes opt wins over the env var", async () => {
-      await seedUser("big", "X".repeat(5000));
-      process.env.QMEMD_SESSION_BUDGET = "3000";
-      const out = await recallSession(root, { project: "global", budgetBytes: 150 });
-      expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(150);
-    });
-
-    test("QMEMD_SESSION_PROJECT_LIMIT lowers the project slice", async () => {
-      await seedProject("p1", "2026-06-01");
-      await seedProject("p2", "2026-06-02");
-      await seedProject("p3", "2026-06-03");
-      process.env.QMEMD_SESSION_PROJECT_LIMIT = "1";
-      const out = await recallSession(root, { project: "demo" });
-      expect(out).toContain("Project fact p3"); // newest survives
-      expect(out).not.toContain("Project fact p2");
-      expect(out).not.toContain("Project fact p1");
-      expect(out).toContain("(1 shown, 2 more)");
-    });
-
-    test("QMEMD_SESSION_PROJECT_LIMIT raises the project slice above the default 5", async () => {
-      for (let i = 1; i <= 7; i++) await seedProject(`p${i}`, `2026-06-0${i}`);
-      process.env.QMEMD_SESSION_PROJECT_LIMIT = "7";
-      const out = await recallSession(root, { project: "demo" });
-      for (let i = 1; i <= 7; i++) expect(out).toContain(`Project fact p${i}`);
-      expect(out).not.toContain("more)"); // no gap footer — nothing dropped
-    });
-
-    test("invalid QMEMD_SESSION_BUDGET falls back to the 2000 default (hook path must never break)", async () => {
-      await seedUser("big", "X".repeat(5000));
-      process.env.QMEMD_SESSION_BUDGET = "abc";
-      const out = await recallSession(root, { project: "global" });
-      // falls back to 2000 — neither NaN/0 (empty output) nor unbounded (5000+ bytes)
-      expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(2000);
-      expect(Buffer.byteLength(out, "utf-8")).toBeGreaterThan(300);
-    });
-
-    test("invalid QMEMD_SESSION_PROJECT_LIMIT falls back to the pinned-only default", async () => {
-      await seedProject("p1", "2026-06-01");
-      process.env.QMEMD_SESSION_PROJECT_LIMIT = "-3";
-      const out = await recallSession(root, { project: "demo" });
-      // Falls back to 0, not to a garbage limit: no project line, but the footer still
-      // announces the fact so the omission is never silent.
-      expect(out).not.toContain("Project fact p1");
-      expect(out).toContain("(0 shown, 1 more)");
-    });
-
-    test("QMEMD_SESSION_PROJECT_LIMIT restores the sliced lanes on top of the pinned-only default", async () => {
-      await seedProject("p1", "2026-06-01");
-      process.env.QMEMD_SESSION_PROJECT_LIMIT = "5";
-      const out = await recallSession(root, { project: "demo" });
-      expect(out).toContain("Project fact p1");
-    });
-  });
-
-  test("a recent non-pinned reference (global or current project) appears (bgf)", async () => {
-    await mkdir(join(root, "reference"), { recursive: true });
-    await writeFile(join(root, "reference", "useful-url.md"), serializeMemory(
-      { name: "useful-url", description: "Grafana dashboard URL", type: "reference", tags: [], project: "global", created: "2026-06-01", pinned: false },
-      "https://grafana.example/d/abc"));
-    const out = await recallSession(root, { project: "global", projectLimit: 5 });
-    expect(out).toContain("Grafana dashboard URL");
-    expect(out).toContain("reference:global");
-  });
-
-  test("a reference scoped to a different project does not appear (bgf)", async () => {
-    await mkdir(join(root, "reference"), { recursive: true });
-    await writeFile(join(root, "reference", "other-proj-ref.md"), serializeMemory(
-      { name: "other-proj-ref", description: "Other project ref", type: "reference", tags: [], project: "other-proj", created: "2026-06-01", pinned: false },
-      "body"));
-    // The only fact is a non-matching reference → nothing surfaces (empty snapshot).
-    expect(await recallSession(root, { project: "global" })).toBe("");
-  });
-
-  test("a pinned reference appears once (pinned block), not duplicated in references (bgf)", async () => {
-    await mkdir(join(root, "reference"), { recursive: true });
-    await writeFile(join(root, "reference", "pinned-ref.md"), serializeMemory(
-      { name: "pinned-ref", description: "Pinned reference fact", type: "reference", tags: [], project: "global", created: "2026-06-01", pinned: true },
-      "body"));
-    const out = await recallSession(root, { project: "global" });
-    expect(out.split("Pinned reference fact").length - 1).toBe(1); // exactly one occurrence
-    expect(out).toContain("pinned:reference");
-  });
-
-  // 57d: pin and project are different axes — project = scope (where the fact surfaces),
-  // pin = priority (never falls out of the recency slice WITHIN that scope). A pinned fact
-  // scoped to another project must not inject into this project's snapshot; that cross-repo
-  // bleed is exactly the 3gv incident (an beta JDK fact priming unrelated repos).
-  test("a pinned fact scoped to ANOTHER project is hidden — pin does not widen scope (57d)", async () => {
-    await mkdir(join(root, "project"), { recursive: true });
-    await writeFile(join(root, "project", "jdk.md"), serializeMemory(
-      { name: "jdk", description: "beta needs JDK 21", type: "project", tags: [], project: "beta", created: "2026-06-01", pinned: true },
-      "body"));
-    // The only fact is a pinned fact for a different project → nothing surfaces.
-    expect(await recallSession(root, { project: "qmemd" })).toBe("");
-  });
-
-  test("a pinned fact for the CURRENT project still appears (57d)", async () => {
-    await mkdir(join(root, "project"), { recursive: true });
-    await writeFile(join(root, "project", "jdk.md"), serializeMemory(
-      { name: "jdk", description: "beta needs JDK 21", type: "project", tags: [], project: "beta", created: "2026-06-01", pinned: true },
-      "body"));
-    const out = await recallSession(root, { project: "beta" });
-    expect(out).toContain("beta needs JDK 21");
-    expect(out).toContain("pinned:project");
-  });
-
-  test("a project:global pinned fact appears in every project's snapshot (57d)", async () => {
-    await mkdir(join(root, "project"), { recursive: true });
-    await writeFile(join(root, "project", "everywhere.md"), serializeMemory(
-      { name: "everywhere", description: "Global pinned guidance", type: "project", tags: [], project: "global", created: "2026-06-01", pinned: true },
-      "body"));
-    const out = await recallSession(root, { project: "qmemd" });
-    expect(out).toContain("Global pinned guidance");
-    expect(out).toContain("pinned:project");
-  });
-
-  test("a pinned in-scope fact still bypasses the projectLimit recency slice (57d)", async () => {
-    await mkdir(join(root, "project"), { recursive: true });
-    // Two newer non-pinned facts fill a projectLimit:2 slice; the OLD pinned fact must
-    // still surface (via the pinned block) — pin exempts it from recency, within scope.
-    await writeFile(join(root, "project", "new-a.md"), serializeMemory(
-      { name: "new-a", description: "Newer fact A", type: "project", tags: [], project: "qmemd", created: "2026-06-05", pinned: false }, "a"));
-    await writeFile(join(root, "project", "new-b.md"), serializeMemory(
-      { name: "new-b", description: "Newer fact B", type: "project", tags: [], project: "qmemd", created: "2026-06-04", pinned: false }, "b"));
-    await writeFile(join(root, "project", "old-pin.md"), serializeMemory(
-      { name: "old-pin", description: "Old pinned anchor", type: "project", tags: [], project: "qmemd", created: "2026-01-01", pinned: true }, "c"));
-    const out = await recallSession(root, { project: "qmemd", projectLimit: 2 });
-    expect(out).toContain("Newer fact A");
-    expect(out).toContain("Newer fact B");
-    expect(out).toContain("Old pinned anchor");
-  });
-
-  test("the references block respects projectLimit (default 5) (bgf)", async () => {
-    await mkdir(join(root, "reference"), { recursive: true });
-    for (let i = 0; i < 7; i++) {
-      await writeFile(join(root, "reference", `ref-${i}.md`), serializeMemory(
-        { name: `ref-${i}`, description: `Reference number ${i}`, type: "reference", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false },
-        "body"));
-    }
-    const out = await recallSession(root, { project: "global" });
-    expect(out.split("\n").filter(l => l.includes("reference:global")).length).toBeLessThanOrEqual(5);
-  });
-
-  // qmemd-e3i — surface the silent slice-drop: projects/references beyond projectLimit
-  // were dropped with ZERO signal (postmortem R1). Footer must announce the gap.
-  const writeProject = async (root: string, i: number, created: string, tags: string[]) => {
-    await mkdir(join(root, "project"), { recursive: true });
-    await writeFile(join(root, "project", `p-${i}.md`), serializeMemory(
-      { name: `p-${i}`, description: `Project fact ${i}`, type: "project", tags, project: "alpha", created, pinned: false },
-      "body"));
-  };
-
-  test("surfaces unshown project count when in-scope facts exceed projectLimit (e3i)", async () => {
-    for (let i = 0; i < 14; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, []);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
-    expect(out).toContain("14 project facts in scope for alpha = 14 repo + 0 global (5 shown, 9 more)");
-    expect(out).toContain("qmemd list --type project --project alpha");
-  });
-
-  // qp-62p — the footer counts the SCOPE (current project + global, `inProject`), so a
-  // global-heavy corpus made the repo look like it owned hundreds of facts. Split the count.
-  test("footer splits the in-scope count into repo vs global lanes (qp-62p)", async () => {
-    await mkdir(join(root, "project"), { recursive: true });
-    const write = async (name: string, project: string, created: string) =>
-      writeFile(join(root, "project", `${name}.md`), serializeMemory(
-        { name, description: `Fact ${name}`, type: "project", tags: [], project, created, pinned: false }, "body"));
-    for (let i = 0; i < 4; i++) await write(`own-${i}`, "alpha", `2026-06-2${i}`);
-    for (let i = 0; i < 10; i++) await write(`glob-${i}`, "global", `2026-06-0${i}`);
-    await write("foreign-0", "beta", "2026-06-28"); // out of scope: neither counted nor shown
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
-    expect(out).toContain("14 project facts in scope for alpha = 4 repo + 10 global (5 shown, 9 more)");
-    expect(out).not.toContain("foreign-0");
-  });
-
-  // The repo lane is empty by definition when the current project IS global — the split
-  // would read "0 repo + N global", so it is omitted there.
-  test("footer omits the repo/global split when the current project is global (qp-62p)", async () => {
-    await mkdir(join(root, "project"), { recursive: true });
-    for (let i = 0; i < 8; i++) {
-      await writeFile(join(root, "project", `g-${i}.md`), serializeMemory(
-        { name: `g-${i}`, description: `Global fact ${i}`, type: "project", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false }, "body"));
-    }
-    const out = await recallSession(root, { project: "global", budgetBytes: 4000, projectLimit: 5 });
-    expect(out).toContain("8 project facts in scope for global (5 shown, 3 more)");
-    expect(out).not.toContain("repo +");
-  });
-
-  // Pinned-only default: the recency-sliced lanes are OFF (projectLimit 0), so pinning is
-  // the only route a project/reference fact takes to session start. The footer must still
-  // announce everything it withheld — silence is the failure the e3i footer exists to stop.
-  test("the default snapshot emits user, feedback and pinned lanes only", async () => {
-    await mkdir(join(root, "project"), { recursive: true });
-    await mkdir(join(root, "user"), { recursive: true });
-    await writeFile(join(root, "user", "pref.md"), serializeMemory(
-      { name: "pref", description: "A standing preference", type: "user", tags: [], project: "global", created: "2026-06-01", pinned: false }, "prefer tabs"));
-    await writeFile(join(root, "project", "pinned-fact.md"), serializeMemory(
-      { name: "pinned-fact", description: "Pinned project fact", type: "project", tags: [], project: "alpha", created: "2026-06-01", pinned: true }, "body"));
-    for (let i = 0; i < 6; i++) await writeProject(root, i, `2026-06-1${i}`, ["jdk"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
-    expect(out).toContain("prefer tabs");                 // user lane untouched
-    expect(out).toContain("[pinned:project] Pinned project fact"); // pinned lane untouched
-    expect(out).not.toContain("[project:alpha]");         // sliced lane off
-    expect(out).not.toContain("Project fact 0");
-  });
-
-  // covers: SC-77
-  test("the footer accounts for every withheld fact under the pinned-only default", async () => {
-    await mkdir(join(root, "project"), { recursive: true });
-    for (let i = 0; i < 4; i++) await writeProject(root, i, `2026-06-1${i}`, ["jdk"]);
-    await writeFile(join(root, "project", "g-0.md"), serializeMemory(
-      { name: "g-0", description: "Global fact", type: "project", tags: ["infra"], project: "global", created: "2026-06-01", pinned: false }, "body"));
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
-    expect(out).toContain("5 project facts in scope for alpha = 4 repo + 1 global (0 shown, 5 more)");
-    expect(out).not.toContain("Unshown tags:");
-  });
-
-  test("a corpus of only unpinned project facts still emits its footer, never ''", async () => {
-    // The empty-snapshot guard counts the IN-SCOPE lists, not the (now always empty) slices;
-    // counting slices would return "" and hide the whole corpus.
-    for (let i = 0; i < 3; i++) await writeProject(root, i, `2026-06-0${i + 1}`, []);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000 });
-    expect(out).not.toBe("");
-    expect(out).toContain("3 project facts in scope for alpha = 3 repo + 0 global (0 shown, 3 more)");
-  });
-
-  // covers: SC-77
-  test("no unshown footer when in-scope facts fit within projectLimit (e3i)", async () => {
-    for (let i = 0; i < 3; i++) await writeProject(root, i, `2026-06-0${i + 1}`, []);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 4000, projectLimit: 5 });
-    expect(out).not.toContain("shown,");
-  });
-
-  // covers: SC-77
-  test("unshown footer is dropped (not overflowed) when the budget has no room (e3i)", async () => {
-    for (let i = 0; i < 14; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, ["jdk"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 100, projectLimit: 5 });
-    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(100);
-    expect(out).not.toContain("more)");
-  });
-
-  test("footer 'shown' count reflects facts actually emitted, not the slice length, under budget pressure (e3i)", async () => {
-    // 8 in-scope facts with long descriptions; a mid-range budget admits the footer
-    // but budget-drops some of the 5 sliced facts. 'shown' must equal the lines that
-    // actually appear, and shown + more must equal the true in-scope total (8).
-    const longDesc = "D".repeat(220);
-    for (let i = 0; i < 8; i++) {
-      await mkdir(join(root, "project"), { recursive: true });
-      await writeFile(join(root, "project", `p-${i}.md`), serializeMemory(
-        { name: `p-${i}`, description: longDesc, type: "project", tags: [], project: "alpha", created: `2026-06-0${i + 1}`, pinned: false },
-        "body"));
-    }
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 1100, projectLimit: 5 });
-    const m = out.match(/\((\d+) shown, (\d+) more\)/);
-    expect(m).not.toBeNull();
-    const shown = Number(m![1]), more = Number(m![2]);
-    const projLines = out.split("\n").filter(l => l.startsWith("[project:alpha]")).length;
-    expect(shown).toBe(projLines);     // 'shown' == lines actually emitted
-    expect(shown + more).toBe(8);      // accounts for every in-scope fact
-  });
-
-  test("unshown count is surfaced for references too (e3i)", async () => {
-    await mkdir(join(root, "reference"), { recursive: true });
-    for (let i = 0; i < 8; i++) {
-      await writeFile(join(root, "reference", `r-${i}.md`), serializeMemory(
-        { name: `r-${i}`, description: `Ref ${i}`, type: "reference", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false },
-        "body"));
-    }
-    const out = await recallSession(root, { project: "global", budgetBytes: 4000, projectLimit: 5 });
-    expect(out).toContain("8 reference facts in scope for global (5 shown, 3 more)");
-    expect(out).toContain("qmemd list --type reference --project global");
-  });
-
-  test("coverage footer still ships when always-on feedback bodies fill the budget (mqt)", async () => {
-    // Always-on feedback bodies large enough to exceed the 2000-byte cap on their own —
-    // emitted FIRST with full bodies, they starve the e3i gap signal that emits last.
-    await mkdir(join(root, "feedback"), { recursive: true });
-    for (let i = 0; i < 8; i++) {
-      const body = `Feedback fact ${i}. ` + "x".repeat(250);
-      await writeFile(join(root, "feedback", `fb-${i}.md`), serializeMemory(
-        { name: `fb-${i}`, description: body, type: "feedback", tags: [], project: "global", created: `2026-06-0${i + 1}`, pinned: false },
-        body));
-    }
-    // ...plus a project corpus over projectLimit, so a slice-gap exists and the footer must fire.
-    for (let i = 0; i < 14; i++) await writeProject(root, i, `2026-06-${String(i + 1).padStart(2, "0")}`, ["win"]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 2000 });
-    // The gap signal must survive the feedback flood (postmortem R1 / qmemd-mqt) and never
-    // push past the hard cap.
-    expect(out).toContain("qmemd list --type project --project alpha");
-    expect(out).toMatch(/\(\d+ shown, \d+ more\)/);
+  test("a pin-only store with an oversized summary announces its omission and recovery", async () => {
+    await put("reference", "large-pin", "Full reference body.", { pinned: true, description: "界".repeat(1000) });
+    const out = await recallSession(root);
+    expect(out).not.toContain("界");
+    expect(out).not.toContain("Full reference body.");
+    expect(out).toContain("partial");
+    expect(out).toContain("qmemd list");
+    expect(counts(out, "pinned:reference", "summaries")).toEqual({ shown: 0, omitted: 1, eligible: 1 });
     expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(2000);
   });
 
-  // covers: SC-77
-  test("removing the histogram reservation admits one more pinned fact at the deciding budget margin", async () => {
-    // 20 project facts, each carrying a distinct tag, so the removed histogram reserve would
-    // have capped out at its full 120-byte max (that vocabulary's line ran ~430 bytes, always
-    // over the cap) — freeing those 120 bytes lets one more 87-byte pinned one-liner fit.
-    // Verified against the pre-removal code at this exact budget: 8 pinned facts rendered with
-    // the reservation in place, 9 without it — this assertion fails if it comes back.
-    await mkdir(join(root, "project"), { recursive: true });
-    for (let i = 0; i < 30; i++) {
-      const name = `pin-${String(i).padStart(3, "0")}`;
-      await writeFile(join(root, "project", `${name}.md`), serializeMemory(
-        { name, description: "D".repeat(60), type: "project", tags: [], project: "alpha", created: `2026-06-${String(i + 1).padStart(2, "0")}`, pinned: true },
-        "body"));
+  test("accounts for all six lanes under simultaneous byte and slice omissions", async () => {
+    for (const type of ["user", "feedback"] as const) {
+      await put(type, "a-large", "L".repeat(4000));
+      await put(type, "z-short", `Short ${type} rule.`);
     }
-    for (let i = 0; i < 20; i++) await writeProject(root, i, `2026-05-${String(i + 1).padStart(2, "0")}`, [`distincttaglong${String(i).padStart(2, "0")}`]);
-    const out = await recallSession(root, { project: "alpha", budgetBytes: 1000, projectLimit: 5 });
-    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(1000);
-    expect(out.split("\n").filter(l => l.startsWith("[pinned:project]")).length).toBe(9);
-    expect(out).toMatch(/\d+ project facts in scope for alpha = \d+ repo \+ \d+ global \(\d+ shown, \d+ more\)/);
-    expect(out).not.toContain("Unshown tags:");
+    for (const type of ["project", "reference"] as const) {
+      await put(type, "a-large-pin", "body", { pinned: true, description: "L".repeat(4000) });
+      await put(type, "z-short-pin", "body", { pinned: true });
+      await put(type, "recent", "body", { created: "2026-07-01" });
+      await put(type, "older", "body");
+    }
+    const out = await recallSession(root, { projectLimit: 1, budgetBytes: 2000 });
+    for (const type of ["user", "feedback"] as const) {
+      expect(counts(out, type, "bodies")).toEqual({ shown: 1, omitted: 1, eligible: 2 });
+    }
+    for (const type of ["project", "reference"] as const) {
+      expect(counts(out, `pinned:${type}`, "summaries")).toEqual({ shown: 1, omitted: 1, eligible: 2 });
+      expect(counts(out, `unpinned:${type}`, "summaries")).toEqual({ shown: 1, omitted: 1, eligible: 2 });
+    }
+    expect(out).not.toContain("Description older");
+    expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(2000);
+  });
+
+  test("whole UTF-8 body blocks survive an exact boundary and disappear rather than fragment below it", async () => {
+    const body = "If the flag is enabled, use 日本語 🧭.\nOtherwise preserve the existing setting.";
+    await put("feedback", "unicode", body);
+    const full = await recallSession(root, { budgetBytes: 4000 });
+    const bytes = Buffer.byteLength(full, "utf-8");
+    const exact = await recallSession(root, { budgetBytes: bytes });
+    expect(exact).toContain(body.replace(/\n/g, "\n  "));
+    const short = await recallSession(root, { budgetBytes: bytes - 1 });
+    expect(short).not.toContain("If the flag");
+    expect(short).not.toContain("Otherwise preserve");
+    expect(short).not.toContain("\uFFFD");
+    expect(counts(short, "feedback", "bodies")).toEqual({ shown: 0, omitted: 1, eligible: 1 });
+    expect(Buffer.byteLength(short, "utf-8")).toBeLessThan(bytes);
+  });
+
+  test("tiny budgets emit only a recoverable partial marker or nothing", async () => {
+    await put("user", "rule", "Never run destructive commands without confirmation.");
+    const marker = await recallSession(root, { budgetBytes: 100 });
+    expect(marker).toContain("partial");
+    expect(marker).toContain("0 bodies/summaries");
+    expect(marker).toContain("qmemd list");
+    expect(marker).not.toContain("## Memory");
+    const minimum = Buffer.byteLength(marker, "utf-8");
+    expect(await recallSession(root, { budgetBytes: minimum })).toBe(marker);
+    expect(await recallSession(root, { budgetBytes: minimum - 1 })).toBe("");
+    expect(await recallSession(root, { budgetBytes: 0 })).toBe("");
+  });
+
+  test("long Unicode scope and descriptions never defeat accounting or the byte cap", async () => {
+    const project = "日本語' workspace ".repeat(100);
+    await put("project", "oversized", "body", { project, pinned: true, description: "🧭".repeat(1000) });
+    await put("feedback", "short", "Keep this complete correction.");
+    for (const budgetBytes of [100, 500, 2000]) {
+      const out = await recallSession(root, { project, budgetBytes });
+      expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(budgetBytes);
+      expect(out).not.toContain("🧭");
+      expect(out).toContain("partial");
+      expect(out).toContain("qmemd list");
+    }
+    const out = await recallSession(root, { project });
+    expect(out).toContain("Keep this complete correction.");
+    expect(counts(out, "pinned:project", "summaries").omitted).toBe(1);
+  });
+
+  test("summary recovery uses physical filename identity rather than edited frontmatter name", async () => {
+    await put("reference", "physical-slug", "Retrieve this full reference.", { name: "misleading-name", pinned: true });
+    const out = await recallSession(root);
+    const slug = out.match(/\[pinned:reference\].*\(([^)]+)\)/)?.[1];
+    expect(slug).toBe("physical-slug");
+    expect(out).not.toContain("misleading-name");
+    expect(out).toContain("qmemd show <slug>");
+    expect(getFact(root, slug!)?.body.trimEnd()).toBe("Retrieve this full reference.");
+    expect(getFact(root, "misleading-name")).toBeNull();
+  });
+
+  test("pinning changes priority, never project scope; user and feedback remain globally scoped", async () => {
+    await put("user", "foreign-user", "Foreign-project user preference.", { project: "other" });
+    await put("feedback", "foreign-feedback", "Foreign-project feedback.", { project: "other" });
+    for (const type of ["project", "reference"] as const) {
+      await put(type, "foreign", "body", { project: "other", pinned: true });
+      await put(type, "own", "body", { project: "demo", pinned: true });
+      await put(type, "global", "body", { pinned: true });
+      await put(type, "unpinned", "body", { project: "demo" });
+    }
+    const out = await recallSession(root, { project: "demo" });
+    expect(out).toContain("Foreign-project user preference.");
+    expect(out).toContain("Foreign-project feedback.");
+    expect(out).not.toContain("(foreign)");
+    expect(out).not.toContain("(unpinned)");
+    for (const type of ["project", "reference"] as const) {
+      expect(counts(out, `pinned:${type}`, "summaries")).toEqual({ shown: 2, omitted: 0, eligible: 2 });
+      expect(counts(out, `unpinned:${type}`, "summaries")).toEqual({ shown: 0, omitted: 1, eligible: 1 });
+      expect(out).toContain(`3 ${type} facts in scope for demo = 2 repo + 1 global`);
+    }
+  });
+
+  test("retirement and platform/scope exclusions do not inflate eligible omission counts", async () => {
+    await put("project", "retired", "body", { pinned: true, supersededBy: "live" });
+    await put("project", "off-platform", "body", { pinned: true, platforms: ["macos"] });
+    await put("project", "foreign", "body", { pinned: true, project: "other" });
+    await put("project", "live", "body", { pinned: true, platforms: ["linux"] });
+    const out = await recallSession(root, { platform: "linux", project: "demo" });
+    expect(counts(out, "pinned:project", "summaries")).toEqual({ shown: 1, omitted: 0, eligible: 1 });
+    expect(out).not.toContain("Description retired");
+    expect(out).not.toContain("Description off-platform");
+    expect(out).not.toContain("Description foreign");
+  });
+
+  test("unreadable and platform-hidden signals survive oversized body pressure", async () => {
+    await put("user", "large", "X".repeat(3000));
+    await put("feedback", "off-platform", "Hidden feedback.", { platforms: ["macos"] });
+    await mkdir(join(root, "project", "unreadable.md"), { recursive: true });
+    const out = await recallSession(root, { platform: "linux" });
+    expect(out).toMatch(/1 .*user\/feedback.*hidden on linux/);
+    expect(out).toMatch(/1 facts unreadable/);
+    expect(out).toContain("qmemd doctor");
+    expect(counts(out, "user", "bodies")).toEqual({ shown: 0, omitted: 1, eligible: 1 });
+  });
+
+  describe("environment overrides", () => {
+    beforeEach(() => {
+      vi.stubEnv("QMEMD_SESSION_BUDGET", "");
+      vi.stubEnv("QMEMD_SESSION_PROJECT_LIMIT", "");
+    });
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    test("budget override caps whole-block delivery and explicit options take precedence", async () => {
+      await put("user", "body", "X".repeat(500));
+      vi.stubEnv("QMEMD_SESSION_BUDGET", "300");
+      const capped = await recallSession(root);
+      expect(Buffer.byteLength(capped, "utf-8")).toBeLessThanOrEqual(300);
+      expect(counts(capped, "user", "bodies").omitted).toBe(1);
+      const explicit = await recallSession(root, { budgetBytes: 2000 });
+      expect(explicit).toContain("X".repeat(500));
+    });
+
+    test("invalid budget falls back to 2000 bytes without truncating oversized facts", async () => {
+      await put("user", "a-large", "X".repeat(5000));
+      await put("user", "z-fitting", "Y".repeat(500));
+      vi.stubEnv("QMEMD_SESSION_BUDGET", "abc");
+      const out = await recallSession(root);
+      expect(out).not.toContain("XXX");
+      expect(out).toContain("Y".repeat(500));
+      expect(Buffer.byteLength(out, "utf-8")).toBeLessThanOrEqual(2000);
+      expect(counts(out, "user", "bodies")).toEqual({ shown: 1, omitted: 1, eligible: 2 });
+    });
+
+    test("configurable slices select newest facts while explicit zero and invalid env retain pinned-only behavior", async () => {
+      for (const type of ["project", "reference"] as const) {
+        await put(type, "older", "body");
+        await put(type, "newer", "body", { created: "2026-07-01" });
+      }
+      vi.stubEnv("QMEMD_SESSION_PROJECT_LIMIT", "1");
+      const out = await recallSession(root);
+      expect(out).toContain("Description newer");
+      expect(out).not.toContain("Description older");
+      for (const type of ["project", "reference"] as const) {
+        expect(counts(out, `unpinned:${type}`, "summaries")).toEqual({ shown: 1, omitted: 1, eligible: 2 });
+      }
+      expect(await recallSession(root, { projectLimit: 0 })).not.toContain("Description newer");
+      vi.stubEnv("QMEMD_SESSION_PROJECT_LIMIT", "-3");
+      const invalid = await recallSession(root);
+      expect(invalid).not.toContain("Description newer");
+      expect(counts(invalid, "unpinned:project", "summaries")).toEqual({ shown: 0, omitted: 2, eligible: 2 });
+    });
   });
 });
 
@@ -3339,17 +3154,14 @@ describe("recallSession platform gate (core fix)", () => {
     expect(out).toContain("mac-only");
   });
 
-  test("the project footer count reflects the platform-filtered in-scope set", async () => {
-    // 6 project facts in scope, but 2 are macos-only → on linux only 4 are in scope,
-    // under the projectLimit of 5, so NO "N more" footer fires.
+  test("eligible project counts exclude off-platform facts before applying the slice", async () => {
     for (let i = 0; i < 4; i++) await put("project", `p${i}`, { created: `2026-06-0${i + 1}` });
     await put("project", "m0", { platforms: ["macos"], created: "2026-06-07" });
     await put("project", "m1", { platforms: ["macos"], created: "2026-06-08" });
     const onLinux = await recallSession(root, { project: "global", platform: "linux", projectLimit: 5 });
-    expect(onLinux).not.toContain("more) — qmemd list"); // 4 in scope ≤ 5 → no footer
-    // On mac all 6 are in scope (> 5) → the footer fires and counts 6.
+    expect(onLinux).toMatch(/unpinned:project summaries: 4 shown, 0 omitted \/ 4 eligible/);
     const onMac = await recallSession(root, { project: "global", platform: "macos", projectLimit: 5 });
-    expect(onMac).toContain("6 project facts in scope for global");
+    expect(onMac).toMatch(/unpinned:project summaries: 5 shown, 1 omitted \/ 6 eligible/);
   });
 
   test("hidden user/feedback facts emit a platform-hidden signal, not silence (qmemd-b1a)", async () => {

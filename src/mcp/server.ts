@@ -298,8 +298,7 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
         // git unavailable ⇒ the daemon is serving a possibly-stale snapshot with sync off; log it
         // to the daemon log (stderr) rather than polluting the snapshot the model reads (qmemd-bwr).
         if (w) console.error(`[qmemd] ${w}`);
-        const snap = await recallSession(root, { project: project ?? opts.sessionDefaultProject ?? basename(process.cwd()) });
-        const snapshot = snap || "(no memories)";
+        const snapshot = await recallSession(root, { project: project ?? opts.sessionDefaultProject ?? basename(process.cwd()) });
         // outputSchema (os1) obliges structuredContent on every non-error result;
         // mirror REST /recall's session shape — a text snapshot, no fs path.
         return { content: [{ type: "text", text: snapshot }], structuredContent: { snapshot } };

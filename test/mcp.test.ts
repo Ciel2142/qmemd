@@ -112,6 +112,22 @@ describe("MCP server tools (in-process)", () => {
     expect((res.content as { text: string }[])[0].text).toContain("Always answer tersely");
   });
 
+  test("a tiny session budget stays empty without claiming stored facts are absent", async () => {
+    const body = "Always ask before deploying.";
+    await client.callTool({ name: "remember", arguments: { fact: body, type: "user", as: "deployment-approval" } });
+    const previous = process.env.QMEMD_SESSION_BUDGET;
+    try {
+      process.env.QMEMD_SESSION_BUDGET = "1";
+      const result = await client.callTool({ name: "recall", arguments: { session: true } });
+      expect(result.structuredContent).toMatchObject({ snapshot: "" });
+      const fact = await client.callTool({ name: "get", arguments: { slug: "deployment-approval" } });
+      expect(fact.structuredContent).toMatchObject({ body });
+    } finally {
+      if (previous === undefined) delete process.env.QMEMD_SESSION_BUDGET;
+      else process.env.QMEMD_SESSION_BUDGET = previous;
+    }
+  });
+
   // qmemd-os1: the recall tool must DECLARE its output contract so the SDK validates
   // structuredContent (it skips validation entirely when outputSchema is absent) and
   // clients can see the degraded/completeness fields are part of the API.

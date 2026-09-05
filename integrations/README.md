@@ -1,7 +1,7 @@
-# qmemd integrations (Codex, Cursor & Windsurf)
+# qmemd integrations (Codex & Windsurf)
 
-qmemd's Claude Code packaging is a native plugin (see the repo README). **Cursor and
-Codex now have native plugins too** (next section) — the recommended path. Windsurf, and
+qmemd's Claude Code packaging is a native plugin (see the repo README). **Codex also
+has a native plugin** (next section) — the recommended path. Windsurf, and
 anyone who prefers manual wiring, can copy-paste the pieces by hand: an **MCP server** for
 the `remember`/`recall`/`forget` tools, plus an **always-on rule** so the agent recalls
 proactively.
@@ -10,24 +10,14 @@ Install the CLI first so the MCP server resolves: `npm i -g @ciel2142/qmemd`
 (the command is `qmemd`). A first-ever `npx` MCP cold-start can exceed the client's
 initialize timeout, so a global install is the reliable path for the MCP server.
 
-## Install as a native plugin (Cursor & Codex)
+## Install as a native plugin (Codex)
 
-Cursor and Codex now have plugin formats that bundle the MCP server, the skill, and the
-snapshot + beacon hooks into a single install — the same shape as qmemd's Claude Code
-plugin. The plugin dirs sit alongside the manual snippets and each carry a copy of the
-root skill (`skills/qmemd-memory/`), kept byte-identical by a conformance test (plugin
-packaging can't ship symlinks reliably). The CLI prereq above still applies. Validated
-against each vendor's published plugin spec (2026-06) — install locally and test before
-publishing to any marketplace.
-
-**Cursor** — manifest `cursor/.cursor-plugin/plugin.json` (rule + skill + MCP +
-`sessionStart`/`preToolUse` hooks):
-
-- **Local:** copy the `cursor/` dir to `~/.cursor/plugins/local/qmemd/` — available
-  immediately, no marketplace.
-- **Marketplace:** submit the repo for review at `cursor.com/marketplace/publish`. Cursor
-  has no self-host "add owner/repo" marketplace yet; Enterprise team marketplaces can import
-  the GitHub repo directly.
+The Codex plugin bundles the MCP server, the skill, and snapshot + beacon hooks into a
+single install. Its directory sits alongside the manual snippets and carries a copy of
+the root skill (`skills/qmemd-memory/`), kept byte-identical by a conformance test
+(plugin packaging can't ship symlinks reliably). The CLI prereq above still applies.
+Validated against Codex's published plugin spec (2026-06) — install locally and test
+before publishing to a marketplace.
 
 **Codex** — manifest `codex/.codex-plugin/plugin.json` (skill + MCP + hooks at
 `codex/hooks/hooks.json`). Enable the hooks engine first (`codex_hooks = true`, see
@@ -52,23 +42,22 @@ and a logo; fill those into `plugin.json` before submitting.
 3. **Skill (optional)** — copy `../skills/qmemd-memory/` to
    `~/.agents/skills/qmemd-memory/` (or repo `.agents/skills/qmemd-memory/`).
 
-## Cursor
+## Cursor support removed
 
-1. **MCP** — paste `cursor/mcp.json.example`'s `mcpServers` into `.cursor/mcp.json`
-   (project) or `~/.cursor/mcp.json` (global).
-2. **Rule** — copy `cursor/qmemd.mdc` into `.cursor/rules/`. It is `alwaysApply: true`,
-   so it is injected at the start of every chat.
-3. **Skill (optional)** — copy `../skills/qmemd-memory/` to `.cursor/skills/`,
-   `.claude/skills/`, or `.agents/skills/` (Cursor reads all three).
+qmemd no longer ships or maintains a Cursor integration. Deleting these repository
+assets does not uninstall existing local copies: remove any previously installed
+qmemd-specific Cursor plugin or copied qmemd hook, rule, and skill configuration from
+your editor setup yourself. Do not remove shared Claude configuration. The generic MCP
+API remains available to arbitrary clients; this is not maintained Cursor support.
 
 ## Windsurf
 
-1. **MCP** — Windsurf reads the same `mcpServers` shape as Cursor: paste
-   `cursor/mcp.json.example`'s `mcpServers` into `~/.codeium/windsurf/mcp_config.json`.
+1. **MCP** — paste [`windsurf/mcp.json.example`](windsurf/mcp.json.example)'s
+   `mcpServers` into `~/.codeium/windsurf/mcp_config.json`.
 2. **Rule** — copy `windsurf/qmemd.md` into `.windsurf/rules/` (project) or add it as a
    global rule. It is `trigger: always_on`, so it is injected into every conversation.
 
-> All three rule files are **adapted** from `../claude/qmemd.md`, not verbatim copies: each is
+> Both rule files are **adapted** from `../claude/qmemd.md`, not verbatim copies: each is
 > pull-only by default and points at its platform's optional hooks (below). If
 > `../claude/qmemd.md` changes, re-apply the edits by hand — don't blind-copy over them.
 
@@ -86,7 +75,6 @@ command and its error. Which of the three you actually get depends on where you 
 | Claude Code plugin | snapshot + beacon + probe |
 | `scripts/install-claude-integration.sh`, `scripts/install-windows.ps1` | snapshot + beacon |
 | Codex CLI (`codex/hooks/hooks.json`) | snapshot + beacon |
-| Cursor (`cursor/hooks.json`, or reused Claude wiring) | snapshot + beacon |
 | Windsurf (`windsurf/hooks.json.example`) | prompt-time snapshot only |
 
 Every row but Windsurf's consumes qmemd's `hookSpecificOutput.additionalContext` JSON
@@ -108,18 +96,6 @@ Codex has no `PostToolUseFailure` event: its `PostToolUse` also runs on a non-ze
 but the outcome lives inside an untyped `tool_response` rather than the `error`/`is_interrupt`
 fields the probe reads, so `codex/hooks/hooks.json` ships no probe entry — a
 `PostToolUse`-shaped adapter is a tracked follow-up, not this wave.
-
-### Cursor — snapshot + beacon parity, no failure probe
-
-- **Reuse your Claude wiring (zero config):** if you already run qmemd's Claude hooks
-  (`.claude/settings.json`), enable Cursor Settings → *third-party skills*. Cursor maps
-  `SessionStart → sessionStart` and `PreToolUse → preToolUse` and parses `hookSpecificOutput`,
-  so the snapshot + beacon fire unchanged.
-- **Or native:** copy `cursor/hooks.json` to `.cursor/hooks.json` (or install the plugin above).
-
-Cursor has a dedicated `postToolUseFailure` event, but its output block accepts no fields —
-the probe's `additionalContext` would be discarded — so `cursor/hooks.json` ships no probe
-entry either.
 
 ### Windsurf — partial (no session-start event)
 

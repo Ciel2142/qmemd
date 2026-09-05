@@ -1,7 +1,7 @@
 import { basename, dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { listFacts, tagHistogram, formatTagHistogram, type ListEntry, type MemoryType } from "./engine.js";
+import { listFacts, injectionEligible, currentPlatform, tagHistogram, formatTagHistogram, type ListEntry, type MemoryType } from "./engine.js";
 import {
   loadOrBuildTokenMap, mapCachePath, commandTokens, isOwnSubjectCommand, matchCommand,
   formatOverlap, formatFactLine, MAP_REBUILD_EVERY_N_CALLS, type FactLine,
@@ -95,13 +95,16 @@ export interface PivotOverview {
   global: { total: number };
 }
 
-const PIVOT_TYPES: readonly MemoryType[] = ["project", "reference"]; // user/feedback are always injected
+const PIVOT_TYPES: readonly MemoryType[] = ["project", "reference"]; // user/feedback use the session snapshot
 
 /** Model-free in-scope overview for the pivot block: project+reference facts for this repo
  *  plus global, split repo vs global. Filesystem only — safe on the Bash hot path. */
 export function pivotOverview(root: string, repo: string): PivotOverview {
   const entries: ListEntry[] = [];
-  for (const type of PIVOT_TYPES) entries.push(...listFacts(root, { type, project: repo }));
+  const platform = currentPlatform();
+  for (const type of PIVOT_TYPES) {
+    entries.push(...listFacts(root, { type, project: repo }).filter(e => injectionEligible(e, repo, platform)));
+  }
   const repoEntries = entries.filter(e => e.project !== "global");
   return {
     project: repo,
@@ -330,7 +333,7 @@ export function runBeacon(stdinText: string, deps: BeaconDeps): string | null {
         // Only a forced build resets the cadence (R-3): loadOrBuildTokenMap reports no rebuild
         // flag, so a fingerprint-driven one costs at most one redundant force within 40 calls.
         if (force) state = { ...state, mapBuiltAtCall: { ...state.mapBuiltAtCall, [repo]: state.callCount } };
-        const hits = matchCommand(tokens, map, new Set(state.surfacedSlugs));
+        const hits = matchCommand(deps.memoryRoot, tokens, map, new Set(state.surfacedSlugs));
         if (hits.length > 0) {
           const slugs = hits.map(h => h.slug);
           blocks.push(formatOverlap(repo, hits, map));

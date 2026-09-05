@@ -72,7 +72,7 @@ interface ReplayStats {
   slugFireCount: Map<string, number>;
 }
 
-function replay(commands: string[], map: TokenMap, dfFraction: number | undefined, minScore: number | undefined, out: (s: string) => void): ReplayStats {
+function replay(root: string, commands: string[], map: TokenMap, dfFraction: number | undefined, minScore: number | undefined, out: (s: string) => void): ReplayStats {
   const stats: ReplayStats = {
     replayed: 0,
     withHit: 0,
@@ -83,7 +83,7 @@ function replay(commands: string[], map: TokenMap, dfFraction: number | undefine
   for (const command of commands) {
     stats.replayed++;
     const tokens = commandTokens(command);
-    const hits = matchCommand(tokens, map, exclude, { dfFraction, minScore });
+    const hits = matchCommand(root, tokens, map, exclude, { dfFraction, minScore });
     if (hits.length === 0) continue;
     stats.withHit++;
     stats.histogram.set(hits.length, (stats.histogram.get(hits.length) ?? 0) + 1);
@@ -126,7 +126,7 @@ function main() {
   const { commands, skippedOwnSubject } = selectCommands(logText, last);
   const effectiveDfFraction = dfFraction ?? OVERLAP_DF_FRACTION;
   const effectiveMinScore = minScore ?? OVERLAP_MIN_SCORE;
-  const stats = replay(commands, map, dfFraction, minScore, (s) => console.log(s));
+  const stats = replay(root, commands, map, dfFraction, minScore, (s) => console.log(s));
   printSummary(stats, skippedOwnSubject, Object.keys(map.facts).length, effectiveDfFraction, effectiveMinScore, project, log);
 }
 

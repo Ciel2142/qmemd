@@ -191,11 +191,29 @@ qmemd hook write-beacon         # Stop hook — write-side capture nudge (unchan
 qmemd hook stats [--since <N>h|<N>d|<N>w] [--json]   # hook trigger/uptake stats from the event log, default 7d (model-free)
 ```
 
+### Session snapshot completeness
+
+`recall --session` emits whole user/feedback bodies and project/reference summaries
+within `QMEMD_SESSION_BUDGET` (default 2,000 UTF-8 bytes). Oversized facts are omitted,
+not cut into instruction fragments; shorter later facts can still fit. Coverage
+counts include omitted pins. Pinning makes a fact eligible in the current project
+plus `global`, not guaranteed to appear. Unpinned project/reference facts remain
+withheld by default; `QMEMD_SESSION_PROJECT_LIMIT=5` restores the recency slices.
+
+Use `qmemd show <slug>` for a summary's full fact and `recall` or `qmemd list` to
+retrieve omitted facts. A compact partial notice, empty snapshot, or missing footer
+is not proof that the store has no relevant memories.
+
 ### Content-derived hooks
 
 Two `PreToolUse`(Bash) blocks and one `PostToolUseFailure`(Bash) probe push memory
 without a `recall` call, each printed as a `💡 qmemd` block around the Bash tool call —
 read any named fact with `qmemd show <slug>`.
+
+Pivot and overlap counts, tags, and guidance include only active facts for the
+current project plus `global` that match the host platform. Cached overlap hits
+are checked against current fact metadata before delivery, so retirement or
+platform changes cannot resurrect ineligible guidance from an old map.
 
 - **Pivot block** — fires once per repo per session, on the first Bash call in that
   repo: `💡 qmemd · <repo> — R repo + G global memories`, then either up to ten
@@ -337,8 +355,14 @@ Conversely, don't run `scripts/install-claude-integration.sh` while the plugin i
 enabled — it re-wires the same hooks and re-introduces the double-fire. Use the
 plugin **or** the bash installer, not both.
 
-For **Codex** and **Cursor**, copy-paste MCP + rule snippets live in
+For **Codex** and **Windsurf**, MCP + rule snippets live in
 [`integrations/`](integrations/README.md).
+
+**Cursor support has been removed.** Existing local installations are not
+automatically uninstalled: remove the qmemd-specific Cursor plugin or copied
+hooks, rules, and skills from your editor configuration. Do not remove shared
+Claude configuration. The generic MCP API remains available, but qmemd no longer
+ships or maintains a Cursor integration.
 
 ## Integrate with Claude Code
 

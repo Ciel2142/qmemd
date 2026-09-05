@@ -1,13 +1,14 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   decideBeacon, pivotOverview, formatPivot, rememberSurfaced, followupOf, commandHash,
   isCaptureCommand, decideWriteBeacon, SURFACED_CAP, PIVOT_LIST_MAX,
   type BeaconState, type PivotOverview,
 } from "../src/beacon.js";
 import { runBeacon, stateFilePath, readState, writeState, pruneOldStates, formatWriteBeacon, runWriteBeacon } from "../src/beacon.js";
-import { buildTokenMap, mapCachePath, type FactLine } from "../src/overlap.js";
+import { buildTokenMap, mapCachePath, corpusFingerprint, type FactLine } from "../src/overlap.js";
 import { eventLogPath, type HookEvent } from "../src/hookstats.js";
-import { serializeMemory, type MemoryFrontmatter, type MemoryType } from "../src/engine.js";
+import { serializeMemory, type MemoryFrontmatter, type MemoryType, type Platform } from "../src/engine.js";
+import * as engine from "../src/engine.js";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { mkdirSync, writeFileSync, readFileSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +26,7 @@ const pov = (over: Partial<PivotOverview> = {}): PivotOverview => ({
   project: "beta", repo: { total: 0, tags: [], facts: [] }, global: { total: 0 }, ...over,
 });
 
-interface FactOpts { project?: string; tags?: string[]; description?: string }
+interface FactOpts { project?: string; tags?: string[]; description?: string; supersededBy?: string; platforms?: Platform[] }
 
 async function writeFact(root: string, type: MemoryType, slug: string, opts: FactOpts = {}): Promise<void> {
   await mkdir(join(root, type), { recursive: true });
@@ -37,6 +38,8 @@ async function writeFact(root: string, type: MemoryType, slug: string, opts: Fac
     project: opts.project ?? "global",
     created: "2026-06-10",
     pinned: false,
+    ...(opts.supersededBy ? { supersededBy: opts.supersededBy } : {}),
+    ...(opts.platforms ? { platforms: opts.platforms } : {}),
   };
   await writeFile(join(root, type, `${slug}.md`), serializeMemory(fm, `body for ${slug}`));
 }
@@ -135,7 +138,33 @@ describe("pivotOverview (w3)", () => {
     await writeFact(root, "project", "other-repo-fact", { project: "gamma" });
     await writeFact(root, "user", "prefers-tabs", { project: "beta" });
   });
-  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+  afterEach(async () => { vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }); });
+
+  test("eligibility controls pivot totals, tags and the ten-fact rendering threshold", async () => {
+    vi.spyOn(engine, "currentPlatform").mockReturnValue("linux");
+    await writeFact(root, "project", "retired", { project: "beta", tags: ["obsolete"], supersededBy: "alpha" });
+    await writeFact(root, "project", "mac-only", { project: "beta", tags: ["darwin"], platforms: ["macos"] });
+    await writeFact(root, "reference", "global-retired", { supersededBy: "kafka-ports" });
+    await writeFact(root, "reference", "global-mac", { platforms: ["macos"] });
+    for (let i = 0; i < 8; i++) {
+      await writeFact(root, "project", `linux-${i}`, { project: "beta", tags: ["linux"], platforms: ["linux"] });
+    }
+    const listed = pivotOverview(root, "beta");
+    expect(listed.repo.total).toBe(10);
+    expect(listed.global.total).toBe(1);
+    expect(listed.repo.facts.map(f => f.slug)).toEqual(["alpha", ...Array.from({ length: 8 }, (_, i) => `linux-${i}`), "zulu"]);
+    expect(listed.repo.tags).toEqual([{ tag: "linux", count: 8 }, { tag: "jdk", count: 2 }, { tag: "build", count: 1 }]);
+    const text = formatPivot(listed);
+    expect(text).toContain("(alpha)");
+    expect(text).toContain("(linux-7)");
+    expect(text).not.toContain("repo:");
+    expect(text).not.toMatch(/retired|mac-only|darwin/);
+    await writeFact(root, "reference", "portable", { project: "beta", tags: ["portable"] });
+    const histogram = formatPivot(pivotOverview(root, "beta"));
+    expect(histogram).toContain("repo: linux(8)");
+    expect(histogram).toContain("portable(1)");
+    expect(histogram).not.toMatch(/obsolete|darwin|\(alpha\)/);
+  });
 
   // covers: SC-46
   // covers: INV-5
@@ -331,7 +360,7 @@ describe("runBeacon orchestration (w3)", () => {
     await writeFact(root, "project", "gradle-daemon", { project: "global", tags: ["gradle", "daemon", "clean"], description: "gradle daemon gotcha" });
     await writeFact(root, "project", "kube-ctl", { project: "global", tags: ["kubectl", "apply", "manifest"], description: "kubectl apply notes" });
   });
-  afterEach(async () => { await rm(root, { recursive: true, force: true }); await rm(cache, { recursive: true, force: true }); });
+  afterEach(async () => { vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }); await rm(cache, { recursive: true, force: true }); });
 
   const deps = () => ({ memoryRoot: root, cacheDir: cache });
 
@@ -340,6 +369,42 @@ describe("runBeacon orchestration (w3)", () => {
   });
 
   const marker = () => readState(stateFilePath(cache, "s1"));
+
+  test("an ineligible-only pivot remains silent and unmarked until an eligible replacement appears", async () => {
+    vi.spyOn(engine, "currentPlatform").mockReturnValue("linux");
+    const bare = join(cache, "ineligible-root");
+    await writeFact(bare, "project", "retired", { project: "beta", tags: ["toolchain", "repair"], supersededBy: "replacement" });
+    await writeFact(bare, "reference", "mac-only", { tags: ["darwin", "repair"], platforms: ["macos"] });
+    await writeFact(bare, "project", "foreign", { project: "gamma", tags: ["toolchain", "repair"] });
+    expect(runBeacon(evt("toolchain darwin repair"), { memoryRoot: bare, cacheDir: cache })).toBeNull();
+    expect(marker()!.beaconedRepos).toEqual([]);
+    expect(marker()!.surfacedSlugs).toEqual([]);
+    await writeFact(bare, "project", "replacement", { project: "beta", tags: ["toolchain", "repair"], platforms: ["linux"] });
+    const out = runBeacon(evt("toolchain repair"), { memoryRoot: bare, cacheDir: cache });
+    expect(out).toContain("1 repo + 0 global");
+    expect(out).toContain("(replacement)");
+    expect(out).not.toMatch(/retired|mac-only|foreign/);
+    expect(marker()!.beaconedRepos).toEqual(["beta"]);
+    expect(marker()!.surfacedSlugs).toEqual(["replacement"]);
+  });
+
+  test("warm overlap never emits or marks facts retired or made off-platform in place", async () => {
+    vi.spyOn(engine, "currentPlatform").mockReturnValue("linux");
+    await writeFact(root, "project", "jdk", { project: "beta", tags: ["toolchain", "repair"], platforms: ["linux"] });
+    const mapPath = mapCachePath(cache, root, "beta");
+    mkdirSync(dirname(mapPath), { recursive: true });
+    writeFileSync(mapPath, JSON.stringify(buildTokenMap(root, "beta")));
+    const fingerprint = corpusFingerprint(root);
+    await writeFact(root, "project", "gradle-daemon", { tags: ["gradle", "daemon", "clean"], supersededBy: "jdk" });
+    await writeFact(root, "project", "kube-ctl", { tags: ["kubectl", "apply", "manifest"], platforms: ["macos"] });
+    expect(corpusFingerprint(root)).toBe(fingerprint);
+    writeState(stateFilePath(cache, "s1"), st({ repo: "beta", callCount: 1, beaconedRepos: ["beta"], mapBuiltAtCall: { beta: 1 } }));
+    const out = runBeacon(evt("daemon clean kubectl apply manifest toolchain repair"), deps());
+    expect(out).toContain("(jdk)");
+    expect(out).not.toMatch(/gradle-daemon|kube-ctl/);
+    expect(marker()!.surfacedSlugs).toEqual(["jdk"]);
+    expect(readEventLog(cache).filter(e => e.kind === "overlap").map(e => e.slugs)).toEqual([["jdk"]]);
+  });
 
   // covers: INV-4
   test("a non-Bash tool and malformed stdin are silent", () => {
