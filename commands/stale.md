@@ -11,8 +11,9 @@ and loads no model. A review date is not an expiry date: overdue facts are not
 automatically hidden or deleted.
 
 Resolve entries only with the user's approval:
-- Re-verified and unchanged: `qmemd reviewed <slug>` sets `review_by` to today plus
-  the type's review window, leaving `updated` unchanged. Use `--ttl <N>d|w|m|y`
+- Re-verified and unchanged: `qmemd reviewed <slug>` sets `review_by` using the
+  type's default policy: today plus its review window, or `never` for a durable
+  default. It leaves `updated` unchanged. Use `--ttl <N>d|w|m|y`
   or `--review-by YYYY-MM-DD` for a specific next review; `--ttl never` marks the
   fact permanently durable. The MCP equivalent is `reviewed`.
 - Changed: `qmemd remember "<corrected fact>" --replace <slug>`. Supply a fresh
