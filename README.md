@@ -86,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -NoDisableM
 The installer: builds qmemd (`bun install` / `bun run build`), adds `<repo>\bin`
 to your **User** PATH (so the `qmemd.cmd` shim
 resolves — **open a new shell**, and fully **restart Claude Code**, to pick it up), and idempotently wires
-`settings.json` (SessionStart `qmemd recall --session`, PreToolUse(Bash) `qmemd
+`settings.json` (SessionStart `qmemd hook session`, PreToolUse(Bash) `qmemd
 hook beacon`, `autoMemoryEnabled=false`) plus the `@import` in `CLAUDE.md`. It
 honors `$env:CLAUDE_CONFIG_DIR` (default `%USERPROFILE%\.claude`).
 
@@ -137,7 +137,7 @@ Not found? The fix depends on **how** you installed:
 | `QMEMD_EMBED_MODEL` | `embeddinggemma-300M` (Q8 GGUF) | Embedding model for hybrid recall — independent of qmd's own `QMD_EMBED_MODEL`; pinned to the index via a sidecar marker, mismatches warn at open |
 | `QMEMD_EMBED_TIMEOUT_MS` | `6000` | Bound on the lazy embed barrier in hybrid recall; on timeout recall fails open to lexical search (flagged `degraded`) |
 | `QMEMD_HTTP_PORT` | `8182` | Port for `qmemd mcp --http` / the installed service (CLI `--port` wins) |
-| `QMEMD_SESSION_BUDGET` | `2000` | Byte cap on the session snapshot (`recall --session` and the MCP/REST session paths); invalid values fall back to the default |
+| `QMEMD_SESSION_BUDGET` | `2000` | Byte cap on the session snapshot (`hook session`, `recall --session`, and the MCP/REST session paths); invalid values fall back to the default |
 | `QMEMD_SESSION_PROJECT_LIMIT` | `0` | Recent unpinned project/reference facts in the session snapshot. `0` (the default) makes the snapshot pinned-only; set `5` to restore the recency-sliced lanes. Invalid values fall back to the default |
 | `QMEMD_TTL_<TYPE>` | `project` 90d · `reference` 180d · `user`/`feedback` durable | Per-type default review window applied when a fact has no explicit `review_by` (e.g. `QMEMD_TTL_PROJECT=180d`, or `never`); an unparseable value falls back to the built-in default. Surfaces via `qmemd stale` — never auto-expires |
 | `XDG_CACHE_HOME` | `~/.cache` | Base for the default `QMEMD_DB` plus beacon/daemon state under `<cache>/qmemd/` |
@@ -150,8 +150,8 @@ sync — entirely best-effort and gated, never failing a write:
 - **One-time setup** (manual): `git init`, `git remote add origin <url>`, then
   `git push -u origin <branch>` to set the upstream. No auto-init.
 - **On `remember` / `forget`:** stage + commit the change, then `git push`.
-- **On session start** (`qmemd recall --session`, and the MCP/REST `session:true`
-  paths): `git pull --ff-only` first.
+- **On a session snapshot** (`qmemd hook session`, `qmemd recall --session`, and the
+  MCP/REST `session:true` paths): `git pull --ff-only` first.
 
 Gating: no `.git` → nothing runs; `.git` but no upstream → commit only; `.git` +
 upstream → commit/push/pull. Every git call is bounded by a 5s timeout, so a slow
@@ -172,7 +172,7 @@ else needs backing up — deleting `$QMEMD_DB` is always safe.
 ```bash
 qmemd remember "<fact>" [--type user|feedback|project|reference] [--tags a,b] [--platforms linux,macos] [--pin] [--as slug] [--replace slug] [--supersedes slug] [--source S] [--ttl 90d|--review-by YYYY-MM-DD] [--force]
 qmemd recall "<query>" [--lex] [--type T] [--platform P|--all-platforms] [--limit N] [--min-score N] [--full|--skim] [--json]
-qmemd recall --session          # start-of-session snapshot (user + feedback + pinned facts, plus a coverage footer)
+qmemd recall --session          # on-demand snapshot (user + feedback + pinned facts, plus a coverage footer)
 qmemd show <slug>               # print one fact in full (frontmatter + body)  (alias: qmemd get <slug>)
 qmemd list [--type T] [--tag t] [--project p] [--platform P] [--json]   # browse the corpus (model-free)
 qmemd tags [--project p] [--json]  # tag(count) overview for a project (model-free)
@@ -185,6 +185,7 @@ qmemd status                    # show store status as JSON
 qmemd doctor [--fix] [--json]   # audit frontmatter integrity; --fix repairs mechanical issues (writes .bak, model-free)
 qmemd rescope [--known a,b] [--alias old=new]... [--json] [--apply [plan.json|-]]   # migrate global project/reference facts to their inferred project (dry run by default, model-free)
 qmemd mcp                       # start the stdio MCP server (--http for the daemon; install-service for a durable unit)
+qmemd hook session              # SessionStart hook — snapshot envelope, reads host JSON on stdin
 qmemd hook beacon               # PreToolUse(Bash) hook — pivot + overlap blocks (wired via hook config, reads a hook event JSON on stdin)
 qmemd hook probe                # PostToolUseFailure(Bash) hook — names facts matching a failed command (wired via hook config, reads a hook event JSON on stdin)
 qmemd hook write-beacon         # Stop hook — write-side capture nudge (unchanged; wired via hook config)
@@ -193,8 +194,8 @@ qmemd hook stats [--since <N>h|<N>d|<N>w] [--json]   # hook trigger/uptake stats
 
 ### Session snapshot completeness
 
-`recall --session` emits whole user/feedback bodies and project/reference summaries
-within `QMEMD_SESSION_BUDGET` (default 2,000 UTF-8 bytes). Oversized facts are omitted,
+`hook session` and `recall --session` emit whole user/feedback bodies and
+project/reference summaries within `QMEMD_SESSION_BUDGET` (default 2,000 UTF-8 bytes). Oversized facts are omitted,
 not cut into instruction fragments; shorter later facts can still fit. Coverage
 counts include omitted pins. Pinning makes a fact eligible in the current project
 plus `global`, not guaranteed to appear. Unpinned project/reference facts remain
@@ -203,6 +204,11 @@ withheld by default; `QMEMD_SESSION_PROJECT_LIMIT=5` restores the recency slices
 Use `qmemd show <slug>` for a summary's full fact and `recall` or `qmemd list` to
 retrieve omitted facts. A compact partial notice, empty snapshot, or missing footer
 is not proof that the store has no relevant memories.
+
+Configure `qmemd hook session` for SessionStart: it consumes the host's JSON on
+stdin and emits the `suppressOutput` / `hookSpecificOutput.additionalContext`
+SessionStart envelope. For an on-demand snapshot, run `qmemd recall --session`;
+it never reads or waits for stdin and never updates hook session state.
 
 ### Content-derived hooks
 
@@ -215,6 +221,15 @@ current project plus `global` that match the host platform. Cached overlap hits
 are checked against current fact metadata before delivery, so retirement or
 platform changes cannot resurrect ineligible guidance from an old map.
 
+When `qmemd hook session` receives a valid `session_id` in the host's stdin JSON,
+it records only the facts actually delivered in the snapshot. Later pivot lists,
+overlap blocks, and failure probes skip those facts; budget- or policy-omitted
+facts remain eligible. Pivot counts and tag histograms still describe the full
+eligible corpus. The shared history retains the latest 200 slugs per session;
+eviction or a cache I/O failure can allow repeats. Missing or invalid session
+identity and cache failures never block snapshot delivery. On-demand
+`qmemd recall --session` does not read stdin or update this history.
+
 - **Pivot block** — fires once per repo per session, on the first Bash call in that
   repo: `💡 qmemd · <repo> — R repo + G global memories`, then either up to ten
   `[type] description (slug)` lines or one `repo: tag(count) …` histogram line, then
@@ -222,8 +237,9 @@ platform changes cannot resurrect ineligible guidance from an old map.
   stays silent and unmarked, so the first pivot after facts appear still fires.
 - **Overlap block** — fires on any Bash call whose command tokens overlap a fact's
   tags/slug: `💡 qmemd · <repo> — facts matching this command:`, up to three fact
-  lines, then `→ qmemd show <slug> for the full fact`. A fact surfaces at most once
-  per session; on the pivot call the two blocks join with one blank line.
+  lines, then `→ qmemd show <slug> for the full fact`. Previously surfaced facts
+  are skipped while retained in the shared history; on the pivot call the two
+  blocks join with one blank line.
 - **Probe** — `hooks/hooks.json`'s `PostToolUseFailure`/`Bash` entry (`qmemd hook
   probe`, `timeout: 10`) runs after a failed Bash call, builds a query from the
   command and the first line of the error (dropping an `Exit code N` header), and
@@ -338,7 +354,7 @@ model's context and letting the two drift to different versions.
 
 4. **Restart Claude Code, then verify:** the `/qmemd:*` commands appear in the
    slash-command menu, and a fresh session injects the qmemd rule + the
-   `recall --session` snapshot at the top of its context (the SessionStart hook).
+   `hook session` snapshot at the top of its context (the SessionStart hook).
    `qmemd status` confirms the CLI from step 1 (there is no `--version` flag).
 
 **Migrating from the bash installer?** The plugin and
@@ -380,7 +396,7 @@ more pieces turn qmemd into the agent's actual memory engine:
    [`claude/qmemd.md`](claude/qmemd.md) (the [`qmemd-memory`](skills/qmemd-memory/SKILL.md)
    skill is the on-demand how-to; this rule is the always-on policy).
 2. **A SessionStart hook** that injects the session snapshot
-   (`qmemd recall --session`) at the start of every session.
+   (`qmemd hook session`) at the start of every session.
 3. **`autoMemoryEnabled: false`** so Claude's built-in auto-memory stops
    competing with qmemd.
 
@@ -396,6 +412,13 @@ It edits `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) and appends one
 **not** register the MCP server (the `-s` scope is yours to pick); it prints the
 `claude mcp add` command to run yourself. The `@`-import is a live link: the rule
 updates when you `git pull` this repo, so keep the checkout in place.
+
+**Existing snapshot registrations:** updating the checkout or CLI alone does not
+upgrade installed hooks. Re-run the installer for your platform, or update/reinstall
+your plugin and restart the host. The installers replace historical qmemd
+SessionStart registrations rather than adding a second snapshot hook. For manual
+wiring, replace the old SessionStart command with `qmemd hook session`; keep
+`qmemd recall --session` for on-demand snapshots only.
 
 > **Already have the rule inline?** If you previously pasted the `# Memory (qmemd)`
 > block directly into `~/.claude/CLAUDE.md`, delete that inline copy after running

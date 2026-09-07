@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Hook proxy — run `qmemd <args>`, falling back to `npx -y @ciel2142/qmemd <args>`
 // when qmemd is not on PATH (the README contract for the plugin's hooks). Used by
-// the SessionStart snapshot (`recall --session`), the PreToolUse beacon
+// the SessionStart snapshot (`hook session`), the PreToolUse beacon
 // (`hook beacon`) and the PostToolUseFailure probe (`hook probe`).
 //
 // Why a node wrapper instead of a bare `qmemd …` hook string: it adds the npx
@@ -37,9 +37,9 @@ export function onPath(bin) {
 function main(args) {
   const [command, ...rest] = onPath("qmemd") ? ["qmemd", ...args] : npxFallback(args);
   // npm installs `qmemd`/`npx` as .cmd shims on Windows, which need a shell to
-  // resolve. The argv is fixed (recall/--session, hook/beacon) — nothing
-  // user-controlled to escape. stdio is inherited so the beacon's stdin payload
-  // and the snapshot's stdout pass straight through.
+  // resolve. The hook argv is fixed (hook/session, hook/beacon, hook/probe) —
+  // nothing user-controlled to escape. Inherited stdio passes host JSON stdin
+  // and hook context stdout straight through.
   const child = spawn(command, rest, { stdio: "inherit", shell: process.platform === "win32" });
   // Exit 0 whatever the child did: a non-zero PreToolUse hook status blocks the tool call,
   // so a crashing qmemd or a failed npx fallback must never propagate (fail-open).

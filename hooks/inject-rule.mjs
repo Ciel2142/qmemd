@@ -6,7 +6,7 @@
 //
 // Plugin-bundled (not a `qmemd` CLI verb) so it versions with the rule file in this
 // repo, independent of whichever npm-installed qmemd the hooks shell out to. The
-// session snapshot ships as a separate hook (`run-qmemd.mjs recall --session`).
+// session snapshot ships as a separate hook (`run-qmemd.mjs hook session`).
 //
 // Fail-open: any error → exit 0 with no output. A session must never fail to start
 // because the rule could not be read.

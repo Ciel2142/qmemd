@@ -6,7 +6,7 @@ import { remember, recallQueryWithStatus, recallSession, forget, getFact, listFa
 import type { MemoryType, Platform, RecallResult, RecallHit, MergePlan, StaleReport } from "../engine.js";
 import { tryDaemonRecall, daemonPort } from "../client.js";
 import { resolveExplicitMode, autoRecallMode, type RecallMode } from "../capability.js";
-import { runBeacon, runWriteBeacon } from "../beacon.js";
+import { runBeacon, runWriteBeacon, readState, writeState, stateFilePath, freshState, rememberSurfaced } from "../beacon.js";
 import { runProbe } from "../probe.js";
 import { eventLogPath, readEvents, computeStats, formatStats, FOLLOWUP_WINDOW_MS, type HookStats } from "../hookstats.js";
 import { resolveWriteScope } from "../scope.js";
@@ -203,7 +203,8 @@ function printUsage(): void {
   console.log("    on --replace: omit --tags/--platforms/--review-by to keep the existing values, or pass \"\" to clear them");
   console.log("    on --replace: omit --type to keep the existing type, or pass a different one to retype — the fact moves folders (--force alone never retypes; --replace wins when both are given)");
   console.log("  qmemd recall <query> [--lex|--hybrid] [--cross-project] [--type T] [--platform P|--all-platforms] [--limit N] [--min-score N] [--full|--skim] [--json]");
-  console.log("  qmemd recall --session                 - session snapshot (for hooks)");
+  console.log("  qmemd recall --session                 - on-demand session snapshot");
+  console.log("  qmemd hook session                    - SessionStart snapshot with per-session deduplication");
   console.log("  qmemd show <slug>                      - print one fact in full (no model)");
   console.log("  qmemd list [--type T] [--tag t] [--project p] [--platform P] [--json]  - browse the corpus (no model)");
   console.log("  qmemd stale [--limit N] [--json]       - facts past review_by + oldest unreviewed; lists only, never removes (no model)");
@@ -368,7 +369,31 @@ async function rescopeVerb(argv: string[]): Promise<void> {
   } finally { await store.close(); }
 }
 
-const HOOK_USAGE = "Usage: qmemd hook <beacon|probe|write-beacon|stats [--since <N>d|<N>h|<N>w] [--json]>   (reads a hook event JSON on stdin; stats reads the event log)";
+/** Shared snapshot rendering; only the explicit hook path supplies a session identity. */
+async function printSessionSnapshot(root: string, sessionId?: string): Promise<void> {
+  const w = sessionSyncWarning(gitPullFfOnly(root));
+  if (w) console.error(`${y}warning:${r} ${w}`);
+  const project = basename(process.cwd());
+  const shownSlugs: string[] | undefined = sessionId ? [] : undefined;
+  const out = await recallSession(root, {
+    project,
+    onIncluded: shownSlugs ? slug => { shownSlugs.push(slug); } : undefined,
+  });
+  // Keep the existing snapshot envelope and silent delivery for both callers.
+  if (out) console.log(JSON.stringify({
+    suppressOutput: true,
+    hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: out },
+  }));
+  if (out && sessionId && shownSlugs?.length) {
+    try {
+      const path = stateFilePath(cacheDir(), sessionId);
+      const state = readState(path) ?? freshState(project);
+      writeState(path, rememberSurfaced(state, shownSlugs));
+    } catch { /* a cache failure may repeat guidance, never suppress delivery */ }
+  }
+}
+
+const HOOK_USAGE = "Usage: qmemd hook <session|beacon|probe|write-beacon|stats [--since <N>d|<N>h|<N>w] [--json]>   (reads a hook event JSON on stdin; stats reads the event log)";
 const HOOK_STATS_USAGE = "usage: qmemd hook stats [--since <N>d|<N>h|<N>w] [--json]";
 
 /** hook is dispatched from main() ahead of the shared parseArgs table (D-w3-5, the rescope
@@ -377,6 +402,20 @@ const HOOK_STATS_USAGE = "usage: qmemd hook stats [--since <N>d|<N>h|<N>w] [--js
  *  path is fail-open (INV-4) — never a non-zero exit, never the embedding model. */
 async function hookVerb(argv: string[]): Promise<void> {
   const sub = argv[0];
+
+  if (sub === "session") {
+    try {
+      let sessionId: string | undefined;
+      if (!process.stdin.isTTY) {
+        try {
+          const event = JSON.parse(await readStdin());
+          if (typeof event?.session_id === "string" && event.session_id.trim()) sessionId = event.session_id;
+        } catch { /* absent or malformed hook input must not cost the snapshot */ }
+      }
+      await printSessionSnapshot(memoryRoot(), sessionId);
+    } catch { /* fail-open: a snapshot must never block session startup */ }
+    return;
+  }
 
   if (sub === "beacon") {
     try {
@@ -584,20 +623,7 @@ async function main() {
     }
     case "recall": {
       if (values.session) {
-        const pull = gitPullFfOnly(root); // session-start sync; best-effort, writes nothing to stdout
-        // git unavailable (binary missing / crashed / timed out) ⇒ sync is silently off; say so
-        // once on stderr so stdout stays the clean snapshot (qmemd-bwr).
-        const w = sessionSyncWarning(pull);
-        if (w) console.error(`${y}warning:${r} ${w}`);
-        const out = await recallSession(root, { project: basename(process.cwd()) });
-        // `recall --session` is the SessionStart hook snapshot. Ride the JSON envelope
-        // with suppressOutput so it is injected as additionalContext silently — raw stdout
-        // surfaces a visible "hook success:" banner that crowds the user's first prompt
-        // (qp-sessionstart-envelope-b6j). recallSession()'s string contract is unchanged.
-        if (out) console.log(JSON.stringify({
-          suppressOutput: true,
-          hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: out },
-        }));
+        await printSessionSnapshot(root);
         break;
       }
       const query = rest.join(" ").trim();

@@ -520,6 +520,8 @@ export interface SessionOptions {
   projectLimit?: number; // max unpinned facts per project/reference lane (env, then 0)
   budgetBytes?: number;  // hard cap on output size (default $QMEMD_SESSION_BUDGET, then 2000)
   platform?: Platform | "all"; // host OS gate (default currentPlatform()); "all" disables it
+  /** Physical slug of each fact actually included after scope, policy and budget gates. */
+  onIncluded?: (slug: string) => void;
 }
 
 // y6s: the session-start hook invokes `qmemd recall --session` with no way to pass
@@ -737,6 +739,7 @@ export async function recallSession(root: string, opts: SessionOptions = {}): Pr
       used += bytes;
       blocks.push(block);
       lane.shown++;
+      opts.onIncluded?.(m.slug);
     }
   }
   return [...prefix(false), ...(includeVerbose ? scopeLines(false) : []), ...blocks].join("\n");

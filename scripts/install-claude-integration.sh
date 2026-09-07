@@ -6,7 +6,7 @@
 #
 #   1. @import this repo's rule file (claude/qmemd.md) into ~/.claude/CLAUDE.md
 #      so every session gets the remember/recall trigger policy.
-#   2. Merge the SessionStart snapshot hook (`qmemd recall --session ...`) into
+#   2. Merge the SessionStart snapshot hook (`qmemd hook session`) into
 #      ~/.claude/settings.json so the session-start memory snapshot is injected.
 #   3. Set `autoMemoryEnabled: false` so Claude's built-in auto-memory stops
 #      competing with qmemd (opt out with --no-disable-memory).
@@ -56,7 +56,9 @@ RULE_FILE="$REPO_ROOT/claude/qmemd.md"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SETTINGS="$CLAUDE_DIR/settings.json"
 MEMORY_MD="$CLAUDE_DIR/CLAUDE.md"
-HOOK_CMD='qmemd recall --session --project "$(basename "$PWD")"'
+HOOK_CMD='qmemd hook session'
+LEGACY_HOOK_CMD='qmemd recall --session'
+LEGACY_PROJECT_HOOK_CMD='qmemd recall --session --project "$(basename "$PWD")"'
 BEACON_CMD='qmemd hook beacon'
 WRITE_BEACON_CMD='qmemd hook write-beacon'
 IMPORT_LINE="@$RULE_FILE"
@@ -67,9 +69,10 @@ mkdir -p "$CLAUDE_DIR"
 if [ "$UNINSTALL" = "1" ]; then
   if [ -f "$SETTINGS" ]; then
     tmp="$(mktemp)"
-    jq --arg s "$HOOK_CMD" --arg b "$BEACON_CMD" --arg w "$WRITE_BEACON_CMD" '
+    jq --arg s "$HOOK_CMD" --arg old "$LEGACY_HOOK_CMD" --arg project "$LEGACY_PROJECT_HOOK_CMD" \
+      --arg b "$BEACON_CMD" --arg w "$WRITE_BEACON_CMD" '
       .hooks.SessionStart = ((.hooks.SessionStart // [])
-        | map(.hooks |= map(select(.command != $s)))
+        | map(.hooks |= map(select(.command != $s and .command != $old and .command != $project)))
         | map(select((.hooks | length) > 0)))
       | .hooks.PreToolUse = ((.hooks.PreToolUse // [])
         | map(.hooks |= map(select(.command != $b)))
@@ -101,16 +104,18 @@ hook_was_present="$(jq --arg cmd "$HOOK_CMD" \
   'any(.hooks.SessionStart[]?.hooks[]?; .command == $cmd) // false' "$SETTINGS")"
 
 tmp="$(mktemp)"
-jq --arg cmd "$HOOK_CMD" --argjson disable "$DISABLE_MEMORY" '
+# Remove only installer-owned snapshot commands, including historical forms,
+# before adding one canonical hook. Keep other commands in shared groups.
+jq --arg cmd "$HOOK_CMD" --arg old "$LEGACY_HOOK_CMD" --arg project "$LEGACY_PROJECT_HOOK_CMD" \
+  --argjson disable "$DISABLE_MEMORY" '
   (if $disable == 1 then .autoMemoryEnabled = false else . end)
   | .hooks = (.hooks // {})
-  | .hooks.SessionStart = (.hooks.SessionStart // [])
-  | if any(.hooks.SessionStart[]?.hooks[]?; .command == $cmd)
-    then .
-    else .hooks.SessionStart += [
+  | .hooks.SessionStart = ((.hooks.SessionStart // [])
+      | map(.hooks |= map(select(.command != $cmd and .command != $old and .command != $project)))
+      | map(select((.hooks | length) > 0)))
+  | .hooks.SessionStart += [
       { "matcher": "*", "hooks": [ { "type": "command", "command": $cmd } ] }
     ]
-    end
 ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
 
 # --- 1b. settings.json: PreToolUse(Bash) memory-presence beacon (qmemd-tfu) -----

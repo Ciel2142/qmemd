@@ -65,7 +65,7 @@ API remains available to arbitrary clients; this is not maintained Cursor suppor
 
 The MCP + rule above make memory **pull-only** — the agent must call `recall` itself. Claude
 Code also wires three hooks that push memory automatically: a **SessionStart** snapshot
-(`qmemd recall --session`), a **PreToolUse** beacon (`qmemd hook beacon`, content-derived —
+(`qmemd hook session`), a **PreToolUse** beacon (`qmemd hook beacon`, content-derived —
 a once-per-repo pivot block plus an overlap block for a command that matches a fact), and a
 **PostToolUseFailure** probe (`qmemd hook probe`) that names facts matching a failed Bash
 command and its error. Which of the three you actually get depends on where you install:
@@ -83,14 +83,28 @@ its wiring strips the envelope to raw text. The per-host sections below say why 
 stops where it does. E2E-test in your client before relying on it — hook schemas move
 fast.
 
+`qmemd hook session` reads the host's JSON stdin and emits the SessionStart envelope.
+With a valid `session_id`, only facts actually delivered in that snapshot enter the
+shared recent-200-slug history used by beacon and probe. Budget- or policy-omitted
+facts remain eligible; pivot counts and tag histograms still cover the full eligible
+corpus. Evicted slugs can repeat. Missing/invalid session identity or a cache failure
+never prevents snapshot output; cache failures can allow repeats.
+
+For an on-demand snapshot, use `qmemd recall --session`: it never reads or waits for
+stdin and never mutates hook session state. Do not register it for SessionStart.
+When upgrading an existing setup, update/reinstall the plugin or rerun the relevant
+installer; for manual wiring, replace the historical SessionStart command with
+`qmemd hook session` rather than adding a second registration. Updating this checkout
+alone does not upgrade installed copies.
+
 ### Codex CLI — snapshot + beacon parity, no failure probe
 
 1. Enable the hooks engine: add a `[features]` section with `codex_hooks = true` to
    `~/.codex/config.toml` (already in `codex/config.toml.example`). Needs a recent Codex CLI
    (hooks shipped v0.114.0+).
 2. Copy `codex/hooks/hooks.json` to `~/.codex/hooks.json` (user) or `.codex/hooks.json` (repo):
-   `SessionStart` → snapshot, `PreToolUse` (Bash) → beacon. Codex reads `additionalContext` from
-   the same envelope Claude does.
+   `SessionStart` → `qmemd hook session`, `PreToolUse` (Bash) → beacon. Codex reads
+   `additionalContext` from the same envelope Claude does.
 
 Codex has no `PostToolUseFailure` event: its `PostToolUse` also runs on a non-zero Bash exit,
 but the outcome lives inside an untyped `tool_response` rather than the `error`/`is_interrupt`

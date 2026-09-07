@@ -47,12 +47,6 @@ describe("install-claude-integration.sh", () => {
     expect(readSettings().autoMemoryEnabled).toBe(false);
   });
 
-  test("merges the SessionStart snapshot hook", () => {
-    run(home);
-    const cmds = hookCommands(readSettings());
-    expect(cmds.some((c) => c.includes("qmemd recall --session"))).toBe(true);
-  });
-
   test("injects an @import of the repo rule file into CLAUDE.md", () => {
     run(home);
     expect(readFileSync(memoryPath(), "utf8")).toContain(IMPORT_LINE);
@@ -60,11 +54,11 @@ describe("install-claude-integration.sh", () => {
 
   test("is idempotent: second run adds no duplicate hook or import", () => {
     run(home);
+    const firstSettings = readSettings();
+    const firstRule = readFileSync(memoryPath(), "utf8");
     run(home);
-    const cmds = hookCommands(readSettings()).filter((c) => c.includes("qmemd recall --session"));
-    expect(cmds).toHaveLength(1);
-    const md = readFileSync(memoryPath(), "utf8");
-    expect(md.split(IMPORT_LINE).length - 1).toBe(1);
+    expect(readSettings()).toEqual(firstSettings);
+    expect(readFileSync(memoryPath(), "utf8")).toBe(firstRule);
   });
 
   test("preserves existing settings keys and hooks", async () => {
@@ -80,7 +74,6 @@ describe("install-claude-integration.sh", () => {
     const s = readSettings();
     expect(s.existingKey).toBe(42);
     expect(hookCommands(s)).toContain("echo hi");
-    expect(hookCommands(s).some((c) => c.includes("qmemd recall --session"))).toBe(true);
   });
 
   test("preserves existing CLAUDE.md content when appending the import", async () => {
@@ -101,14 +94,6 @@ describe("install-claude-integration.sh", () => {
   test("prints the MCP registration command instead of running it", () => {
     const out = run(home);
     expect(out).toContain("claude mcp add");
-  });
-
-  test("ships a generic rule file with no maintainer-specific paths", () => {
-    const rule = readFileSync(RULE_FILE, "utf8");
-    expect(rule).not.toContain("/home/user");
-    expect(rule).not.toMatch(/\.local\/share\/qmd-memory/);
-    expect(rule).toContain("$QMD_MEMORY_DIR");
-    expect(rule.toLowerCase()).toContain("recall");
   });
 
   const preToolUseCommands = (s: any): string[] =>

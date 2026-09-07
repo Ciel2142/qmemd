@@ -4,7 +4,7 @@
       {
         "matcher": "startup|resume",
         "hooks": [
-          { "type": "command", "command": "qmemd recall --session", "statusMessage": "Loading qmemd memory", "timeout": 15 }
+          { "type": "command", "command": "qmemd hook session", "statusMessage": "Loading qmemd memory", "timeout": 15 }
         ]
       }
     ],

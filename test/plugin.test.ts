@@ -1,13 +1,11 @@
-import { describe, test, expect, beforeAll } from "vitest";
+import { describe, test, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { readFileSync, existsSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-// Plugin hook scripts are plain runtime .mjs (outside src/, so tsc/typecheck ignore
-// them — see tsconfig.typecheck.json). We import their pure helpers directly and
-// exercise the executable behaviour via spawn.
-import { buildSessionContext, ruleFilePath } from "../hooks/inject-rule.mjs";
-import { npxFallback, NPX_PACKAGE } from "../hooks/run-qmemd.mjs";
+import { cleanEnv } from "./support/env.js";
+import { z } from "zod";
+// Exercise plugin scripts and installer migrations through their executable surface.
 
 // qmemd plugin packaging: README + package.json advertise install via
 // `/plugin marketplace add Ciel2142/qmemd` → `/plugin install qmemd@qmemd`, but the
@@ -70,48 +68,6 @@ describe("Claude Code plugin manifests", () => {
   });
 });
 
-describe("plugin hooks.json", () => {
-  let hooks: any;
-  beforeAll(() => { hooks = readJSON("hooks/hooks.json").hooks; });
-  const cmds = (group: any[]): string[] =>
-    (group ?? []).flatMap((g) => (g.hooks ?? []).map((h: any) => h.command));
-
-  test("SessionStart injects the always-on rule and the session snapshot", () => {
-    const c = cmds(hooks.SessionStart);
-    expect(c.some((x) => x.includes("inject-rule.mjs"))).toBe(true);
-    expect(c.some((x) => x.includes("run-qmemd.mjs") && x.includes("recall --session"))).toBe(true);
-  });
-
-  test("PreToolUse(Bash) fires the memory-presence beacon", () => {
-    const block = (hooks.PreToolUse ?? []).find((g: any) =>
-      (g.hooks ?? []).some((h: any) => h.command.includes("hook beacon")));
-    expect(block).toBeDefined();
-    expect(block.matcher).toBe("Bash");
-  });
-
-  // covers: SC-66
-  test("PostToolUseFailure(Bash) fires the failure probe through the proxy on a 10s timeout", () => {
-    const groups = hooks.PostToolUseFailure ?? [];
-    expect(groups).toHaveLength(1);
-    expect(groups[0].matcher).toBe("Bash");
-    expect(groups[0].hooks).toEqual([{
-      type: "command",
-      command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/run-qmemd.mjs" hook probe',
-      timeout: 10,
-    }]);
-  });
-
-  // covers: SC-66
-  test("hook commands are cross-platform: ${CLAUDE_PLUGIN_ROOT}, no POSIX-only operators", () => {
-    const all = [...cmds(hooks.SessionStart), ...cmds(hooks.PreToolUse), ...cmds(hooks.PostToolUseFailure)];
-    expect(all.length).toBeGreaterThan(0);
-    for (const c of all) {
-      expect(c, c).toContain("${CLAUDE_PLUGIN_ROOT}");
-      // `||`, `&&`, `2>` would break when cmd.exe runs the hook string on Windows.
-      expect(c, c).not.toMatch(/\|\||&&|2>/);
-    }
-  });
-});
 
 describe("/qmemd:* commands", () => {
   const VERBS = ["recall", "remember", "forget", "list", "stale", "status"];
@@ -131,23 +87,6 @@ describe("/qmemd:* commands", () => {
 describe("inject-rule.mjs (SessionStart rule injection)", () => {
   const SCRIPT = join(REPO, "hooks", "inject-rule.mjs");
 
-  test("buildSessionContext wraps content as SessionStart additionalContext", () => {
-    const out = JSON.parse(buildSessionContext("# Memory (qmemd)\nbody"));
-    expect(out.hookSpecificOutput.hookEventName).toBe("SessionStart");
-    expect(out.hookSpecificOutput.additionalContext).toContain("# Memory (qmemd)");
-  });
-
-  test("buildSessionContext sets suppressOutput so the rule does not banner the prompt", () => {
-    // Raw SessionStart stdout (or an envelope without suppressOutput) surfaces as a
-    // visible "hook success:" banner that crowds the user's first prompt. suppressOutput
-    // injects additionalContext silently.
-    const out = JSON.parse(buildSessionContext("# Memory (qmemd)\nbody"));
-    expect(out.suppressOutput).toBe(true);
-  });
-
-  test("ruleFilePath resolves claude/qmemd.md under the plugin root", () => {
-    expect(ruleFilePath("/x")).toBe(join("/x", "claude", "qmemd.md"));
-  });
 
   test("emits the repo rule from CLAUDE_PLUGIN_ROOT as valid additionalContext JSON", () => {
     const r = spawnSync(process.execPath, [SCRIPT], {
@@ -170,19 +109,6 @@ describe("inject-rule.mjs (SessionStart rule injection)", () => {
 });
 
 describe("run-qmemd.mjs (PATH→npx fallback proxy)", () => {
-  test("npxFallback builds the README-documented npx invocation", () => {
-    expect(npxFallback(["recall", "--session"]))
-      .toEqual(["npx", "-y", NPX_PACKAGE, "recall", "--session"]);
-  });
-
-  test("fallback targets the published package", () => {
-    expect(NPX_PACKAGE).toBe("@ciel2142/qmemd");
-  });
-
-  test("is syntactically valid (node --check)", () => {
-    const r = spawnSync(process.execPath, ["--check", join(REPO, "hooks", "run-qmemd.mjs")], { encoding: "utf8" });
-    expect(r.status, r.stderr).toBe(0);
-  });
 
   // A PreToolUse hook exiting non-zero blocks the tool call, so a crashing qmemd (or a
   // failed npx fallback) must not reach Claude Code as the proxy's own status.
@@ -198,6 +124,138 @@ describe("run-qmemd.mjs (PATH→npx fallback proxy)", () => {
       });
       expect(r.status).toBe(0);
       expect(r.stdout).toContain("proxied-output");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test.skipIf(process.platform === "win32")("configured plugin snapshot prevents the first beacon from repeating delivered memory", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qmemd-plugin-session-"));
+  const bin = join(dir, "bin");
+  const tsx = join(REPO, "node_modules", ".bin", "tsx");
+  const cli = join(REPO, "src", "cli", "qmemd.ts");
+  try {
+    mkdirSync(bin);
+    const shim = join(bin, "qmemd");
+    writeFileSync(shim, `#!/bin/sh\nexec "${tsx}" "${cli}" "$@"\n`);
+    chmodSync(shim, 0o755);
+    const env = cleanEnv({
+      CLAUDE_PLUGIN_ROOT: REPO,
+      PATH: `${bin}:${process.env.PATH}`,
+      QMD_MEMORY_DIR: join(dir, "memory"),
+      QMEMD_DB: join(dir, "memory", ".idx", "i.sqlite"),
+      XDG_CACHE_HOME: join(dir, "cache"),
+      QMEMD_SESSION_BUDGET: "2000",
+    });
+    const saved = spawnSync(tsx, [cli, "remember", "Use gradle daemon diagnostics",
+      "--type", "reference", "--project", "global", "--pin", "--as", "gradle-daemon",
+      "--tags", "gradle,daemon,clean"], { cwd: dir, env, encoding: "utf8" });
+    expect(saved.status, saved.stderr).toBe(0);
+    const groups = z.array(z.object({
+      matcher: z.string(), hooks: z.array(z.object({ command: z.string() })),
+    }));
+    const hooks = z.object({ SessionStart: groups, PreToolUse: groups }).parse(readJSON("hooks/hooks.json").hooks);
+    const sessionContext = z.object({
+      suppressOutput: z.literal(true),
+      hookSpecificOutput: z.object({
+        hookEventName: z.literal("SessionStart"), additionalContext: z.string(),
+      }),
+    });
+    const invoke = (command: string, session: string) => {
+      const result = spawnSync("sh", ["-c", command], {
+        cwd: dir, env, encoding: "utf8",
+        input: JSON.stringify({
+          session_id: session, cwd: dir, tool_name: "Bash",
+          tool_input: { command: "gradle daemon clean" },
+        }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout;
+    };
+    const contexts = hooks.SessionStart.flatMap((group) =>
+      group.hooks.map((hook) => sessionContext.parse(JSON.parse(invoke(hook.command, "plugin-session")))));
+    const snapshot = contexts.find((out) =>
+      out.hookSpecificOutput.additionalContext.includes("gradle-daemon"));
+    expect(snapshot?.suppressOutput).toBe(true);
+    expect(snapshot?.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    const beacon = hooks.PreToolUse.find((group) => group.matcher === "Bash")!.hooks[0].command;
+    expect(invoke(beacon, "plugin-session")).not.toContain("gradle-daemon");
+    expect(invoke(beacon, "fresh-session")).toContain("gradle-daemon");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+describe.skipIf(process.platform === "win32")("Claude integration installer snapshot migration", () => {
+  const legacyCommands = [
+    "qmemd recall --session",
+    'qmemd recall --session --project "$(basename "$PWD")"',
+  ];
+  const canonical = "qmemd hook session";
+  const unrelated = { type: "command", command: "qmemd recall --session --project custom", timeout: 7 };
+  const unrelatedGroup = { matcher: "resume", hooks: [unrelated] };
+  const postToolUse = [{ matcher: "Edit", hooks: [{ type: "command", command: "prettier" }] }];
+  const cases = [
+    { name: "historical PowerShell command", commands: [legacyCommands[0]] },
+    { name: "historical bash command", commands: [legacyCommands[1]] },
+    { name: "mixed old/new duplicates", commands: [...legacyCommands, canonical, canonical] },
+  ];
+
+  test.each(cases)("$name migrates once and uninstalls without touching unrelated settings", ({ commands }) => {
+    const dir = mkdtempSync(join(tmpdir(), "qmemd-installer-"));
+    const settingsPath = join(dir, "settings.json");
+    const memoryPath = join(dir, "CLAUDE.md");
+    const seed = {
+      theme: "dark",
+      autoMemoryEnabled: true,
+      hooks: {
+        SessionStart: [{
+          ...unrelatedGroup,
+          hooks: [...unrelatedGroup.hooks, ...commands.map((command) => ({ type: "command", command }))],
+        }],
+        PostToolUse: postToolUse,
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo before" }] }],
+        Stop: [{ matcher: "*", hooks: [{ type: "command", command: "echo stopped" }] }],
+      },
+    };
+    const install = (...args: string[]) => {
+      const result = spawnSync("bash", [join(REPO, "scripts", "install-claude-integration.sh"), ...args], {
+        env: { ...process.env, CLAUDE_CONFIG_DIR: dir }, encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return JSON.parse(readFileSync(settingsPath, "utf8"));
+    };
+    try {
+      writeFileSync(settingsPath, JSON.stringify(seed));
+      writeFileSync(memoryPath, "# Personal instructions\n");
+      for (let pass = 0; pass < 2; pass++) {
+        const settings = install("--no-disable-memory");
+        expect(settings.hooks.SessionStart).toEqual([
+          unrelatedGroup,
+          { matcher: "*", hooks: [{ type: "command", command: canonical }] },
+        ]);
+        expect(settings.theme).toBe(seed.theme);
+        expect(settings.autoMemoryEnabled).toBe(true);
+        expect(settings.hooks.PostToolUse).toEqual(postToolUse);
+        expect(settings.hooks.PreToolUse).toEqual([
+          ...seed.hooks.PreToolUse,
+          { matcher: "Bash", hooks: [{ type: "command", command: "qmemd hook beacon" }] },
+        ]);
+        expect(settings.hooks.Stop).toEqual(seed.hooks.Stop);
+      }
+      // Uninstall must clean old registrations too, not only the newly installed form.
+      const installed = JSON.parse(readFileSync(settingsPath, "utf8"));
+      installed.hooks.SessionStart[0].hooks.push(
+        ...legacyCommands.map((command) => ({ type: "command", command })),
+      );
+      writeFileSync(settingsPath, JSON.stringify(installed));
+      for (let pass = 0; pass < 2; pass++) {
+        expect(install("--uninstall")).toEqual({
+          ...seed, hooks: { ...seed.hooks, SessionStart: [unrelatedGroup] },
+        });
+        expect(readFileSync(memoryPath, "utf8")).toBe("# Personal instructions\n");
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

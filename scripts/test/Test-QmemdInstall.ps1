@@ -22,7 +22,7 @@ $cfg = New-TempDir; $repo = New-TempDir
 Install-ClaudeIntegration -ConfigDir $cfg -RepoRoot $repo -DisableMemory $true
 $s = Get-Content -Raw (Join-Path $cfg 'settings.json') | ConvertFrom-Json
 Assert ($s.autoMemoryEnabled -eq $false) 'autoMemoryEnabled = false'
-Assert ((Get-HookCommands -Settings $s -Event 'SessionStart') -contains 'qmemd recall --session') 'SessionStart hook present'
+Assert ((Get-HookCommands -Settings $s -Event 'SessionStart') -contains 'qmemd hook session') 'SessionStart hook present'
 Assert ((Get-HookCommands -Settings $s -Event 'PreToolUse') -contains 'qmemd hook beacon') 'PreToolUse beacon present'
 Assert (((Get-Content -Raw (Join-Path $cfg 'CLAUDE.md')) -match 'qmemd\.md') ) 'CLAUDE.md @import appended'
 
@@ -41,7 +41,7 @@ Assert (-not ((Get-HookCommands -Settings $sn -Event 'Stop') -contains 'qmemd ho
 Write-Host 'Test: idempotent re-run'
 Install-ClaudeIntegration -ConfigDir $cfg -RepoRoot $repo -DisableMemory $true
 $s2 = Get-Content -Raw (Join-Path $cfg 'settings.json') | ConvertFrom-Json
-Assert ((@(Get-HookCommands -Settings $s2 -Event 'SessionStart' | Where-Object { $_ -eq 'qmemd recall --session' }).Count) -eq 1) 'SessionStart not duplicated'
+Assert ((@(Get-HookCommands -Settings $s2 -Event 'SessionStart' | Where-Object { $_ -eq 'qmemd hook session' }).Count) -eq 1) 'SessionStart not duplicated'
 Assert ((@(Get-HookCommands -Settings $s2 -Event 'PreToolUse' | Where-Object { $_ -eq 'qmemd hook beacon' }).Count) -eq 1) 'beacon not duplicated'
 Assert ((@(Get-Content (Join-Path $cfg 'CLAUDE.md') | Where-Object { $_ -match 'qmemd\.md' }).Count) -eq 1) 'import line not duplicated'
 
@@ -58,7 +58,7 @@ Install-ClaudeIntegration -ConfigDir $cfg3 -RepoRoot $repo3 -DisableMemory $true
 $s3 = Get-Content -Raw (Join-Path $cfg3 'settings.json') | ConvertFrom-Json
 Assert ($s3.theme -eq 'dark') 'unrelated key theme preserved'
 Assert ((Get-HookCommands -Settings $s3 -Event 'PostToolUse') -contains 'prettier') 'unrelated PostToolUse hook preserved'
-Assert ((Get-HookCommands -Settings $s3 -Event 'SessionStart') -contains 'qmemd recall --session') 'new SessionStart added alongside'
+Assert ((Get-HookCommands -Settings $s3 -Event 'SessionStart') -contains 'qmemd hook session') 'new SessionStart added alongside'
 
 Write-Host 'Test: -DisableMemory $false; no UTF-8 BOM'
 $cfg4 = New-TempDir; $repo4 = New-TempDir
@@ -69,21 +69,43 @@ $bytes = [IO.File]::ReadAllBytes((Join-Path $cfg4 'settings.json'))
 $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
 Assert (-not $hasBom) 'settings.json written without UTF-8 BOM'
 
-Write-Host 'Test: cross-installer SessionStart not double-wired'
-$cfg5 = New-TempDir; $repo5 = New-TempDir
+Write-Host 'Test: historical and duplicate SessionStart registrations migrate'
 $linuxCmd = 'qmemd recall --session --project "$(basename "$PWD")"'
-$seed5 = [pscustomobject]@{
-    hooks = [pscustomobject]@{
-        SessionStart = @([pscustomobject]@{ matcher = '*'; hooks = @([pscustomobject]@{ type = 'command'; command = $linuxCmd }) })
+$unrelatedHook = [pscustomobject]@{ type = 'command'; command = 'qmemd recall --session --project custom'; timeout = 7 }
+$migrationCases = @(
+    @('qmemd recall --session'),
+    @($linuxCmd),
+    @('qmemd recall --session', $linuxCmd, 'qmemd hook session', 'qmemd hook session')
+)
+foreach ($commands in $migrationCases) {
+    $cfg5 = New-TempDir; $repo5 = New-TempDir
+    $seed5 = [pscustomobject]@{
+        theme = 'dark'
+        autoMemoryEnabled = $true
+        hooks = [pscustomobject]@{
+            SessionStart = @(
+                [pscustomobject]@{ matcher = 'resume'; hooks = @($unrelatedHook) + @(
+                    $commands | ForEach-Object { [pscustomobject]@{ type = 'command'; command = $_ } }
+                ) }
+            )
+            PostToolUse = @([pscustomobject]@{ matcher = 'Edit'; hooks = @([pscustomobject]@{ type = 'command'; command = 'prettier' }) })
+        }
+    }
+    [IO.File]::WriteAllText((Join-Path $cfg5 'settings.json'), ($seed5 | ConvertTo-Json -Depth 100))
+    foreach ($pass in 1..2) {
+        Install-ClaudeIntegration -ConfigDir $cfg5 -RepoRoot $repo5 -DisableMemory $false
+        $s5 = Get-Content -Raw (Join-Path $cfg5 'settings.json') | ConvertFrom-Json
+        $ss5 = @(Get-HookCommands -Settings $s5 -Event 'SessionStart')
+        Assert ($ss5.Count -eq 2) "migration/rerun $pass leaves only custom and canonical hooks"
+        Assert (@($ss5 | Where-Object { $_ -ceq 'qmemd hook session' }).Count -eq 1) 'exactly one canonical session hook'
+        Assert ($ss5 -ccontains $unrelatedHook.command) 'custom recall command preserved'
+        Assert ($s5.hooks.SessionStart[0].matcher -eq 'resume') 'shared group matcher preserved'
+        Assert ($s5.hooks.SessionStart[0].hooks[0].timeout -eq 7) 'unrelated hook metadata preserved'
+        Assert ($s5.theme -eq 'dark' -and $s5.autoMemoryEnabled -eq $true) 'unrelated settings preserved'
+        Assert ((Get-HookCommands -Settings $s5 -Event 'PostToolUse') -contains 'prettier') 'unrelated event preserved'
+        Assert ((Get-HookCommands -Settings $s5 -Event 'PreToolUse') -contains 'qmemd hook beacon') 'beacon still wired'
     }
 }
-[IO.File]::WriteAllText((Join-Path $cfg5 'settings.json'), ($seed5 | ConvertTo-Json -Depth 100))
-Install-ClaudeIntegration -ConfigDir $cfg5 -RepoRoot $repo5 -DisableMemory $true
-$s5 = Get-Content -Raw (Join-Path $cfg5 'settings.json') | ConvertFrom-Json
-$ss5 = @(Get-HookCommands -Settings $s5 -Event 'SessionStart')
-Assert ($ss5.Count -eq 1) 'existing Linux SessionStart not duplicated by bare form'
-Assert ($ss5[0] -eq $linuxCmd) 'existing Linux SessionStart preserved as-is'
-Assert ((Get-HookCommands -Settings $s5 -Event 'PreToolUse') -contains 'qmemd hook beacon') 'beacon still wired alongside existing SessionStart'
 
 Write-Host 'Test: Get-UpdatedUserPath'
 $entry = 'C:\repo\bin'

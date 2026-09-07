@@ -5,7 +5,7 @@ import { tokenizeForDedup, recallQueryWithStatus, type MemoryType, type RecallHi
 import { stripWrappers, isOwnSubjectCommand, formatFactLine, type FactLine } from "./overlap.js";
 import { appendEvent, eventLogPath } from "./hookstats.js";
 import {
-  readState, writeState, stateFilePath, rememberSurfaced, SURFACED_CAP, type BeaconState,
+  readState, writeState, stateFilePath, freshState, rememberSurfaced, SURFACED_CAP, type BeaconState,
 } from "./beacon.js";
 
 /** A failed Bash call is on the agent's critical path: the store open + lex search is
@@ -82,11 +82,6 @@ export interface ProbeDeps {
   /** test seam for the event timestamp */
   now?: () => Date;
 }
-
-const freshState = (repo: string): BeaconState => ({
-  repo, callCount: 0, lastBeaconAtCall: 0, beaconedRepos: [], perRepo: {},
-  surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: {},
-});
 
 /** Orchestrate one PostToolUseFailure event → probe text or null (silent). The only hook
  *  path that opens the store, and it opens it lex-only (no model) and only once every skip

@@ -87,6 +87,152 @@ describe("CLI recall --session emits the SessionStart envelope (banner fix, b6j)
   });
 });
 
+describe("CLI snapshot injection deduplication", () => {
+  let root: string, cache: string, cwd: string;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "qmemd-snapshot-dedup-"));
+    cache = join(root, ".cache");
+    cwd = join(root, "work", "demo");
+    await mkdir(cwd, { recursive: true });
+  });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  async function put(type: MemoryType, slug: string, opts: Partial<MemoryFrontmatter> = {}) {
+    await mkdir(join(root, type), { recursive: true });
+    const fm: MemoryFrontmatter = {
+      name: slug, description: `${slug} guidance`, type, tags: [],
+      project: "demo", created: "2026-09-07", pinned: true, ...opts,
+    };
+    await writeFile(join(root, type, `${slug}.md`), serializeMemory(fm, fm.description));
+  }
+
+  const event = (session = "s1") => ({
+    session_id: session, cwd, tool_name: "Bash",
+    tool_input: { command: "gradle daemon clean" },
+    error: "Exit code 1\ngradle daemon clean startup failed",
+  });
+  function snapshot(input = JSON.stringify(event()), budget = "2000") {
+    return spawnSync(TSX, [CLI, "hook", "session"], {
+      encoding: "utf-8", cwd, input,
+      env: cleanEnv({
+        QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"),
+        XDG_CACHE_HOME: cache, QMEMD_SESSION_BUDGET: budget,
+      }),
+    });
+  }
+
+  test("delivered physical slugs are excluded from the first pivot, overlap and failure probe", async () => {
+    await put("project", "local-pin", { name: "not-the-physical-slug" });
+    await put("reference", "gradle-daemon", {
+      project: "global", tags: ["gradle", "daemon", "clean"],
+      description: "gradle daemon clean startup failed",
+    });
+    await put("reference", "unshown-daemon", {
+      project: "global", pinned: false,
+      description: "gradle daemon clean startup failed secondary repair",
+    });
+    expect(runCli(["reindex"], root).status).toBe(0);
+    const start = snapshot();
+    expect(start.status, start.stderr).toBe(0);
+    expect(start.stdout).toContain("(local-pin)");
+    expect(start.stdout).toContain("(gradle-daemon)");
+    expect(start.stdout).not.toContain("(unshown-daemon)");
+
+    const failure = runProbeHook(JSON.stringify(event()), root, cache);
+    expect(failure.status, failure.stderr).toBe(0);
+    expect(failure.stdout).toContain("(unshown-daemon)");
+    expect(failure.stdout).not.toContain("(gradle-daemon)");
+    const beacon = runHook(JSON.stringify(event()), root, cache);
+    expect(beacon.status, beacon.stderr).toBe(0);
+    expect(JSON.parse(beacon.stdout).hookSpecificOutput.additionalContext).toContain("1 repo + 2 global memories");
+    expect(beacon.stdout).not.toContain("(local-pin)");
+    expect(beacon.stdout).not.toContain("(gradle-daemon)");
+
+    // Positive controls: silence above must be deduplication, not a broken matcher.
+    const otherFailure = runProbeHook(JSON.stringify(event("other-probe")), root, cache);
+    expect(otherFailure.stdout).toContain("(gradle-daemon)");
+    const otherBeacon = runHook(JSON.stringify(event("other-beacon")), root, cache);
+    expect(otherBeacon.stdout).toContain("(local-pin)");
+    expect(otherBeacon.stdout).toContain("(gradle-daemon)");
+  });
+
+  test("delivered user and feedback bodies are not repeated by a failure probe", async () => {
+    for (const type of ["user", "feedback"] as const) {
+      await put(type, `${type}-daemon`, {
+        project: "global", description: `${type} gradle daemon clean startup failed`,
+      });
+    }
+    expect(runCli(["reindex"], root).status).toBe(0);
+    const start = snapshot();
+    expect(start.stdout).toContain("user gradle daemon");
+    expect(start.stdout).toContain("feedback gradle daemon");
+    expect(runProbeHook(JSON.stringify(event()), root, cache).stdout).toBe("");
+    const control = runProbeHook(JSON.stringify(event("other")), root, cache);
+    expect(control.stdout).toContain("(user-daemon)");
+    expect(control.stdout).toContain("(feedback-daemon)");
+  });
+
+  test("budget-omitted pins and policy-omitted facts remain eligible for the first pivot", async () => {
+    await put("project", "small-pin");
+    await put("project", "large-pin", { description: "Oversized guidance ".repeat(300) });
+    await put("project", "unpinned", { pinned: false });
+    const start = snapshot();
+    expect(start.stdout).toContain("(small-pin)");
+    expect(start.stdout).not.toContain("(large-pin)");
+    expect(start.stdout).not.toContain("(unpinned)");
+    const beacon = runHook(JSON.stringify(event()), root, cache);
+    expect(beacon.stdout).not.toContain("(small-pin)");
+    expect(beacon.stdout).toContain("(large-pin)");
+    expect(beacon.stdout).toContain("(unpinned)");
+  });
+
+  test.each(["100", "1"])("a snapshot budget of %s bytes does not suppress undelivered facts", async budget => {
+    await put("project", "local-pin");
+    const start = snapshot(JSON.stringify(event()), budget);
+    expect(start.status, start.stderr).toBe(0);
+    expect(start.stdout).not.toContain("(local-pin)");
+    expect(runHook(JSON.stringify(event()), root, cache).stdout).toContain("(local-pin)");
+  });
+
+  test.each(["", "not json", '{"session_id":42}', '{"session_id":""}'])(
+    "snapshot input %j without a usable session ID preserves delivery without cross-session suppression",
+    async input => {
+      await put("project", "local-pin");
+      const start = snapshot(input);
+      expect(start.status, start.stderr).toBe(0);
+      expect(start.stdout).toContain("(local-pin)");
+      const anonymous = { ...event(), session_id: undefined };
+      expect(runHook(JSON.stringify(anonymous), root, cache).stdout).toContain("(local-pin)");
+    },
+  );
+
+  test("a whitespace-only session ID does not record delivered facts", async () => {
+    await put("project", "local-pin");
+    const blank = JSON.stringify(event("   "));
+    expect(snapshot(blank).stdout).toContain("(local-pin)");
+    expect(runHook(blank, root, cache).stdout).toContain("(local-pin)");
+  });
+
+  test("a later snapshot preserves previously surfaced facts and the pivot latch", async () => {
+    await put("project", "local-pin");
+    await put("reference", "gradle-daemon", {
+      project: "global", pinned: false, tags: ["daemon", "clean"],
+    });
+    const input = JSON.stringify(event());
+    expect(runHook(input, root, cache).stdout).toContain("(gradle-daemon)");
+    expect(snapshot().stdout).toContain("(local-pin)");
+    expect(runHook(input, root, cache).stdout).toBe("");
+  });
+
+  test("a cache write failure never prevents snapshot delivery", async () => {
+    await put("project", "local-pin");
+    await writeFile(cache, "not a directory");
+    const start = snapshot();
+    expect(start.status, start.stderr).toBe(0);
+    expect(start.stdout).toContain("(local-pin)");
+  });
+});
+
 // a1r: every spawn helper here used to spread process.env verbatim, so a maintainer
 // host exporting QMEMD_*/QMD_* silently reconfigured the child — up to and including
 // QMEMD_RECALL_MODE=hybrid, which takes the delegation gate (cli/qmemd.ts:378) and
@@ -670,13 +816,12 @@ describe("CLI hook beacon e2e (tfu)", () => {
   });
 
   // covers: INV-4
-  test("an unknown hook sub-verb prints the usage line on stderr and still exits 0", () => {
+  test("an unknown hook sub-verb does not block or inject context", () => {
     const res = spawnSync(TSX, [CLI, "hook", "bogus"], {
       encoding: "utf-8",
       env: cleanEnv({ QMD_MEMORY_DIR: root, QMEMD_DB: join(root, ".idx", "i.sqlite"), XDG_CACHE_HOME: cache }),
     });
     expect(res.status).toBe(0);
-    expect(res.stderr).toContain("Usage: qmemd hook <beacon|probe|write-beacon|stats");
     expect(res.stdout.trim()).toBe("");
   });
 

@@ -20,13 +20,18 @@ export interface BeaconState {
   lastBeaconAtCall: number;
   beaconedRepos: string[];
   perRepo: Record<string, RepoActivity>; // write beacon, keyed by basename(cwd)
-  /** Slugs already shown this session by the beacon or the probe — never shown twice. */
+  /** Recent slugs shown by the session snapshot, beacon or probe. */
   surfacedSlugs: string[];
   probedKeys: string[];
   /** Call count of the last forced token-map build, per repo — the map cache is per repo,
    *  so one scalar would let a pivot in repo B postpone repo A's insurance rebuild. */
   mapBuiltAtCall: Record<string, number>;
 }
+
+export const freshState = (repo: string): BeaconState => ({
+  repo, callCount: 0, lastBeaconAtCall: 0, beaconedRepos: [], perRepo: {},
+  surfacedSlugs: [], probedKeys: [], mapBuiltAtCall: {},
+});
 
 /** Cap on surfacedSlugs and probedKeys: oldest entries drop out first. */
 export const SURFACED_CAP = 200;
@@ -310,6 +315,11 @@ export function runBeacon(stdinText: string, deps: BeaconDeps): string | null {
       state = { ...state, beaconedRepos: prev?.beaconedRepos ?? [] };
     } else {
       pivoted = true;
+      // Keep the overview's counts honest, but never list guidance already delivered
+      // by the snapshot or another hook. Only the remaining list is marked below.
+      if (ov.repo.total <= PIVOT_LIST_MAX && state.surfacedSlugs.length > 0) {
+        ov = { ...ov, repo: { ...ov.repo, facts: ov.repo.facts.filter(f => !state.surfacedSlugs.includes(f.slug)) } };
+      }
       blocks.push(formatPivot(ov));
       // A fact the agent has just seen listed counts as surfaced (D-w3-6): the overlap block
       // on this and later calls excludes it.

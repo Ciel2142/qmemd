@@ -27,7 +27,7 @@ function Get-HookCommands {
 function Add-HookCommand {
     param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $Event,
           [Parameter(Mandatory)] [string] $Matcher, [Parameter(Mandatory)] [string] $Command,
-          [string] $EquivalentPattern)
+          [string[]] $PreviousCommands)
     if (-not (Get-Member -InputObject $Settings -Name 'hooks' -MemberType Properties)) {
         $Settings | Add-Member -NotePropertyName 'hooks' -NotePropertyValue ([pscustomobject]@{})
     }
@@ -35,12 +35,19 @@ function Add-HookCommand {
     if (-not (Get-Member -InputObject $hooks -Name $Event -MemberType Properties)) {
         $hooks | Add-Member -NotePropertyName $Event -NotePropertyValue @()
     }
+    # Migrate only commands emitted by these installers; retain unrelated hooks
+    # in shared groups and collapse old/new duplicates to one canonical hook.
+    if ($PreviousCommands) {
+        $ownedCommands = @($Command) + $PreviousCommands
+        $hooks.$Event = @(
+            foreach ($group in @($hooks.$Event)) {
+                $group.hooks = @($group.hooks | Where-Object { $ownedCommands -cnotcontains $_.command })
+                if ($group.hooks.Count -gt 0) { $group }
+            }
+        )
+    }
     $existing = Get-HookCommands -Settings $Settings -Event $Event
     if ($existing -contains $Command) { return $Settings }
-    # Treat a cross-installer equivalent (e.g. the Linux installer's
-    # 'qmemd recall --session --project "..."') as already-present, so a shared
-    # config dir never gets the same hook double-wired.
-    if ($EquivalentPattern -and (@($existing | Where-Object { $_ -match $EquivalentPattern }).Count -gt 0)) { return $Settings }
     $newGroup = [pscustomobject]@{
         matcher = $Matcher
         hooks   = @([pscustomobject]@{ type = 'command'; command = $Command })
@@ -58,7 +65,11 @@ function Install-ClaudeIntegration {
     $claudeMdPath    = Join-Path $ConfigDir 'CLAUDE.md'
     $ruleFile        = Join-Path $RepoRoot (Join-Path 'claude' 'qmemd.md')
     $importLine      = "@$ruleFile"
-    $sessionCmd      = 'qmemd recall --session'
+    $sessionCmd      = 'qmemd hook session'
+    $legacySessionCommands = @(
+        'qmemd recall --session',
+        'qmemd recall --session --project "$(basename "$PWD")"'
+    )
     $beaconCmd       = 'qmemd hook beacon'
     $writeBeaconCmd  = 'qmemd hook write-beacon'
 
@@ -73,7 +84,7 @@ function Install-ClaudeIntegration {
     }
 
     if ($DisableMemory) { $settings = Set-JsonProperty -Object $settings -Name 'autoMemoryEnabled' -Value $false }
-    $settings = Add-HookCommand -Settings $settings -Event 'SessionStart' -Matcher '*'    -Command $sessionCmd -EquivalentPattern '^qmemd recall --session(\s|$)'
+    $settings = Add-HookCommand -Settings $settings -Event 'SessionStart' -Matcher '*'    -Command $sessionCmd -PreviousCommands $legacySessionCommands
     $settings = Add-HookCommand -Settings $settings -Event 'PreToolUse'   -Matcher 'Bash' -Command $beaconCmd
     if ($WriteBeacon) {
         $settings = Add-HookCommand -Settings $settings -Event 'Stop' -Matcher '*' -Command $writeBeaconCmd
