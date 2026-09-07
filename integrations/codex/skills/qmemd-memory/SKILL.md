@@ -1,16 +1,16 @@
 ---
 name: qmemd-memory
-description: Store and recall durable knowledge with qmemd memory (remember/recall/forget). Use when learning a durable user preference, a non-obvious gotcha, a reference worth keeping, or when starting a task that touches a system/tool/repo you may have notes on.
+description: Use when learning a durable preference, correction, gotcha, or reference, first touching a repo/system/tool, diagnosing tooling errors, implementing a named mechanism, or revisiting past context.
 license: MIT
-compatibility: Requires the qmemd CLI or MCP server. qmemd is unversioned pre-1.0 (no CHANGELOG) — feature availability tracks the checkout's git log, not a version floor.
+compatibility: Requires the qmemd CLI or MCP server.
 allowed-tools: Bash(qmemd:*), mcp__qmemd__remember, mcp__qmemd__recall, mcp__qmemd__forget, mcp__qmemd__get, mcp__qmemd__list
 ---
 
 # qmemd Memory
 
-Durable, searchable knowledge store. Plain-markdown facts, one per file, under
-`memory/{user,feedback,project,reference}/`. This is the **knowledge lane** — distinct
-from br / beads_rust (the work/issue lane). Never duplicate a fact across both.
+Durable facts live in `memory/{user,feedback,project,reference}/`. Use qmemd for
+knowledge that outlasts the current task; use br / beads_rust for work state.
+Keep each item in one lane.
 
 ## When to remember
 - A durable user preference or identity fact → `--type user`
@@ -19,23 +19,21 @@ from br / beads_rust (the work/issue lane). Never duplicate a fact across both.
 - A reference pointer or discovery (URL, dashboard, gotcha) → `--type reference`
 
 ## When to recall
-Don't assume the session-start snapshot already handed you the relevant facts — it is **partial** (see "The snapshot is partial" below). Pull explicitly at these concrete moments:
-- **Before diagnosing any build / env / tooling error** — recall first; the cause and fix may already be documented (`recall "<topic>"`).
-- **On first touch of a repo / system / tool this session** — when you first work in it, *including a mid-session pivot to a sub-issue*. The trigger is the first touch, not "session start".
-- **When a user instruction names a mechanism you're about to implement** — recall the mechanism before designing it.
-- **When the user references past context** → `recall "<topic>"`.
+Recall explicitly at these triggers; the session snapshot is not a substitute:
+- **Before diagnosing a build/env/tooling error** — the cause and fix may be stored.
+- **On first touch of a repo/system/tool this session**, including mid-session pivots.
+- **When the user names a mechanism to implement** — recall it before designing.
+- **When the user references past context.**
 
 ### The snapshot is partial — pull for the rest
-If the SessionStart hook (`qmemd hook session`) is configured, it injects a budget-limited snapshot from the host's JSON stdin. Otherwise run `qmemd recall --session` yourself at task start: this on-demand snapshot never reads or waits for stdin and never updates hook session state. Shown `user`/`feedback` facts contain their whole bodies; shown project/reference facts are summaries, retrievable in full with `qmemd show <slug>`. Every lane can omit facts, including pins: an oversized fact is skipped rather than cut into an instruction fragment. Omission counts include pinned facts. Pinning makes project/reference facts eligible **in scope** (current project + `global`), not guaranteed to appear; use `project: global` to pin globally. Unpinned project/reference facts are withheld by default (`QMEMD_SESSION_PROJECT_LIMIT=5` restores the five most recent per lane). Use `recall "<topic>"` or `qmemd list` to retrieve omitted facts. A compact partial notice, an empty snapshot, or a missing footer is not proof that no relevant facts exist.
+If the SessionStart hook is configured, it supplies the snapshot. Otherwise run `qmemd recall --session` at task start; this reads no stdin and changes no hook state. Shown user/feedback bodies are whole; project/reference entries are summaries—use `show <slug>` for the body.
+
+Every lane is budget-limited, including pins. Oversized facts are omitted, not cut into instruction fragments. Pins make facts eligible within scope, not guaranteed to appear. Unpinned project/reference facts are withheld by default (`QMEMD_SESSION_PROJECT_LIMIT=5` restores the five most recent per lane). An empty snapshot, omission notice, or missing footer is not proof that relevant facts are absent: use `recall "<topic>"` or `list`.
 
 ### Content-derived hooks: beacon and probe
-Two more hooks push memory without a `recall` call, each printing a memory block around a Bash command — read any named fact with `qmemd show <slug>`. The **beacon** (`PreToolUse`/Bash) fires a once-per-repo-per-session pivot block on the first Bash call in a repo (repo + global eligible fact counts, then up to ten facts or a tag histogram), plus an overlap block whenever a command's tokens match a fact's tags/slug. Both exclude retired, foreign-project, and off-platform guidance, including stale cached overlap candidates. The **probe** (`PostToolUseFailure`/Bash) fires only where the host wires that event — the Claude Code plugin today; Codex CLI ships no probe entry — and after a failed Bash call it names facts matching the command and its first error line; the same failure probes once per session. `qmemd hook stats` reports how often each kind fires and gets acted on.
+The **beacon** (`PreToolUse`/Bash) reports eligible memory on first repo touch and matches command tokens to fact tags/slugs. The **probe** (`PostToolUseFailure`/Bash) matches failed commands and errors where that event is wired—Claude Code today, not Codex. Both exclude retired, foreign-project, and off-platform facts. Read a named fact with `qmemd show <slug>`; `qmemd hook stats` reports hook activity.
 
-With a valid host `session_id`, `hook session` records only facts actually delivered in the snapshot in the shared recent-200-slug history. Later beacon lists, overlap blocks, and probes skip retained slugs; budget- or policy-omitted facts remain eligible. Pivot counts and tag histograms still describe the full eligible corpus. Eviction or a cache failure can allow repeats; missing/invalid identity or cache failures never prevent snapshot output. Updating the CLI alone does not migrate installed hooks: update/reinstall the plugin or rerun the installer, or replace a manual SessionStart registration with `qmemd hook session` rather than adding a second one.
-
-## Routing rule vs br
-True regardless of what you're working on → qmemd memory. Only meaningful inside the
-current work (task state, decisions tied to an issue) → br.
+With valid session identity, hooks share a recent-200-slug history of delivered facts. Budget-omitted facts remain eligible; eviction or cache failure can allow repeats. Updating the CLI does not migrate hooks: update/reinstall the plugin or rerun the installer. Replace manual SessionStart registrations with `qmemd hook session` rather than adding duplicates.
 
 ## Commands
 ```bash
@@ -48,33 +46,30 @@ qmemd recall "<query>" [--lex] [--type T] [--limit N] [--min-score N]
 qmemd recall --session                        # on-demand snapshot; no stdin reads or hook-state updates
 qmemd show <slug>                             # print one fact in full (no model); alias: qmemd get <slug>
 qmemd list [--type T] [--tag t] [--project p] # browse the corpus (no model)
-qmemd stale [--limit N]                       # facts due for review + never-reviewed backlog — review queue, never removes (no model)
-qmemd reviewed <slug> [--ttl <N>d|w|m|y|never] [--review-by DATE]  # re-verified & unchanged: reset the staleness clock (updated untouched; --ttl never = durable)
 qmemd forget <slug>
 qmemd reindex                                 # re-index after hand-editing a fact file (lex; no model)
-qmemd doctor [--fix] [--json]                 # audit frontmatter integrity after a hand-edit; --fix repairs mechanical issues (writes .bak; no model)
 qmemd rescope [--known a,b] [--alias old=new]... [--json] [--apply [plan.json|-]]  # migrate global project/reference facts to their inferred project (dry run by default; no model)
 qmemd hook session                            # SessionStart envelope; consumes host JSON stdin (configured as a hook, not run by hand)
 qmemd hook probe                              # PostToolUseFailure hook envelope — reads a failed Bash command + error from stdin (wired by hooks only where the host has that event — the Claude Code plugin today; not run by hand)
 qmemd hook stats [--since <N>h|<N>d|<N>w] [--json]  # beacon/overlap/probe fired|matched|used|acted counts from the event log, default 7d (no model)
 ```
-Prefer the MCP tools (`remember`/`recall`/`forget`/`reviewed`/`get`/`list`) when the qmemd MCP server is running; the CLI commands above work identically otherwise (the MCP `get` tool ↔ the CLI `show` verb, which also accepts `get` as an alias).
+Prefer available qmemd MCP tools; use the CLI otherwise. MCP `get` corresponds to CLI `show` (alias `get`).
+
+Maintenance on request: `qmemd doctor` / `qmemd stale` (Claude: `/qmemd:doctor` / `/qmemd:stale`).
 
 ## Usage conventions
-Discipline for *how* to call these, adapted from gbrain's filing rules.
-
-- **Save raw before you extract.** When you `remember` in a loop over fetched content (web pages, emails, API dumps), write the raw text to a fact first, then derive each fact's slug + description *from the saved file* — not from your in-context memory of what you read. Re-read the file when summarizing a batch. LLM working memory drifts under batch load (gbrain measured 13/13 extracted amounts wrong from memory while the saved files were correct).
-- **Recall is a delta filter for downstream search.** Before sending a topic to a web search or another LLM, prepend what you already know and ask only for what is *new*: "Here is what I know: `<recall output>`. Find what changed since `<date>`." Stops the downstream tool re-surfacing settled facts you already hold.
-- **Notability gate — when in doubt, don't remember.** A fact earns a file only if it is durable, non-obvious, and you'd search for it again. A junk fact wastes attention and degrades recall precision; a missing fact can always be added later, a noisy corpus is hard to clean.
-- **Fill `source` for provenance.** Pass `--source` (CLI) / `source` (MCP) with where the fact came from — a URL, `"user, <date>"`, or the tool that produced it. When a new write conflicts with an existing fact, qmemd surfaces both facts' `source` (verbatim), `type`, and date so you can judge which wins — user-authored facts (`type: user`/`feedback`) outrank agent-observed ones (`project`), which outrank external pages (`reference`). qmemd never auto-resolves; it surfaces the comparison and you decide (`--replace`/`--force`/reword).
-- **Set `--ttl` on facts that age.** A rotating credential, a version pin, a DHCP-assigned IP, a "temporary" state: give it a shelf life at write time (`--ttl 90d`, or `ttl: "90d"` on the MCP tool; explicit date via `--review-by`). A fact with no `--ttl` still ages on a per-type default window (`project` 90d, `reference` 180d; `user`/`feedback` durable). `qmemd stale` is the review queue — it only *lists* what is due (recall never hides or expires anything); resolve each entry with `qmemd reviewed <slug>` when you re-checked it and it is still correct (resets the clock — `review_by` forward-set, `updated` left honest; `--ttl never` marks it permanently durable), or `--replace` when the fact changed, `--supersedes` to retire it, or `forget` to drop it.
+- **Save raw before extracting.** When remembering a batch of fetched content, save the raw text first. Derive each fact's slug and description from the saved file, re-reading it when summarizing—not from working memory.
+- **Search for the delta.** Before web search or another LLM, supply relevant recalled knowledge and ask what is new rather than rediscovering settled facts.
+- **Remember selectively.** Store facts that are durable, non-obvious, and worth retrieving again. When in doubt, don't save.
+- **Record provenance.** Supply `--source` / MCP `source` with the URL, user/date, or discovery tool. For conflicts, compare the surfaced source, type, and date: user/feedback outranks agent-observed project facts, which outrank external references. qmemd leaves resolution to you (`--replace`, `--force`, or reword).
+- **Schedule review, not expiry.** For facts that age, set `--ttl 90d` / MCP `ttl: "90d"` or `--review-by YYYY-MM-DD` / MCP `reviewBy`. Without an explicit date, per-type defaults apply: project 90d, reference 180d, user/feedback durable. Review dates do not automatically hide or delete facts.
 
 ## Notes
-- A freshly remembered fact is lex-searchable immediately; the first semantic `recall`
-  embeds it inline (seconds). `recall --lex` and the session snapshot work meanwhile.
+- New facts are lex-searchable immediately. The first hybrid recall embeds pending facts; `--lex` and the session snapshot work meanwhile.
 - `remember` warns on a near-duplicate instead of writing — use `--replace <slug>` to update.
-- Facts scope to the current repo by default (`project`/`reference` → cwd basename; `user`/`feedback` → `global`, since those are per-machine, not per-repo). A cwd at the filesystem root has no basename, so it falls back to `global` too. Pass `--project global` to scope a `project`/`reference` fact everywhere instead: project-scoped facts appear in `recall --session` only when the current project (cwd basename) matches; `global` facts always appear. `--replace` keeps the fact's stored scope rather than re-homing it to the caller's cwd. Daemon MCP (`--http`) and the REST API require `project` explicitly — no default there. **Free-text `recall "<query>"` is project-scoped too** (qmemd-due): it returns only current-project + `global` facts — pass `--cross-project` (CLI) / `cross_project:true` (MCP) to search every project (foreign hits come back labeled).
-- Memories are plain markdown — you can hand-edit a file directly. A `recall` does **not** pick up content changes on its own (it only embeds facts the index already flags as pending; it never rescans files). After a hand-edit run `qmemd reindex` (lex, no model); the next hybrid `recall` then re-embeds the changed fact. Edits made via `remember --replace` reindex automatically. If a hand-edit may have broken the frontmatter (a fence, the `type`/`name`, a stray line), run `qmemd doctor` to audit it — `parseMemory` is lenient and would silently default a malformed `type`/`name` or drop an unparseable line rather than error. `qmemd doctor --fix` repairs the mechanical issues (type-vs-folder, name-vs-filename, null bytes) in place, writing a `.bak` first and leaving the change for you to review and commit.
-- `recall` carries a truncated body preview per hit (pass `--full` / use `get` for the whole body). Use `show <slug>` / the MCP `get` tool to read one fact in full, and `list` to browse by type/tag/project without loading the model.
-- Hybrid `recall` floors hits by the reranker's relevance score (`--min-score`, MCP `minScore`; default `0.575`) — hits the reranker scores below it (≈`0.5` = neutral/irrelevant, ≈`0.7+` = relevant) are dropped. If a recall comes back emptier than expected, lower it (`--min-score 0.5`) or disable it (`--min-score 0`). The floor is **hybrid-only**: `--lex` runs no reranker, so a `--lex` recall is never score-filtered.
-- `recall` flags partial results: `N more match` / `M below the relevance floor` (CLI footer; `moreMatches`/`belowFloor`/`saturated` fields on MCP/REST). Do not read a truncated list as "no such fact" — raise `limit` or pass `minScore: 0` and re-check.
+- **Scope:** project/reference facts default to the cwd basename; user/feedback to `global`. A filesystem-root cwd falls back to `global`. Use `--project global` for cross-project knowledge; `--replace` preserves the stored scope. The HTTP daemon and REST API require an explicit project.
+- Recall searches current-project + global facts. Global facts are eligible across projects, subject to selection rules and snapshot budgets. Use `--cross-project` / MCP `cross_project:true` to widen a thin result; foreign hits are labeled.
+- **Hand edits:** run `qmemd reindex` afterward. Recall embeds indexed pending changes but does not rescan files. `remember --replace` reindexes automatically.
+- Recall returns truncated previews; use `--full`, CLI `show`, or MCP `get` for whole bodies. `list` browses without loading a model.
+- Hybrid recall applies a reranker relevance floor (`--min-score` / MCP `minScore`, default `0.575`). For unexpectedly thin results, lower it to `0.5` or disable it with `0`. Lex recall has no reranker or score floor.
+- Partial results report `N more match` / `M below the relevance floor` (MCP/REST: `moreMatches`, `belowFloor`, `saturated`). Raise `limit` or use `minScore: 0` before concluding a fact is absent.
