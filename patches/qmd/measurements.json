@@ -1,0 +1,126 @@
+{
+  "date": "2026-09-11",
+  "node": "v25.9.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "qmdBase": "facd35e01359e59d938bc9418e93fb9318addee3",
+  "nodeLlamaCpp": "3.20.0",
+  "fixture": "34 facts, 18 relevance/paraphrase queries; one process per variant",
+  "notes": "Model-loading experiment against released qmd2.8.3 and its backport, not current upstream main. Cached GGUF files; fresh indexes. RSS values are snapshots, not peak. Expansion is nondeterministic; different cache sizes are expected. No production speed guarantee.",
+  "records": [
+    {
+      "variant": "stock",
+      "phase": "embed",
+      "ms": 2270.251375,
+      "rssMb": 2476.25
+    },
+    {
+      "variant": "stock",
+      "phase": "first",
+      "latencyMs": {
+        "n": 18,
+        "p50": 464.24166700000023,
+        "p95": 4822.725582999998
+      },
+      "degraded": 0,
+      "cacheRows": 403,
+      "rssMb": 6995.5625
+    },
+    {
+      "variant": "stock",
+      "phase": "warm",
+      "latencyMs": {
+        "n": 18,
+        "p50": 16.32916699999987,
+        "p95": 376.6184170000015
+      },
+      "degraded": 0,
+      "cacheRows": 403,
+      "rssMb": 7115.125
+    },
+    {
+      "variant": "stock",
+      "phase": "noop-update",
+      "before": 403,
+      "after": 0,
+      "updated": {
+        "collections": 1,
+        "indexed": 0,
+        "updated": 0,
+        "unchanged": 34,
+        "removed": 0,
+        "skipped": 0,
+        "needsEmbedding": 0
+      }
+    },
+    {
+      "variant": "stock",
+      "phase": "after-noop-update",
+      "latencyMs": {
+        "n": 18,
+        "p50": 454.4357090000012,
+        "p95": 4613.992792000001
+      },
+      "degraded": 0,
+      "cacheRows": 403,
+      "rssMb": 7639.9375
+    },
+    {
+      "variant": "patched",
+      "phase": "embed",
+      "ms": 1339.678625,
+      "rssMb": 2039
+    },
+    {
+      "variant": "patched",
+      "phase": "first",
+      "latencyMs": {
+        "n": 18,
+        "p50": 454.4489169999997,
+        "p95": 1432.636583999999
+      },
+      "degraded": 0,
+      "cacheRows": 389,
+      "rssMb": 6574.046875
+    },
+    {
+      "variant": "patched",
+      "phase": "warm",
+      "latencyMs": {
+        "n": 18,
+        "p50": 15.487875000000713,
+        "p95": 50.441417
+      },
+      "degraded": 0,
+      "cacheRows": 389,
+      "rssMb": 6666.578125
+    },
+    {
+      "variant": "patched",
+      "phase": "noop-update",
+      "before": 389,
+      "after": 389,
+      "updated": {
+        "collections": 1,
+        "indexed": 0,
+        "updated": 0,
+        "unchanged": 34,
+        "removed": 0,
+        "skipped": 0,
+        "needsEmbedding": 0
+      }
+    },
+    {
+      "variant": "patched",
+      "phase": "after-noop-update",
+      "latencyMs": {
+        "n": 18,
+        "p50": 15.548917000000074,
+        "p95": 49.16204200000175
+      },
+      "degraded": 0,
+      "cacheRows": 389,
+      "rssMb": 6720.828125
+    }
+  ]
+}

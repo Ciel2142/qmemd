@@ -285,13 +285,15 @@ To undo an apply: `git revert <commit>` inside `$QMD_MEMORY_DIR`, then `qmemd re
 
 `recall` reports completeness (qmemd-40h): when matches exceed `--limit` or hybrid hits fall below the relevance floor, a footer notes `N more match (raise --limit)` / `M below the 0.575 relevance floor (--min-score 0 shows all)` — `N+` when the search pool saturated and the count is a lower bound. Humans see it in-band; `--json` keeps the array shape and prints the note on stderr; MCP/REST return `moreMatches`/`belowFloor`/`saturated` fields.
 
-Hybrid `recall` applies a relevance floor (`--min-score`, default `0.575`): hits the reranker scores below it are dropped. The floor is on the **reranker score** — the reranker's calibrated relevance judgement (≈`0.5` for a neutral/irrelevant hit, ≈`0.7+` for a genuinely relevant one) — *not* the displayed score, which is position-dominated (rank-1 carries a large RRF bonus regardless of relevance). Pass `--min-score 0` to disable the floor, or a higher value to tighten. The floor is **hybrid-only** — `--lex` ignores it, because the lexical path runs no reranker.
+Hybrid `recall` applies a relevance floor (`--min-score`, default `0.575`) to the **reranker score**, which is also the displayed hybrid score. A small number of near-threshold hits with distinctive query overlap can be rescued and are marked `↓below-floor` (`rescued:true` in JSON). The score is model- and runtime-dependent, not a calibrated probability; historical score bands do not carry across scoring-runtime changes. The existing floor remains pending broader calibration. Pass `--min-score 0` to disable it, or a higher value to tighten. The floor is **hybrid-only** — `--lex` ignores it, because the lexical path runs no reranker.
 
 A freshly remembered fact is lex-searchable immediately. Vector (semantic) recall embeds any not-yet-embedded facts on demand — the first hybrid `recall` after a write does the embedding inline, so there is no background daemon to run.
 
 ## MCP server
 
 `qmemd mcp` is a **stdio** MCP server by default. It exposes six tools: `remember`, `recall`, `forget`, `reviewed`, `get`, and `list`, with the same semantics as the CLI verbs (the MCP `get` tool ↔ the CLI `show` verb; `remember` takes the same `supersedes`/`platforms`/`ttl`/`reviewBy` parameters). `recall` carries a truncated body preview per hit; `get` returns one fact's full body by slug; `list` browses by type/tag/project; `reviewed` resets a fact's staleness clock (forward-sets `review_by`, accepting the same `ttl`/`reviewBy`).
+
+Both stdio and HTTP support MCP revision `2026-07-28` and legacy clients using `initialize`. Stdio opens the database only when a tool needs it and closes the store on EOF or termination. HTTP keeps one warm store, returns JSON for both protocol eras, and requires the daemon token on `/mcp`; `DELETE /mcp` remains an authenticated empty acknowledgment.
 
 Over stdio, `remember`'s `project` is optional and scopes to the current repo when omitted (`project`/`reference` → cwd basename; `user`/`feedback` → `global`); pass `project: "global"` for something true in every repo. A cwd at the filesystem root has no basename, so it falls back to `global` too. `replace` keeps the fact's stored scope rather than re-homing it. The shared HTTP daemon (below) has no cwd to fall back to, so it requires `project` explicitly.
 

@@ -106,7 +106,7 @@ export async function tryDaemonRecall(
     });
     if (!res.ok) return null;
     const json = (await res.json()) as {
-      hits?: Array<{ slug: string; type: string; description: string; score?: number; body?: string; platforms?: string[]; project?: string }>;
+      hits?: Array<{ slug: string; type: string; description: string; score?: number; body?: string; platforms?: string[]; project?: string; rescued?: boolean }>;
       degraded?: boolean; vectorsPending?: number; moreMatches?: number; belowFloor?: number; saturated?: boolean; crossProjectHidden?: number;
     };
     if (!Array.isArray(json.hits)) return null;
@@ -116,11 +116,13 @@ export async function tryDaemonRecall(
       // assertSafeSlug throws and the closed type check throws → outer catch → null.
       assertSafeSlug(h.slug);
       if (!(MEMORY_TYPES as string[]).includes(h.type)) throw new Error(`unknown type '${h.type}'`);
+      if (h.rescued !== undefined && typeof h.rescued !== "boolean") throw new Error("invalid rescued flag");
       return {
         slug: h.slug,
         type: h.type,
         description: h.description,
         score: h.score,
+        ...(h.rescued !== undefined ? { rescued: h.rescued } : {}),
         body: h.body,
         platforms: (h.platforms ?? []) as Platform[],
         project: h.project ?? "global",

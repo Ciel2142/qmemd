@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { tryDaemonRecall, daemonPort, rootHash } from "../src/client.js";
-import { memoryFilePath } from "../src/engine.js";
+import { memoryFilePath, type RecallHit } from "../src/engine.js";
+import { toHitDTO } from "../src/mcp/server.js";
 import { DAEMON_TOKEN_HEADER, readDaemonToken, readOrCreateDaemonToken } from "../src/token.js";
 
 // Warm-daemon recall delegation client (qmemd-vuk). The client is a thin HTTP mapper, so
@@ -71,6 +72,34 @@ describe("daemonPort resolution", () => {
 });
 
 describe("tryDaemonRecall: happy path", () => {
+  test("local rescued hit survives the real DTO mapper and daemon JSON roundtrip", async () => {
+    const local: RecallHit = {
+      slug: "near-miss", type: "project", description: "near miss", score: 0.55,
+      rescued: true, project: "global", platforms: [], path: memoryFilePath(ROOT, "project", "near-miss"),
+    };
+    const { port } = await startStub({
+      recall: (_body, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ hits: [toHitDTO(local)] }));
+      },
+    });
+    const out = await tryDaemonRecall(ROOT, { query: "near miss" }, { port });
+    expect(out!.hits[0]).toEqual({ ...local, body: undefined });
+  });
+
+  test.each([true, false, undefined])("preserves optional rescued provenance: %s", async (rescued) => {
+    const { port } = await startStub({
+      recall: (_body, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ hits: [{ slug: "near-miss", type: "project", description: "near miss", score: 0.55, rescued }] }));
+      },
+    });
+    const out = await tryDaemonRecall(ROOT, { query: "near miss" }, { port });
+    expect(out).not.toBeNull();
+    expect(out!.hits[0].rescued).toBe(rescued);
+    expect(out!.hits[0].score).toBe(0.55);
+  });
+
   test("delegates and maps DTO hits back to RecallHit shape with reconstructed path", async () => {
     const { port, state } = await startStub({
       recall: (_body, res) => {
@@ -253,6 +282,16 @@ describe("tryDaemonRecall: fallback to null (caller takes the local path)", () =
 });
 
 describe("tryDaemonRecall: hostile-response hardening", () => {
+  test.each(["true", "false", 1, 0, null, {}, []].map((rescued) => ({ rescued })))("rejects malformed rescued provenance: $rescued", async ({ rescued }) => {
+    const { port } = await startStub({
+      recall: (_body, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ hits: [{ slug: "near-miss", type: "project", description: "near miss", rescued }] }));
+      },
+    });
+    expect(await tryDaemonRecall(ROOT, { query: "near miss" }, { port })).toBeNull();
+  });
+
   test("traversal slug in a hit → null (never path-joined into output)", async () => {
     const { port } = await startStub({
       recall: (_b, res) => {

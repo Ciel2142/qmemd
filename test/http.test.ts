@@ -10,6 +10,7 @@ import {
 import { rootHash } from "../src/client.js";
 import { memoryRoot } from "../src/paths.js";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../src/token.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 /**
  * Raw HTTP request with full header control — node:http lets us set a spoofed `Host`
@@ -119,6 +120,30 @@ describe("HTTP server: MCP over HTTP", () => {
 });
 
 describe("HTTP server: stateless MCP transport (qmemd-pf9)", () => {
+  test("modern discovery and tool calls use the 2026 envelope on the same authenticated endpoint", async () => {
+    const modern = async (method: string, params: object = {}) => fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": method, ...("name" in params ? { "Mcp-Name": String(params.name) } : {}) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 90, method, params: { ...params, _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { name: "modern-test", version: "1" },
+        "io.modelcontextprotocol/clientCapabilities": {},
+      } } }),
+    });
+    const discovery = await modern("server/discover");
+    expect(discovery.status).toBe(200);
+    const discovered = await discovery.json() as any;
+    expect(discovered.result.resultType).toBe("complete");
+    expect(discovered.result._meta["io.modelcontextprotocol/serverInfo"].name).toBe("qmemd");
+    const listed = await modern("tools/list");
+    expect(listed.headers.get("mcp-session-id")).toBeNull();
+    expect((await listed.json() as any).result.tools.map((t: any) => t.name).sort()).toEqual(["forget", "get", "list", "recall", "remember", "reviewed"]);
+    const called = await modern("tools/call", { name: "list", arguments: {} });
+    const result = (await called.json() as any).result;
+    expect(result.resultType).toBe("complete");
+    expect(result.structuredContent.entries).toBeInstanceOf(Array);
+    expect(JSON.stringify(result)).not.toContain(memRoot);
+  });
   // qmemd's tools are independent calls on the shared store — no session continuity is needed,
   // so the transport runs stateless (sessionIdGenerator: undefined): it issues no mcp-session-id
   // and a tool call carries none. This removes the per-client transport map that previously grew
@@ -163,6 +188,40 @@ describe("HTTP server: stateless MCP transport (qmemd-pf9)", () => {
     const res = await fetch(`${baseUrl}/mcp`, { method: "DELETE", headers: { "Accept": "application/json, text/event-stream" } });
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("");
+  });
+});
+
+describe.each([false, true])("HTTP SDK client interoperability (modern=%s)", modern => {
+  test("all six tools retain DTO and validation behavior across independent requests", async () => {
+    const client = new Client({ name: "http-sdk-test", version: "1" }, {
+      versionNegotiation: { mode: modern ? { pin: "2026-07-28" } : "legacy" },
+    });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { [DAEMON_TOKEN_HEADER]: token } },
+    });
+    try {
+      await client.connect(transport);
+      expect(client.getProtocolEra()).toBe(modern ? "modern" : "legacy");
+      const remembered = await client.callTool({ name: "remember", arguments: {
+        fact: `HTTP SDK ${modern ? "modern" : "legacy"} interoperability marker`, type: "user", project: "global", force: true,
+      } });
+      expect(remembered.structuredContent?.wrote).toBe(true);
+      const slug = remembered.structuredContent?.slug as string;
+      const recalled = await client.callTool({ name: "recall", arguments: { query: "interoperability marker", lexOnly: true } });
+      expect((recalled.structuredContent?.hits as any[]).map(h => h.slug)).toContain(slug);
+      expect(recalled.structuredContent).toHaveProperty("crossProjectHidden");
+      const listed = await client.callTool({ name: "list", arguments: {} });
+      expect((listed.structuredContent?.entries as any[]).map(e => e.slug)).toContain(slug);
+      const got = await client.callTool({ name: "get", arguments: { slug } });
+      expect(got.isError).not.toBe(true);
+      const reviewed = await client.callTool({ name: "reviewed", arguments: { slug, ttl: "90d" } });
+      expect(reviewed.isError).not.toBe(true);
+      const invalid = await client.callTool({ name: "get", arguments: { slug: "../private" } });
+      expect(invalid.isError).toBe(true);
+      for (const result of [remembered, recalled, listed, got, reviewed, invalid]) expect(JSON.stringify(result)).not.toContain(memRoot);
+      const forgotten = await client.callTool({ name: "forget", arguments: { slug } });
+      expect(forgotten.structuredContent?.removed).toBe(true);
+    } finally { await client.close(); }
   });
 });
 

@@ -16,17 +16,19 @@
 // 7. No P@K without its success@k twin — P@K is structurally capped on single-relevant queries.
 
 import { execSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { readFileSync, writeFileSync } from "node:fs";
-import { recallQueryWithStatus, DEFAULT_MIN_SCORE } from "../src/engine.js";
+import { recallQueryWithStatus, DEFAULT_MIN_SCORE, rescueDelta, RECENCY_TIE_BUCKET } from "../src/engine.js";
 import { memoryEmbedModel } from "../src/store.js";
 import { seedGoldenStore, type SeededStore, type GoldenQuery } from "../test/golden/seed.js";
 import {
   scoreQuery, aggregate, medianAggregate, wilson, mcnemar,
   successCount, checkProvenance, unknownProvenanceFields, payloadStats, mdeBannerDrift,
-  bootstrapMeanCI,
-  type QueryScore, type AggregateScore,
+  bootstrapMeanCI, negativeQueryRejected, RECALL_METRIC_VERSION,
+  type QueryScore, type AggregateScore, type BaselineProvenance,
 } from "../test/golden/metrics.js";
 
 const GOLDEN = fileURLToPath(new URL("../test/golden/golden-set.json", import.meta.url));
@@ -49,9 +51,7 @@ interface Baseline {
   lex: AggregateScore;
   hybrid: AggregateScore;
   distractorFloorPrecision: number;
-  provenance?: {
-    embedModel: string;
-    qmdVersion: string;
+  provenance?: Partial<BaselineProvenance> & {
     runs: number;
     k: number;
     tolerance: number;
@@ -99,14 +99,15 @@ async function runMode(seeded: SeededStore, queries: GoldenQuery[], lexOnly: boo
   };
 }
 
-/** Fraction of distractor queries that return NOTHING above the hybrid floor (e16 task b). */
+/** Fraction of negative queries returning no hits, including no below-floor rescues.
+ *  Retain the historical baseline field name for compatibility; the predicate is stricter. */
 async function distractorFloorPrecision(seeded: SeededStore): Promise<number> {
   const distractors = seeded.golden.distractors ?? [];
   if (distractors.length === 0) return 1;
   let clean = 0;
   for (const q of distractors) {
     const res = await recallQueryWithStatus(seeded.store, seeded.root, q, { limit: K }); // hybrid; floor applied
-    if (res.hits.every((h) => (h.score ?? 0) < DEFAULT_MIN_SCORE)) clean++;
+    if (negativeQueryRejected(res.hits)) clean++;
   }
   return clean / distractors.length;
 }
@@ -151,6 +152,27 @@ function qmdVersion(): string {
   try { return JSON.parse(readFileSync(new URL("../node_modules/@tobilu/qmd/package.json", import.meta.url), "utf-8")).version as string; } catch { return "unknown"; }
 }
 
+async function evaluationProvenance(): Promise<BaselineProvenance> {
+  // qmd does not export model resolution from its public SDK. Read its installed
+  // resolver (config-only, no model loading) so env overrides and defaults agree.
+  const qmdEntry = import.meta.resolve("@tobilu/qmd");
+  const { resolveRerankModel, resolveGenerateModel } = await import(new URL("./llm.js", qmdEntry).href);
+  const qmdRequire = createRequire(qmdEntry);
+  const nativePackage = new URL("../package.json", pathToFileURL(qmdRequire.resolve("node-llama-cpp")));
+  return {
+    metricVersion: RECALL_METRIC_VERSION,
+    embedModel: memoryEmbedModel(),
+    qmdVersion: qmdVersion(),
+    rerankModel: resolveRerankModel(),
+    generateModel: resolveGenerateModel(),
+    nodeLlamaCppVersion: JSON.parse(readFileSync(nativePackage, "utf-8")).version,
+    corpusHash: createHash("sha256").update(readFileSync(GOLDEN)).digest("hex"),
+    minScore: DEFAULT_MIN_SCORE,
+    rescueDelta: rescueDelta(),
+    recencyTieBucket: RECENCY_TIE_BUCKET,
+  };
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const CHECK = argv.includes("--check");
@@ -168,6 +190,7 @@ async function main(): Promise<void> {
   // Early model-pin guard (before expensive recall runs — see methodology §3.6). checkProvenance()
   // and memoryEmbedModel()/qmdVersion() are pure config reads — no model load, so this is cheap.
   // The baseline read here is reused by the regression compare below (no second read under --check).
+  const evaluation = await evaluationProvenance();
   let checkBaseline: Baseline | null = null;
   if (CHECK) {
     try {
@@ -179,14 +202,12 @@ async function main(): Promise<void> {
       }
       throw e;
     }
-    const pin = checkProvenance(checkBaseline, memoryEmbedModel(), qmdVersion());
-    if (pin.action === "warn") console.warn(`⚠ ${pin.message}`);
-    else if (pin.action === "fail") { console.error(`✗ ${pin.message}`); process.exit(1); }
+    const pin = checkProvenance(checkBaseline, evaluation);
+    if (pin.action === "fail") { console.error(`✗ ${pin.message}`); process.exit(1); }
   }
 
   const provenance = {
-    embedModel: memoryEmbedModel(),
-    qmdVersion: qmdVersion(),
+    ...evaluation,
     runs: RUNS,
     k: K,
     tolerance: TOLERANCE,
@@ -229,7 +250,10 @@ async function main(): Promise<void> {
     // boundaries ever push the median outside its interval, sample the run whose mean is the median.
     console.log(`hybrid   P@1=${pc(hybridMedian.pAt1, hybridMedian.n)}  P@${K}=${hybridMedian.pAtK.toFixed(3)}  S@${K}=${pc(hybridMedian.successAtK, hybridMedian.n)}  R@${K}=${bc(hybridMedian.rAtK, lastHybrid!.perQueryRecall)}  MRR=${bc(hybridMedian.mrr, lastHybrid!.perQueryRr)}  (median of ${RUNS})`);
     console.log(`  * P@1, S@K: Wilson 95% CI (binomial). R@k, MRR: percentile bootstrap 95% CI (means of per-query ratios — a Wilson CI would be false precision, §3.7). P@K: report-only, no CI (structurally capped by single-relevant authoring — see S@K).`);
-    console.log(`distractor floor-precision: ${floorPrec.toFixed(3)} (${seeded.golden.distractors?.length ?? 0} distractors must stay below ${DEFAULT_MIN_SCORE})`);
+    const negativeN = seeded.golden.distractors?.length ?? 0;
+    console.log(negativeN > 0
+      ? `negative-query rejection: ${pc(floorPrec, negativeN)}; false-positive rate: ${pc(1 - floorPrec, negativeN)} (${negativeN} negatives; any delivered hit, including rescue, is a false positive)`
+      : "negative-query rejection: not measured (0 negatives)");
 
     // Paired McNemar test (lex vs hybrid @1) — replaces the bare Δ row.
     const lexHits1 = lex.perQueryHit1;
@@ -290,7 +314,7 @@ async function main(): Promise<void> {
       };
       guard("hybrid P@1", hybridMedian.pAt1, base.hybrid.pAt1);
       guard("hybrid MRR", hybridMedian.mrr, base.hybrid.mrr);
-      guard("distractor floor-precision", floorPrec, base.distractorFloorPrecision);
+      guard("negative-query rejection", floorPrec, base.distractorFloorPrecision);
       if (regressions.length > 0) {
         console.error(`\n✗ recall regression vs baseline (tolerance ${TOLERANCE}):`);
         for (const r of regressions) console.error(`   - ${r}`);

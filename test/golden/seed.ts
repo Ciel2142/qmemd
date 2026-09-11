@@ -23,8 +23,8 @@ export interface GoldenSet {
    *  the bench (hybrid) only — EXCLUDED from the lex vitest guard so a no-lex-overlap query
    *  cannot drop the committed lex floors. */
   paraphrase_queries?: GoldenQuery[];
-  /** Negative queries that must return NOTHING above the hybrid rerank floor (e16). No relevant
-   *  set — the bench asserts the floor drops every hit. */
+  /** Negative queries with no relevant facts. Recall must deliver zero hits, including
+   *  zero below-floor rescues; the bench reports rejection and false-positive rates. */
   distractors?: string[];
   min_score: number;
 }

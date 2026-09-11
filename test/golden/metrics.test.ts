@@ -2,9 +2,24 @@ import { describe, test, expect } from "vitest";
 import {
   scoreQuery, aggregate, medianAggregate, wilson, mcnemar,
   successCount, checkProvenance, unknownProvenanceFields, payloadStats, mdeBannerDrift,
-  bootstrapMeanCI,
+  bootstrapMeanCI, negativeQueryRejected,
   type QueryScore,
 } from "./metrics.js";
+
+describe("negative-query rejection", () => {
+  test("only an empty delivered result rejects a negative query", () => {
+    expect(negativeQueryRejected([])).toBe(true);
+  });
+
+  test.each([
+    [{ score: 0.55, rescued: true }],
+    [{ score: 0.55 }],
+    [{ score: 0.9 }],
+    [{}],
+  ])("any delivered hit is a false positive, including below-floor rescue: %j", (hit) => {
+    expect(negativeQueryRejected([hit])).toBe(false);
+  });
+});
 
 describe("scoreQuery", () => {
   const rel = new Set(["a", "b"]);
@@ -164,26 +179,33 @@ describe("successCount — CI guard (G2)", () => {
 });
 
 describe("checkProvenance — model-pin decision (G1/G4)", () => {
-  const E = "embed-A", Q = "2.5.3";
-  test("no provenance → warn (pre-MF-5 baseline, back-compat per spec §5.2)", () => {
-    expect(checkProvenance({}, E, Q).action).toBe("warn");
+  const current = {
+    embedModel: "embed-A", qmdVersion: "2.8.3", rerankModel: "rerank-A", generateModel: "generate-A",
+    nodeLlamaCppVersion: "3.20.0", corpusHash: "sha256:abc", metricVersion: 2,
+    minScore: 0.575, rescueDelta: 0.05, recencyTieBucket: 0.02,
+  };
+  test("missing provenance requires an explicit measured baseline refresh", () => {
+    const result = checkProvenance({}, current);
+    expect(result.action).toBe("fail");
+    expect(result.message).toContain("--update-baseline");
   });
-  test("matching embed + qmd → ok", () => {
-    expect(checkProvenance({ provenance: { embedModel: E, qmdVersion: Q } }, E, Q).action).toBe("ok");
+  test("matching models, runtime, corpus and metric version → ok", () => {
+    expect(checkProvenance({ provenance: current }, current).action).toBe("ok");
   });
-  test("embed-model mismatch → fail (exit 1)", () => {
-    const r = checkProvenance({ provenance: { embedModel: "embed-B", qmdVersion: Q } }, E, Q);
-    expect(r.action).toBe("fail");
-    expect(r.message).toMatch(/embed-model mismatch/);
+  test.each(Object.keys(current))("changed %s rejects an incompatible comparison", (field) => {
+    const result = checkProvenance({ provenance: { ...current, [field]: "different" } }, current);
+    expect(result.action).toBe("fail");
+    expect(result.message).toContain(field);
+    expect(result.message).toContain("--update-baseline");
   });
-  test("qmd-version mismatch → fail — the reranker-swap branch G4 added", () => {
-    const r = checkProvenance({ provenance: { embedModel: E, qmdVersion: "2.5.2" } }, E, Q);
-    expect(r.action).toBe("fail");
-    expect(r.message).toMatch(/qmd-version mismatch/);
+  test.each(Object.keys(current))("missing %s rejects historical or incomplete provenance", (field) => {
+    const old: Record<string, unknown> = { ...current };
+    delete old[field];
+    expect(checkProvenance({ provenance: old }, current).action).toBe("fail");
   });
-  test("embed mismatch takes precedence over a simultaneous qmd mismatch", () => {
-    const r = checkProvenance({ provenance: { embedModel: "x", qmdVersion: "y" } }, E, Q);
-    expect(r.message).toMatch(/embed-model/);
+  test("unknown provenance cannot match another unknown sentinel", () => {
+    const unknown = { ...current, nodeLlamaCppVersion: "unknown" };
+    expect(checkProvenance({ provenance: unknown }, unknown).action).toBe("fail");
   });
 });
 

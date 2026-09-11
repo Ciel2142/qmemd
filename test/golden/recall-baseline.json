@@ -20,15 +20,23 @@
   },
   "distractorFloorPrecision": 1,
   "provenance": {
+    "metricVersion": 2,
     "embedModel": "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf",
     "qmdVersion": "2.8.3",
+    "rerankModel": "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf",
+    "generateModel": "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf",
+    "nodeLlamaCppVersion": "3.20.0",
+    "corpusHash": "2ebd39ce3c278f93b02c7eb7463e6c61a29a5fc52d7943916df75b5e88fd377f",
+    "minScore": 0.575,
+    "rescueDelta": 0.05,
+    "recencyTieBucket": 0.02,
     "runs": 5,
     "k": 5,
     "tolerance": 0.07,
-    "node": "v26.7.0",
-    "platform": "linux",
-    "arch": "x64",
-    "gitSha": "c586752",
-    "date": "2026-08-17T07:31:27.780Z"
+    "node": "v25.9.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "gitSha": "e3dfc11",
+    "date": "2026-09-11T19:15:42.109Z"
   }
 }

@@ -1,0 +1,593 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 24810ec..6b50c6b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,18 @@
+ 
+ ## [Unreleased]
+ 
++### Fixed
++
++- Embedding and legacy embedding checks now tokenize with the store's selected
++  embedding model, avoiding an unrelated global model load in SDK applications.
++- Reranking reports unavailable inference contexts as an error instead of
++  caching neutral fallback scores. Versioned score-cache keys also exclude old
++  fallback, double-sigmoid, and intent-insensitive entries.
++- SDK searches accept `sourceLimit` (default 20) to widen each lexical/vector
++  retrieval independently from the fused `candidateLimit` used for reranking.
++- SDK `update()` preserves expansion and rerank caches, including on no-op
++  updates; changed chunk text naturally receives a new rerank cache key.
++
+ ## [2.8.3] - 2026-08-16
+ 
+ ### Security
+diff --git a/README.md b/README.md
+index 2c697f3..d72e73a 100644
+--- a/README.md
++++ b/README.md
+@@ -292,8 +292,24 @@ const results3 = await store.search({
+ 
+ // Skip reranking for faster results
+ const fast = await store.search({ query: "auth", rerank: false })
++
++// Widen retrieval as well as reranking for a larger candidate pool
++const broad = await store.search({
++  query: "authentication",
++  sourceLimit: 100,
++  candidateLimit: 100,
++  limit: 50,
++})
+ ```
+ 
++`sourceLimit` bounds the documents requested from each lexical or vector query
++(default 20); structured searches apply it per query and collection.
++`candidateLimit` bounds the fused candidate pool sent to reranking (default 40),
++and `limit` bounds the returned results. Increasing `candidateLimit` alone does
++not increase source retrieval. Vector chunk deduplication, collection filtering,
++and sqlite-vec's 4096-match cap can underfill a source, so a short result array
++does not prove that the corpus is exhausted.
++
+ For direct backend access:
+ 
+ ```typescript
+diff --git a/src/cli/qmd.ts b/src/cli/qmd.ts
+index b287936..deabd3c 100644
+--- a/src/cli/qmd.ts
++++ b/src/cli/qmd.ts
+@@ -86,7 +86,7 @@ import {
+   type ReindexResult,
+   type ChunkStrategy,
+ } from "../store.js";
+-import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive } from "../llm.js";
++import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, withLLMSessionForLlm, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive } from "../llm.js";
+ import {
+   formatSearchResults,
+   formatDocuments,
+@@ -3957,10 +3957,11 @@ async function checkEmbeddingVectorSamples(db: Database, model: string, fingerpr
+   const threshold = 0.0001;
+   const mismatches: string[] = [];
+ 
+-  await withLLMSession(async (session) => {
++  const llm = getStore().llm ?? getDefaultLlamaCpp();
++  await withLLMSessionForLlm(llm, async (session) => {
+     for (const sample of samples) {
+       const hashSeq = `${sample.hash}_${sample.seq}`;
+-      const chunks = await chunkDocumentByTokens(sample.body, undefined, undefined, undefined, sample.path, undefined, session.signal);
++      const chunks = await chunkDocumentByTokens(sample.body, undefined, undefined, undefined, sample.path, undefined, session.signal, llm);
+       const chunk = chunks[sample.seq];
+       if (!chunk) {
+         mismatches.push(`${shortHashSeq(hashSeq)}: chunk no longer exists`);
+diff --git a/src/index.ts b/src/index.ts
+index f5ba4a8..d9e9194 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -165,6 +165,13 @@ export interface SearchOptions {
+   limit?: number;
+   /** Max candidates to rerank (default: 40) */
+   candidateLimit?: number;
++  /**
++   * Max documents fetched per source query (default: 20; positive integer).
++   * Independent of candidateLimit, which bounds reranking after fusion.
++   * Vector chunk deduplication and backend caps can underfill a source, so
++   * fewer results than requested do not establish corpus exhaustion.
++   */
++  sourceLimit?: number;
+   /** Minimum score threshold */
+   minScore?: number;
+   /** Include explain traces */
+@@ -415,6 +422,7 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+           explain: opts.explain,
+           intent: opts.intent,
+           candidateLimit: opts.candidateLimit,
++          sourceLimit: opts.sourceLimit,
+           skipRerank,
+           chunkStrategy: opts.chunkStrategy,
+         });
+@@ -428,6 +436,7 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+         explain: opts.explain,
+         intent: opts.intent,
+         candidateLimit: opts.candidateLimit,
++        sourceLimit: opts.sourceLimit,
+         skipRerank,
+         chunkStrategy: opts.chunkStrategy,
+       });
+@@ -501,7 +510,9 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+         ? collections.filter(c => updateOpts.collections!.includes(c.name))
+         : collections;
+ 
+-      internal.clearCache();
++      // Expansion is keyed by query/model; reranking by query/model/chunk text.
++      // Corpus updates do not invalidate these inputs. Changed chunks miss
++      // naturally, and hybridQuery separately evicts unusable expansions.
+ 
+       let totalIndexed = 0, totalUpdated = 0, totalUnchanged = 0, totalRemoved = 0, totalSkipped = 0;
+ 
+diff --git a/src/llm.ts b/src/llm.ts
+index 9858640..5aea378 100644
+--- a/src/llm.ts
++++ b/src/llm.ts
+@@ -1713,10 +1713,7 @@ export class LlamaCpp implements LLM {
+ 
+     const contexts = await this.ensureRerankContexts();
+     if (contexts.length === 0) {
+-      return {
+-        results: documents.map((d) => ({ ...d, score: 0.5, index: 0 })),
+-        model: "fallback",
+-      };
++      throw new Error("Reranking unavailable: no inference contexts could be allocated");
+     }
+     const model = await this.ensureRerankModel();
+ 
+diff --git a/src/store.ts b/src/store.ts
+index 70f0196..fae6ae9 100644
+--- a/src/store.ts
++++ b/src/store.ts
+@@ -2089,6 +2089,7 @@ export async function generateEmbeddings(
+           doc.path,
+           options?.chunkStrategy,
+           session.signal,
++          llm,
+         );
+ 
+         for (let seq = 0; seq < chunks.length; seq++) {
+@@ -2587,7 +2588,7 @@ export async function maybeAdoptLegacyEmbeddingFingerprint(store: Store, model:
+   const llm = getLlm(store);
+ 
+   return await withLLMSessionForLlm(llm, async (session) => {
+-    const chunks = await chunkDocumentByTokens(sample.body, undefined, undefined, undefined, sample.path, undefined, session.signal);
++    const chunks = await chunkDocumentByTokens(sample.body, undefined, undefined, undefined, sample.path, undefined, session.signal, llm);
+     const chunk = chunks[sample.seq];
+     if (!chunk) {
+       return { checked: true, adopted: 0, reason: `sample chunk ${expectedHashSeq} no longer exists` };
+@@ -3203,6 +3204,8 @@ function stripUnpairedSurrogates(text: string): string {
+  *
+  * When filepath and chunkStrategy are provided, uses AST-aware break points
+  * for supported code files.
++ * Pass the embedding model's tokenizer when using a per-store LLM. Standalone
++ * callers continue to use the global default.
+  */
+ export async function chunkDocumentByTokens(
+   content: string,
+@@ -3211,9 +3214,10 @@ export async function chunkDocumentByTokens(
+   windowTokens: number = CHUNK_WINDOW_TOKENS,
+   filepath?: string,
+   chunkStrategy: ChunkStrategy = "regex",
+-  signal?: AbortSignal
++  signal?: AbortSignal,
++  tokenizer?: Pick<LlamaCpp, "tokenize" | "detokenize">
+ ): Promise<{ text: string; pos: number; tokens: number }[]> {
+-  const llm = getDefaultLlamaCpp();
++  const llm = tokenizer ?? getDefaultLlamaCpp();
+ 
+   // Use moderate chars/token estimate (prose ~4, code ~2, mixed ~3)
+   // If chunks exceed limit, they'll be re-split with actual ratio
+@@ -4540,9 +4544,10 @@ export async function rerank(query: string, documents: { file: string; text: str
+   // File path is excluded from the new cache key because the reranker score
+   // depends on the chunk content, not where it came from.
+   for (const doc of documents) {
+-    const cacheKey = getCacheKey("rerank", { query: rerankQuery, model: cacheModel, chunk: doc.text });
+-    const legacyCacheKey = getCacheKey("rerank", { query, file: doc.file, model: cacheModel, chunk: doc.text });
+-    const cached = getCachedResult(db, cacheKey) ?? getCachedResult(db, legacyCacheKey);
++    // Old entries may contain resource-failure fallback scores, double-sigmoid
++    // scores, or file-keyed scores that ignored intent. Never migrate them.
++    const cacheKey = getCacheKey("rerank:v2", { query: rerankQuery, model: cacheModel, chunk: doc.text });
++    const cached = getCachedResult(db, cacheKey);
+     if (cached !== null) {
+       cachedResults.set(doc.text, parseFloat(cached));
+     } else {
+@@ -4554,12 +4559,15 @@ export async function rerank(query: string, documents: { file: string; text: str
+   if (uncachedDocsByChunk.size > 0) {
+     const uncachedDocs = [...uncachedDocsByChunk.values()];
+     const rerankResult = await llm.rerank(rerankQuery, uncachedDocs, { model: cacheModel });
++    if (rerankResult.model === "fallback") {
++      throw new Error("Reranking unavailable: model returned fallback scores");
++    }
+ 
+     // Cache results by chunk text so identical chunks across files are scored once.
+     const textByFile = new Map(uncachedDocs.map(d => [d.file, d.text]));
+     for (const result of rerankResult.results) {
+       const chunk = textByFile.get(result.file) || "";
+-      const cacheKey = getCacheKey("rerank", { query: rerankQuery, model: cacheModel, chunk });
++      const cacheKey = getCacheKey("rerank:v2", { query: rerankQuery, model: cacheModel, chunk });
+       setCachedResult(db, cacheKey, result.score.toString());
+       cachedResults.set(chunk, result.score);
+     }
+@@ -5386,6 +5394,7 @@ export interface HybridQueryOptions {
+   limit?: number;           // default 10
+   minScore?: number;        // default 0
+   candidateLimit?: number;  // default RERANK_CANDIDATE_LIMIT
++  sourceLimit?: number;     // max documents per source query (default 20)
+   explain?: boolean;        // include backend/RRF/rerank score traces
+   intent?: string;          // domain intent hint for disambiguation
+   skipRerank?: boolean;     // skip LLM reranking, use only RRF scores
+@@ -5448,6 +5457,7 @@ export async function hybridQuery(
+   const limit = options?.limit ?? 10;
+   const minScore = options?.minScore ?? 0;
+   const candidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
++  const sourceLimit = validatePositiveIntegerOption("sourceLimit", options?.sourceLimit, 20);
+   const collection = options?.collection;
+   const explain = options?.explain ?? false;
+   const intent = options?.intent;
+@@ -5466,9 +5476,11 @@ export async function hybridQuery(
+   // match may not be what the caller wants (e.g. "performance" with intent
+   // "web page load times" should NOT shortcut to a sports-performance doc).
+   // Pass collection directly into FTS query (filter at SQL level, not post-hoc)
+-  const initialFts = store.searchFTS(query, 20, collection);
+-  const topScore = initialFts[0]?.score ?? 0;
+-  const secondScore = initialFts[1]?.score ?? 0;
++  // Even a one-document source needs a runner-up to assess the score gap.
++  const ftsProbe = store.searchFTS(query, Math.max(2, sourceLimit), collection);
++  const initialFts = ftsProbe.slice(0, sourceLimit);
++  const topScore = ftsProbe[0]?.score ?? 0;
++  const secondScore = ftsProbe[1]?.score ?? 0;
+   const hasStrongSignal = !intent && initialFts.length > 0
+     && topScore >= STRONG_SIGNAL_MIN_SCORE
+     && (topScore - secondScore) >= STRONG_SIGNAL_MIN_GAP;
+@@ -5503,7 +5515,7 @@ export async function hybridQuery(
+   // 3a: Run FTS for all lex expansions right away (no LLM needed)
+   for (const q of expanded) {
+     if (q.type === 'lex') {
+-      const ftsResults = store.searchFTS(q.query, 20, collection);
++      const ftsResults = store.searchFTS(q.query, sourceLimit, collection);
+       if (ftsResults.length > 0) {
+         for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
+         rankedLists.push(ftsResults.map(r => ({
+@@ -5541,7 +5553,7 @@ export async function hybridQuery(
+       if (!embedding) continue;
+ 
+       const vecResults = await store.searchVec(
+-        vecQueries[i]!.text, embedModel, 20, collection,
++        vecQueries[i]!.text, embedModel, sourceLimit, collection,
+         undefined, embedding
+       );
+       if (vecResults.length > 0) {
+@@ -5825,6 +5837,7 @@ export interface StructuredSearchOptions {
+   limit?: number;           // default 10
+   minScore?: number;        // default 0
+   candidateLimit?: number;  // default RERANK_CANDIDATE_LIMIT
++  sourceLimit?: number;     // max documents per source query/collection (default 20)
+   explain?: boolean;        // include backend/RRF/rerank score traces
+   /** Domain intent hint for disambiguation — steers reranking and chunk selection */
+   intent?: string;
+@@ -5860,6 +5873,7 @@ export async function structuredSearch(
+   const limit = options?.limit ?? 10;
+   const minScore = options?.minScore ?? 0;
+   const candidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
++  const sourceLimit = validatePositiveIntegerOption("sourceLimit", options?.sourceLimit, 20);
+   const explain = options?.explain ?? false;
+   const intent = options?.intent;
+   const skipRerank = options?.skipRerank ?? false;
+@@ -5902,7 +5916,7 @@ export async function structuredSearch(
+   for (const search of searches) {
+     if (search.type === 'lex') {
+       for (const coll of collectionList) {
+-        const ftsResults = store.searchFTS(search.query, 20, coll);
++        const ftsResults = store.searchFTS(search.query, sourceLimit, coll);
+         if (ftsResults.length > 0) {
+           for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
+           rankedLists.push(ftsResults.map(r => ({
+@@ -5940,7 +5954,7 @@ export async function structuredSearch(
+ 
+         for (const coll of collectionList) {
+           const vecResults = await store.searchVec(
+-            vecSearches[i]!.query, embedModel, 20, coll,
++            vecSearches[i]!.query, embedModel, sourceLimit, coll,
+             undefined, embedding
+           );
+           if (vecResults.length > 0) {
+diff --git a/test/sdk-regressions.test.ts b/test/sdk-regressions.test.ts
+new file mode 100644
+index 0000000..b94edb8
+--- /dev/null
++++ b/test/sdk-regressions.test.ts
+@@ -0,0 +1,193 @@
++import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
++import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
++import { join } from "node:path";
++import { tmpdir } from "node:os";
++import { createStore, type QMDStore } from "../src/index.js";
++import { setDefaultLlamaCpp } from "../src/llm.js";
++import {
++  getCacheKey, hashContent, insertContent, insertDocument, insertEmbedding,
++  setCachedResult,
++} from "../src/store.js";
++
++// Keep indexing, retrieval, fusion, and cache reads/writes real. Only inference
++// and tokenization are replaced, so these tests need no downloaded models.
++describe("SDK model isolation, cache safety, and retrieval limits", () => {
++  let root: string;
++  let docs: string;
++  let store: QMDStore;
++
++  beforeEach(async () => {
++    root = await mkdtemp(join(tmpdir(), "qmd-sdk-regressions-"));
++    docs = join(root, "docs");
++    await mkdir(docs);
++    store = await createStore({
++      dbPath: join(root, "index.sqlite"),
++      config: { collections: { docs: { path: docs, pattern: "**/*.md" } } },
++    });
++  });
++
++  afterEach(async () => {
++    vi.restoreAllMocks();
++    setDefaultLlamaCpp(null);
++    await store.close();
++    await rm(root, { recursive: true, force: true });
++  });
++
++  async function addDocument(path: string, body: string) {
++    const hash = await hashContent(body);
++    const now = new Date().toISOString();
++    insertContent(store.internal.db, hash, body, now);
++    insertDocument(store.internal.db, "docs", path, path, hash, now, now);
++    return hash;
++  }
++
++  function fakeExpansion() {
++    return vi.spyOn(store.internal.llm!, "expandQuery").mockResolvedValue([
++      { type: "lex", text: "needle" },
++    ]);
++  }
++
++  test("embedding uses its store tokenizer even when the global model is unavailable", async () => {
++    setDefaultLlamaCpp({
++      async tokenize() { throw new Error("unrelated global model must not load"); },
++    } as any);
++    const llm = store.internal.llm!;
++    vi.spyOn(llm, "tokenize").mockImplementation(async text => Array.from(text, c => c.charCodeAt(0)) as any);
++    vi.spyOn(llm, "detokenize").mockImplementation(async tokens => String.fromCharCode(...tokens));
++    vi.spyOn(llm, "embed").mockResolvedValue({ embedding: [1, 0, 0], model: llm.embedModelName });
++    vi.spyOn(llm, "embedBatch").mockImplementation(async texts => texts.map(() => ({
++      embedding: [1, 0, 0], model: llm.embedModelName,
++    })));
++    await addDocument("long.md", "needle ".repeat(300));
++
++    const result = await store.embed();
++    expect(result.errors).toBe(0);
++    expect(result.chunksEmbedded).toBeGreaterThan(1);
++    expect(store.internal.getHashesNeedingEmbedding()).toBe(0);
++    expect(await store.searchVector("needle")).toHaveLength(1);
++  });
++
++  test("unavailable rerank contexts raise an error before any score is cached", async () => {
++    const llm = store.internal.llm!;
++    // Exercise the real LlamaCpp.rerank resource-failure branch without loading a model.
++    (llm as any)._ciMode = false;
++    vi.spyOn(llm as any, "ensureRerankContexts").mockResolvedValue([]);
++    await expect(llm.rerank("needle", [{ file: "a.md", text: "needle" }]))
++      .rejects.toThrow(/rerank.*unavailable/i);
++    await expect(store.internal.rerank("needle", [{ file: "a.md", text: "needle" }]))
++      .rejects.toThrow(/rerank.*unavailable/i);
++    expect(store.internal.db.prepare("SELECT COUNT(*) AS count FROM llm_cache").get()).toEqual({ count: 0 });
++  });
++
++  test("fallback responses cannot enter the score cache", async () => {
++    vi.spyOn(store.internal.llm!, "rerank").mockResolvedValue({
++      model: "fallback", results: [{ file: "a.md", score: 0.5, index: 0 }],
++    });
++    await expect(store.internal.rerank("needle", [{ file: "a.md", text: "needle" }]))
++      .rejects.toThrow(/rerank.*unavailable/i);
++    expect(store.internal.db.prepare("SELECT COUNT(*) AS count FROM llm_cache").get()).toEqual({ count: 0 });
++  });
++
++  test.each([undefined, "database tuning"])("old scores are ignored with intent %s and new scores stay warm", async intent => {
++    const llm = store.internal.llm!;
++    const query = "needle";
++    const doc = { file: "a.md", text: "needle document" };
++    setCachedResult(store.internal.db, getCacheKey("rerank", {
++      query: intent ? `${intent}\n\n${query}` : query, model: llm.rerankModelName, chunk: doc.text,
++    }), "0.5");
++    setCachedResult(store.internal.db, getCacheKey("rerank", {
++      query, file: doc.file, model: llm.rerankModelName, chunk: doc.text,
++    }), "0.99");
++    const inference = vi.spyOn(llm, "rerank").mockResolvedValue({
++      model: llm.rerankModelName, results: [{ file: doc.file, score: 0.8, index: 0 }],
++    });
++    expect(await store.internal.rerank(query, [doc], undefined, intent)).toEqual([{ file: doc.file, score: 0.8 }]);
++    inference.mockRejectedValue(new Error("warm cache must avoid inference"));
++    expect(await store.internal.rerank(query, [{ ...doc, file: "renamed.md" }], undefined, intent))
++      .toEqual([{ file: "renamed.md", score: 0.8 }]);
++  });
++
++  test("no-op SDK update preserves expansion and rerank caches", async () => {
++    await writeFile(join(docs, "a.md"), "needle document");
++    await store.update();
++    const expansion = fakeExpansion();
++    const llm = store.internal.llm!;
++    const ranking = vi.spyOn(llm, "rerank").mockResolvedValue({
++      model: llm.rerankModelName, results: [{ file: "a.md", score: 0.8, index: 0 }],
++    });
++    const doc = { file: "a.md", text: "needle document" };
++    const expanded = await store.expandQuery("find needle");
++    const ranked = await store.internal.rerank("needle", [doc]);
++    expect((await store.update()).unchanged).toBe(1);
++    expansion.mockRejectedValue(new Error("expansion cache lost"));
++    ranking.mockRejectedValue(new Error("rerank cache lost"));
++    expect(await store.expandQuery("find needle")).toEqual(expanded);
++    expect(await store.internal.rerank("needle", [doc])).toEqual(ranked);
++  });
++
++  test("changed corpus preserves reusable cache entries and scores changed text afresh", async () => {
++    await writeFile(join(docs, "a.md"), "needle original");
++    await store.update();
++    const expansion = fakeExpansion();
++    const llm = store.internal.llm!;
++    vi.spyOn(llm, "rerank").mockImplementation(async (_query, documents) => ({
++      model: llm.rerankModelName,
++      results: documents.map((doc, index) => ({ file: doc.file, index, score: doc.text.includes("changed") ? 0.9 : 0.8 })),
++    }));
++    await store.expandQuery("find needle");
++    await store.internal.rerank("needle", [{ file: "a.md", text: "needle original" }]);
++    await writeFile(join(docs, "a.md"), "needle changed");
++    expect((await store.update()).updated).toBe(1);
++    expansion.mockRejectedValue(new Error("corpus-independent expansion cache lost"));
++    expect(await store.expandQuery("find needle")).toEqual([{ type: "lex", query: "needle" }]);
++    const [doc] = await store.searchLex("needle");
++    expect(doc!.body).toBe("needle changed");
++    expect(await store.internal.rerank("needle", [{ file: doc!.filepath, text: doc!.body! }]))
++      .toEqual([{ file: doc!.filepath, score: 0.9 }]);
++  });
++
++  test.each(["original", "expansion", "structured"])("sourceLimit retrieves more than 20 lexical documents via %s", async mode => {
++    for (let i = 0; i < 35; i++) await addDocument(`${i}.md`, `needle document ${i}`);
++    fakeExpansion();
++    const query = mode === "structured" ? { queries: [{ type: "lex" as const, query: "needle" }] }
++      : { query: mode === "original" ? "needle" : "missingword" };
++    const options = { ...query, rerank: false, limit: 100, candidateLimit: 100 };
++    expect(await store.search(options)).toHaveLength(20);
++    expect(await store.search({ ...options, sourceLimit: 100 })).toHaveLength(35);
++    expect(await store.search({ ...options, sourceLimit: 100, candidateLimit: 7 })).toHaveLength(7);
++  });
++
++  test.each(["original", "vec", "hyde", "structured"])("sourceLimit retrieves more than 20 vector documents via %s", async mode => {
++    store.internal.ensureVecTable(3);
++    const llm = store.internal.llm!;
++    for (let i = 0; i < 35; i++) {
++      const hash = await addDocument(`${i}.md`, `document ${i}`);
++      insertEmbedding(store.internal.db, hash, 0, 0, new Float32Array([1, i / 100, 0]), llm.embedModelName, new Date().toISOString());
++    }
++    vi.spyOn(llm, "expandQuery").mockResolvedValue(mode === "vec" || mode === "hyde" ? [{ type: mode, text: "semantic needle" }] : []);
++    vi.spyOn(llm, "embedBatch").mockImplementation(async texts => texts.map(text =>
++      // Hide the original vector results for expansion cases.
++      text.includes("missingword") && mode !== "original" ? null
++        : { embedding: [1, 0, 0], model: llm.embedModelName },
++    ));
++    const query = mode === "structured" ? { queries: [{ type: "vec" as const, query: "semantic needle" }] } : { query: "missingword" };
++    expect(await store.search({ ...query, rerank: false, limit: 100, candidateLimit: 100, sourceLimit: 100 })).toHaveLength(35);
++  });
++
++  test.each([0, -1, 1.5, Infinity, NaN])("rejects invalid sourceLimit %s", async sourceLimit => {
++    await expect(store.search({ queries: [{ type: "lex", query: "needle" }], sourceLimit }))
++      .rejects.toThrow(/sourceLimit.*positive integer/);
++  });
++
++  test("sourceLimit 1 does not hide the runner-up from strong-signal detection", async () => {
++    for (let i = 0; i < 100; i++) await addDocument(`filler-${i}.md`, `unrelated background ${i}`);
++    await addDocument("first.md", "needle ".repeat(20));
++    await addDocument("second.md", "needle ".repeat(20));
++    await addDocument("expansion.md", "alternative");
++    vi.spyOn(store.internal.llm!, "expandQuery").mockResolvedValue([{ type: "lex", text: "alternative" }]);
++
++    const results = await store.search({ query: "needle", sourceLimit: 1, rerank: false });
++    expect(results).toHaveLength(2);
++    expect(results.some(result => result.file.endsWith("/expansion.md"))).toBe(true);
++  });
++});
+diff --git a/test/sdk.test.ts b/test/sdk.test.ts
+index d47b370..e2238b8 100644
+--- a/test/sdk.test.ts
++++ b/test/sdk.test.ts
+@@ -966,6 +966,7 @@ describe("embed", () => {
+   function createFakeEmbedLlm() {
+     const embedBatchCalls: string[][] = [];
+     return {
++      ...createFakeTokenizer(),
+       embedBatchCalls,
+       async embed(_text: string) {
+         return { embedding: [0.1, 0.2, 0.3], model: "fake-embed" };
+diff --git a/test/store.test.ts b/test/store.test.ts
+index 9dc6673..b3b1b2a 100644
+--- a/test/store.test.ts
++++ b/test/store.test.ts
+@@ -1192,9 +1192,9 @@ describe("Caching", () => {
+   test("rerank cache keys differ when the rerank model differs (#764)", () => {
+     const query = "same query";
+     const chunk = "same chunk";
+-    const keyA = getCacheKey("rerank", { query, model: "hf:example/rerank-a/a.gguf", chunk });
+-    const keyB = getCacheKey("rerank", { query, model: "hf:example/rerank-b/b.gguf", chunk });
+-    const keyNoModel = getCacheKey("rerank", { query, chunk });
++    const keyA = getCacheKey("rerank:v2", { query, model: "hf:example/rerank-a/a.gguf", chunk });
++    const keyB = getCacheKey("rerank:v2", { query, model: "hf:example/rerank-b/b.gguf", chunk });
++    const keyNoModel = getCacheKey("rerank:v2", { query, chunk });
+     expect(keyA).not.toBe(keyB);
+     expect(keyA).not.toBe(keyNoModel);
+     expect(keyB).not.toBe(keyNoModel);
+@@ -1249,10 +1249,10 @@ describe("Caching", () => {
+       expect(first[0]!.score).toBe(0.11);
+       expect(mockA.spy).toHaveBeenCalledTimes(1);
+ 
+-      const keyA = getCacheKey("rerank", { query, model: modelA, chunk });
+-      const keyB = getCacheKey("rerank", { query, model: modelB, chunk });
+-      const keyDefault = getCacheKey("rerank", { query, model: DEFAULT_RERANK_MODEL, chunk });
+-      const keyNoModel = getCacheKey("rerank", { query, chunk });
++      const keyA = getCacheKey("rerank:v2", { query, model: modelA, chunk });
++      const keyB = getCacheKey("rerank:v2", { query, model: modelB, chunk });
++      const keyDefault = getCacheKey("rerank:v2", { query, model: DEFAULT_RERANK_MODEL, chunk });
++      const keyNoModel = getCacheKey("rerank:v2", { query, chunk });
+ 
+       expect(store.getCachedResult(keyA)).toBe("0.11");
+       expect(store.getCachedResult(keyNoModel)).toBeNull();
+@@ -4085,6 +4085,7 @@ describe("Embedding batching", () => {
+     const embedCalls: { text: string; options?: { model?: string } }[] = [];
+     const embedBatchModelCalls: ({ model?: string } | undefined)[] = [];
+     return {
++      ...createFakeTokenizer(),
+       embedBatchCalls,
+       embedCalls,
+       embedBatchModelCalls,
+@@ -4138,6 +4139,7 @@ describe("Embedding batching", () => {
+     // A slow embedder so the short session cap trips between document batches.
+     const embedBatchCalls: string[][] = [];
+     const slowLlm = {
++      ...createFakeTokenizer(),
+       async embed() { return { embedding: [0.1, 0.2, 0.3], model: "fake-embed" }; },
+       async embedBatch(texts: string[]) {
+         embedBatchCalls.push([...texts]);
+@@ -4258,6 +4260,7 @@ describe("Embedding batching", () => {
+     const db = store.db;
+     let embedCalls = 0;
+     const fakeLlm = {
++      ...createFakeTokenizer(),
+       async embed(_text: string, _options?: { model?: string }) {
+         embedCalls++;
+         return embedCalls === 1
+@@ -4299,6 +4302,7 @@ describe("Embedding batching", () => {
+     const store = await createTestStore();
+     const db = store.db;
+     const fakeLlm = {
++      ...createFakeTokenizer(),
+       async embed(_text: string, _options?: { model?: string }) {
+         return { embedding: [0.1, 0.2, 0.3], model: "fake-embed" };
+       },
+@@ -4364,6 +4368,7 @@ describe("Embedding batching", () => {
+     // so vectors_vec is created as float[3].
+     const storeModel = "hf:store/embeddinggemma-300M.gguf";
+     const storeLlm = {
++      ...createFakeTokenizer(),
+       embedModelName: storeModel,
+       async embed(_text: string, _options?: { model?: string }) {
+         return { embedding: [0.1, 0.2, 0.3], model: storeModel };
+@@ -4378,10 +4383,8 @@ describe("Embedding batching", () => {
+     // vector against the float[3] table (the reported dim-mismatch symptom).
+     let defaultEmbedCalls = 0;
+     const defaultLlm = {
+-      // Chunking tokenizes via the global default (chunkDocumentByTokens passes
+-      // no tokenizer), so the default must provide tokenize.
+-      async tokenize(text: string) {
+-        return new Array(Math.max(1, Math.ceil(text.length / 16))).fill(1);
++      async tokenize() {
++        throw new Error("store chunking must not use the global tokenizer");
+       },
+       async embed(_text: string, _options?: { model?: string }) {
+         defaultEmbedCalls++;

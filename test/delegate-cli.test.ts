@@ -42,7 +42,7 @@ function runCli(args: string[], port: number): Promise<{ status: number | null; 
 }
 
 /** Stub daemon answering /health with the hash of THIS test's root + one canned hit. */
-async function startStub(): Promise<number> {
+async function startStub(rescued = false): Promise<number> {
   state.healthCalls = 0;
   state.recallCalls = 0;
   server = createServer(async (req, res) => {
@@ -57,7 +57,7 @@ async function startStub(): Promise<number> {
       for await (const _ of req) { /* drain */ }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        hits: [{ slug: "warm-stub-hit", type: "project", description: "answer from the warm daemon", score: 0.8, body: "stub body", platforms: [] }],
+        hits: [{ slug: "warm-stub-hit", type: "project", description: "answer from the warm daemon", score: rescued ? 0.55 : 0.8, body: "stub body", platforms: [], ...(rescued ? { rescued: true } : {}) }],
         degraded: false, vectorsPending: 0, moreMatches: 2, belowFloor: 0, saturated: false,
       }));
       return;
@@ -77,6 +77,17 @@ afterEach(async () => {
 });
 
 describe("CLI recall delegation (qmemd-vuk)", () => {
+  test("delegated rescued hits retain the below-floor warning and JSON provenance", async () => {
+    const port = await startStub(true);
+    const text = await runCli(["recall", "anything warm"], port);
+    expect(text.status).toBe(0);
+    expect(text.stdout).toContain("↓below-floor 0.55");
+    const json = await runCli(["recall", "anything warm", "--json"], port);
+    expect(json.status).toBe(0);
+    expect(JSON.parse(json.stdout)[0]).toMatchObject({ rescued: true, score: 0.55 });
+    expect(state.recallCalls).toBe(2);
+  });
+
   test("hybrid recall is served by the daemon: stub hit rendered, footer attached, store untouched", async () => {
     const port = await startStub();
     const res = await runCli(["recall", "anything warm"], port);

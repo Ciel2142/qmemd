@@ -2,6 +2,11 @@
 // functions of a ranked slug list + the relevant set, so they unit-test cheaply and are
 // shared by the vitest guard (test/golden-recall.test.ts) and the bench script
 // (scripts/recall-bench.ts).
+/** Negative queries have no relevant facts: any delivered hit is a false positive,
+ *  including rescued hits whose raw scores are intentionally below the floor. */
+export function negativeQueryRejected(hits: readonly unknown[]): boolean {
+  return hits.length === 0;
+}
 
 export interface QueryScore {
   pAt1: number;      // 1 if the top hit is relevant, else 0
@@ -125,49 +130,42 @@ export function successCount(p: number, n: number): number | null {
 export interface BaselineProvenance {
   embedModel: string;
   qmdVersion: string;
+  rerankModel: string;
+  generateModel: string;
+  nodeLlamaCppVersion: string;
+  /** SHA-256 of the complete golden file, including queries and negative fixtures. */
+  corpusHash: string;
+  metricVersion: number;
+  minScore: number;
+  rescueDelta: number;
+  recencyTieBucket: number;
 }
-export type ProvenanceAction = "ok" | "warn" | "fail";
+export const RECALL_METRIC_VERSION = 2;
+export type ProvenanceAction = "ok" | "fail";
 export interface ProvenanceCheck {
   action: ProvenanceAction;
   message?: string;
 }
 
-/** Model-pin decision for `--check` (methodology §3.6). A committed baseline is comparable only
- *  when measured with the SAME embed model AND the same `@tobilu/qmd` version — qmd ships the
- *  reranker that keys hybrid scores, so a bump can swap the reranker. A swap of either
- *  recalibrates `DEFAULT_MIN_SCORE` and compares incompatible score distributions. No provenance
- *  → `warn` (a pre-MF-5 baseline; back-compat per spec §5.2); any mismatch → `fail` (caller exits
- *  1). Pure: the current model + qmd version arrive as args, so no I/O and no model load. */
+/** Baselines must use the same models, native runtime, golden corpus/query set and
+ *  metric definitions and effective retrieval settings. Historical or incomplete
+ *  provenance requires a measured refresh. */
 export function checkProvenance(
-  baseline: { provenance?: BaselineProvenance },
-  currentEmbed: string,
-  currentQmd: string,
+  baseline: { provenance?: Partial<BaselineProvenance> },
+  current: BaselineProvenance,
 ): ProvenanceCheck {
   const p = baseline.provenance;
+  const refresh = "Run npm run bench:recall -- --update-baseline to record a fresh measured baseline; do not copy provenance into historical results.";
   if (!p) {
-    return {
-      action: "warn",
-      message:
-        "baseline predates provenance (written before MF-5). Skipping the embed/qmd model-pin check — re-run --update-baseline to capture provenance.",
-    };
+    return { action: "fail", message: `baseline is missing provenance. ${refresh}` };
   }
-  if (p.embedModel !== currentEmbed) {
-    return {
-      action: "fail",
-      message:
-        `embed-model mismatch: baseline recorded with "${p.embedModel}" but current model is "${currentEmbed}". ` +
-        "A model swap recalibrates DEFAULT_MIN_SCORE and compares incompatible score distributions (methodology §3.6). " +
-        "Re-run --update-baseline with the current model to refresh the baseline.",
-    };
-  }
-  if (p.qmdVersion !== currentQmd) {
-    return {
-      action: "fail",
-      message:
-        `qmd-version mismatch: baseline recorded with @tobilu/qmd "${p.qmdVersion}" but current is "${currentQmd}". ` +
-        "qmd ships the reranker that keys hybrid scores, so a version change can swap the reranker and recalibrate the floor (methodology §3.6). " +
-        "Re-run --update-baseline on the current qmd to refresh the baseline.",
-    };
+  for (const field of ["metricVersion", "embedModel", "qmdVersion", "rerankModel", "generateModel", "nodeLlamaCppVersion", "corpusHash", "minScore", "rescueDelta", "recencyTieBucket"] as const) {
+    if (p[field] === undefined || p[field] === "" || p[field] === "unknown" || current[field] === "unknown") {
+      return { action: "fail", message: `missing or unknown ${field} provenance. ${refresh}` };
+    }
+    if (p[field] !== current[field]) {
+      return { action: "fail", message: `${field} mismatch: baseline "${p[field]}", current "${current[field]}". ${refresh}` };
+    }
   }
   return { action: "ok" };
 }

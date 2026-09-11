@@ -1842,8 +1842,8 @@ export interface RecallHit {
   path: string;        // real filesystem path
   type: MemoryType | string;
   description: string;
-  /** Hybrid recall: the reranker's CALIBRATED relevance (~0.5 neutral, ~0.7+ relevant) —
-   *  NOT qmd's position-dominated blended score (qmemd-373); hits are ordered by it.
+  /** Hybrid recall: the raw reranker score, on a model/runtime-dependent scale —
+   *  NOT qmd's position-dominated blended score (qmemd-373); used for ranking.
    *  lexOnly recall: the BM25 score (no reranker runs). Falls back to the blended score
    *  on the hybrid path only when rerank was skipped (explain absent). */
   score?: number;
@@ -1861,12 +1861,12 @@ export interface RecallHit {
 
 /**
  * Default hybrid-recall relevance floor (rde). The floor is applied to the RERANKER
- * score (explain.rerankScore), which is the reranker's calibrated relevance judgment:
- * measured ~0.50 for irrelevant/neutral hits and ~0.70+ for genuinely relevant ones.
- * 0.575 sits just below the relevant band — tuned down from 0.6 after a corpus sweep
- * found relevant-but-secondary facts at the ~0.58 margin (e.g. an embedding-config
- * fact at 0.581), while genuine noise stays at ~0.50–0.56. NOTE: we floor on the
- * rerankScore, NOT qmd's blended `HybridQueryResult.score` — that one is position-
+ * score (explain.rerankScore). Retained at 0.575 pending broader calibration under
+ * the current scoring runtime (qp-recalibrate-default-min-score-7d8). Historical
+ * measurements used a ~0.50–0.73 band; node-llama-cpp 3.20.0 removed a redundant
+ * sigmoid for Qwen3, so that band is not a current confidence interpretation.
+ * The benchmark pins models, runtime, corpus, floor, rescue, and tie settings.
+ * We floor on rerankScore, NOT qmd's blended `HybridQueryResult.score` — that is position-
  * dominated (rank-1 gets a large RRF top-rank bonus → ~0.9 even when irrelevant), so it
  * is a rank proxy, not a confidence signal. recallQuery surfaces this same rerankScore
  * as the hit's `score` and orders by it (qmemd-373). Override per call via
@@ -1888,7 +1888,7 @@ export const RERANK_CANDIDATE_FLOOR = 40;
 /** Width of the rerank-score band treated as "effectively equal relevance" for the
  *  recency tie-break (bri). Scores are BUCKETED (rounded to this width) then compared —
  *  a transitive comparator, unlike a raw |Δ|<ε check — and the raw score is never
- *  mutated, so the minScore floor and the exposed hit.score stay calibrated. */
+ *  mutated, so the minScore floor and the exposed hit.score retain the raw scale. */
 export const RECENCY_TIE_BUCKET = 0.02;
 
 /** Static stoplist for the recall overlap boost (qp-dnx): high-frequency tokens that carry no
@@ -1955,8 +1955,8 @@ export function isRescueEligible(rawScore: number, overlap: number, effectiveMin
 }
 
 /** Below-floor rescue band width (qp-dnx): a dropped candidate within this much of the floor is
- *  rescue-eligible when it carries distinctive overlap. Default 0.05 covers measured near-misses
- *  (~0.52–0.57) while excluding the ~0.50 noise band. */
+ *  rescue-eligible when it carries distinctive overlap. The historical 0.05 default is
+ *  retained pending calibration with the current reranker/runtime, like the floor above. */
 export const DEFAULT_RESCUE_DELTA = 0.05;
 
 /** The rescue band, read at CALL time from QMEMD_RESCUE_DELTA (the embedTimeoutMs precedent) so
@@ -1984,8 +1984,7 @@ export interface RecallOptions {
   skim?: boolean;     // headline-only: omit the body entirely (CLI --skim); wins over fullBody (r0u)
   /** Hybrid-recall relevance floor: drop hits whose RERANKER score is below this.
    *  Defaults to DEFAULT_MIN_SCORE; pass 0 to disable. We floor on the reranker's
-   *  relevance (~0.5 neutral / ~0.7+ relevant), NOT the exposed blended score, which
-   *  is position-dominated and so anti-correlated with relevance at the margin (rde).
+   *  raw score (also exposed on RecallHit), not qmd's position-blended score (rde).
    *  IGNORED in lexOnly mode — the lex path runs no reranker (fast, model-free). */
   minScore?: number;
   /** Host-OS gate (default currentPlatform()): drop hits not valid on this platform.
@@ -2212,8 +2211,8 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     // Floor on the RERANKER score (explain.rerankScore), NOT the exposed .score: the latter
     // is qmd's position-blended score, dominated by an RRF top-rank bonus, so it reads ~0.9
     // for rank-1 even when irrelevant and cliffs for rank-2 even when relevant — a rank proxy,
-    // not a confidence signal. rerankScore is the reranker's calibrated relevance (~0.5
-    // neutral, ~0.7+ relevant) and DOES separate the two. So we request explain traces and
+    // not a confidence signal. rerankScore is the raw model/runtime-dependent score.
+    // Request explain traces and
     // filter rerankScore ourselves; qmd's native minScore (which filters the blended .score)
     // is deliberately NOT used (rde). `?? DEFAULT_MIN_SCORE` defaults an absent floor; an
     // explicit 0 disables it.
@@ -2263,12 +2262,12 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
       (s === undefined || s >= minRerank ? kept : dropped).push(r);
     }
     const hits = kept
-      // Expose the reranker's CALIBRATED relevance (explain.rerankScore) as the hit score —
+      // Expose the raw reranker relevance score (explain.rerankScore) as the hit score —
       // NOT qmd's blended r.score, which is position-dominated (rank-1 ≈ 0.9 even for a weak
       // match) and so an over-confident rank proxy the agent mis-reads (qmemd-373). Fall back
       // to the blended score only when rerank was skipped (explain absent).
       .flatMap(r => toHit(r.file, r.title, r.explain?.rerankScore ?? r.score) ?? [])
-      // Order by that calibrated score so the exposed scores are monotonic and the top-`limit`
+      // Order by that raw score so the exposed scores are monotonic and the top-`limit`
       // slice (below) keeps the most RELEVANT hits, not the highest RRF position — a weak
       // rank-1 can no longer sit above a strong rank-2 (qmemd-373).
       .sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
@@ -2348,13 +2347,13 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   }
 
   // Recency tie-break (bri): equal-bucket hits order by updated (falling back to created).
-  // Hybrid scores are calibrated 0..1 → bucket by RECENCY_TIE_BUCKET; lex BM25 has no
-  // calibrated scale → only EXACT ties break by recency. Runs on the gated pool so the
+  // Hybrid scores use the reranker's 0..1 scale → bucket by RECENCY_TIE_BUCKET; lex BM25 has a
+  // different scale → only EXACT ties break by recency. Runs on the gated pool so the
   // top-`limit` slice gives the last slot to the fresher of two equally-relevant facts.
   // Raw hit.score is never mutated — the sort key uses a derived bucket, not the score field.
   const recencyOf = (fm: ParsedMemory | null): string =>
     fm ? (fm.frontmatter.updated ?? fm.frontmatter.created) : "";
-  // lexFallback, like lexOnly, ranks raw BM25 (searchLex) — NOT a calibrated 0..1 rerank score.
+  // lexFallback, like lexOnly, ranks BM25 (searchLex) — NOT a raw reranker score.
   // qmd normalizes BM25 to a saturating [0..1) where strong matches compress above 0.9, so
   // bucketing it by RECENCY_TIE_BUCKET collapses genuinely different-relevance hits into ties
   // (qp-degraded-lex-hybrid-bucketing-7tm). Both lex paths must therefore key on the EXACT score
@@ -2369,7 +2368,7 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   // holds). Hybrid only, gated by the same QMEMD_RESCUE_DELTA>0 master switch as the rescue, so
   // delta=0 is bit-exact pre-feature. Raw hit.score is never mutated — overlap is a derived key.
   const delta = rescueDelta();
-  // The overlap tie-break is a HYBRID-only refinement (it presumes the calibrated bucket above);
+  // The overlap tie-break is a HYBRID-only refinement (it presumes the reranker bucket above);
   // on either lex path the exact score already orders the hits, so gate it off for lexFallback
   // too — otherwise a degraded recall lets query-slug overlap reorder exact-scored lex hits
   // (qp-degraded-lex-hybrid-bucketing-7tm).
@@ -2412,7 +2411,7 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   // on-target facts — a raw rerankScore just under the floor AND distinctive query overlap on
   // {slug∪project∪tags}. Hybrid only (the lex path floors nothing, so floorDropped is empty).
   // QMEMD_RESCUE_DELTA=0 disables it → bit-exact pre-feature recall. The floor decision above is
-  // NOT touched — picks are readmitted to the tail, the calibrated 0.575 floor never moved (the
+  // NOT touched — picks are readmitted to the tail, the 0.575 floor never moved (the
   // calibration invariant, engine.ts:1643). Capped at RECALL_RESCUE_CAP so a rescue can't flood.
   // `delta` (the master switch) was resolved once above for the overlap tie-break — reuse it.
   const rescueRoom = Math.max(0, limit - limited.length);

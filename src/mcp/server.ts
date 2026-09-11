@@ -1,5 +1,5 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createMcpHandler, isLegacyRequest, McpServer, WebStandardStreamableHTTPServerTransport, type CallToolResult } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { openMemoryStore } from "../store.js";
 import { type QMDStore } from "@tobilu/qmd";
@@ -12,8 +12,6 @@ import { shouldAutoResolve, autoRecallMode, resolveExplicitMode, type RecallMode
 import { isBlankProject, resolveWriteScope } from "../scope.js";
 import { basename } from "node:path";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createRequire } from "node:module";
 
 // Real shipped version so MCP clients see it, not a literal that drifts on every bump
@@ -85,7 +83,7 @@ const HIT_DTO_Z = z.object({
 // One schema serves both result shapes — the SDK requires structuredContent on every
 // non-error result once a schema is declared, so the session path is covered by the
 // `snapshot` field (mirroring REST /recall's session response) and every field is optional.
-const RECALL_OUTPUT_SCHEMA = {
+const RECALL_OUTPUT_SCHEMA = z.object({
   hits: z.array(HIT_DTO_Z).optional().describe("Ranked matches (query path)."),
   degraded: z.boolean().optional().describe("Hybrid recall fell back toward lexical — semantic matches may be missing."),
   vectorsPending: z.number().int().optional().describe("Vectors still pending behind a degraded result; -1 = unknown."),
@@ -94,7 +92,7 @@ const RECALL_OUTPUT_SCHEMA = {
   saturated: z.boolean().optional().describe("Search pool came back full — moreMatches is a lower bound."),
   crossProjectHidden: z.number().int().optional().describe("Relevant matches from OTHER projects the default scope hid; pass cross_project:true to include them."),
   snapshot: z.string().optional().describe("The session snapshot text (session:true path)."),
-};
+});
 
 /**
  * Turn a thrown MCP-tool error into a model-safe isError result (qmemd-3lt). A downstream
@@ -154,8 +152,15 @@ export interface MemoryServerOptions {
  * before native better-sqlite3 is touched — cold-start / clean-room safe (qmemd-faif.10). Tools that
  * read the filesystem directly (get, list, recall session:true) never trigger a store open.
  */
-export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: string, opts: MemoryServerOptions = {}): McpServer {
+export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: string, opts: MemoryServerOptions = {}, inflight?: Set<Promise<unknown>>): McpServer {
   const server = new McpServer({ name: "qmemd", version: VERSION });
+  // Shutdown closes admission first, then waits for these handlers before releasing SQLite.
+  const track = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) => !inflight ? fn : (...args: A): Promise<R> => {
+    const task = fn(...args);
+    inflight?.add(task);
+    void task.finally(() => inflight?.delete(task)).catch(() => {});
+    return task;
+  };
   // Under "required" the schema itself rejects a missing/blank/non-string scope, so the tool
   // handler never runs and nothing is written — the daemon has no cwd to fall back to.
   const writeProject = opts.writeProjectPolicy === "required"
@@ -166,7 +171,7 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
     title: "Remember",
     description: "Store a durable, non-obvious fact in qmemd memory — when in doubt, don't (a noisy corpus degrades recall). Returns the slug; reports a near-duplicate instead of writing unless replace/force is set.",
     annotations: { readOnlyHint: false, openWorldHint: false },
-    inputSchema: {
+    inputSchema: z.object({
       fact: z.string().describe("The fact to remember, as a self-contained sentence."),
       type: MEMORY_TYPES_Z.optional().describe("Default: reference. On replace: omit to keep the existing type, or pass a different one to retype the fact (it moves folders). Note user/feedback facts are injected into every session; project/reference are not."),
       tags: z.array(z.string()).optional(),
@@ -180,8 +185,8 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
       platforms: z.array(PLATFORMS_Z).optional().describe("OS families this fact applies to. Omit for cross-platform."),
       ttl: z.string().optional().describe("Shelf life for a fact that ages (versions, ports, temp states, rotating creds): <N>d|w|m|y (e.g. 90d) sets review_by = today + N; surfaces for re-verification once due — never hides or deletes. Omit for timeless facts. Mutually exclusive with reviewBy."),
       reviewBy: z.string().optional().describe("Explicit re-verify date YYYY-MM-DD (alternative to ttl). On replace: omit to keep the existing date, pass \"\" to clear it."),
-    },
-  }, async ({ fact, type, tags, project, pin, source, as: asSlug, replace, supersedes, force, platforms, ttl, reviewBy }) => {
+    }),
+  }, track(async ({ fact, type, tags, project, pin, source, as: asSlug, replace, supersedes, force, platforms, ttl, reviewBy }) => {
     try {
       const store = await getStore();
       // Under "required" the schema guarantees a non-blank project, so no default is ever substituted.
@@ -266,13 +271,13 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
     } catch (err) {
       return sanitizeToolError(err);
     }
-  });
+  }));
 
   server.registerTool("recall", {
     title: "Recall",
     description: "Search qmemd memory for relevant facts, or get the session snapshot (session:true). Defaults to hybrid search; set lexOnly:true for a fast, model-free lexical search.",
     annotations: { readOnlyHint: true, openWorldHint: false },
-    inputSchema: {
+    inputSchema: z.object({
       query: z.string().optional().describe("Search query. Omit with session:true."),
       session: z.boolean().optional().describe("Return the start-of-session snapshot instead of searching."),
       type: MEMORY_TYPES_Z.optional(),
@@ -284,9 +289,9 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
       allPlatforms: z.boolean().optional().describe("Search across all platforms (disable the host-OS filter). Default false (scoped to the host OS)."),
       platform: PLATFORMS_Z.optional().describe("Scope to one OS family's facts instead of the host's — e.g. only macos facts from a linux host. Mutually exclusive with allPlatforms."),
       cross_project: z.boolean().optional().describe("Search ALL projects, not just current + global. Foreign hits are labelled with their project so they can't be mistaken for this project's facts. Default false."),
-    },
+    }),
     outputSchema: RECALL_OUTPUT_SCHEMA,
-  }, async ({ query, session, type, limit, lexOnly, minScore, skim, project, allPlatforms, platform, cross_project }) => {
+  }, track(async ({ query, session, type, limit, lexOnly, minScore, skim, project, allPlatforms, platform, cross_project }) => {
     try {
       if (session) {
         // Sync first (mirrors the CLI's recall --session) so the daemon never serves a stale
@@ -353,14 +358,14 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
     } catch (err) {
       return sanitizeToolError(err);
     }
-  });
+  }));
 
   server.registerTool("forget", {
     title: "Forget",
     description: "Delete a remembered fact by slug.",
     annotations: { readOnlyHint: false, openWorldHint: false },
-    inputSchema: { slug: z.string() },
-  }, async ({ slug }) => {
+    inputSchema: z.object({ slug: z.string() }),
+  }, track(async ({ slug }) => {
     try {
       const store = await getStore();
       const res = await forgetFact(store, root, slug);
@@ -370,18 +375,18 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
     } catch (err) {
       return sanitizeToolError(err);
     }
-  });
+  }));
 
   server.registerTool("reviewed", {
     title: "Reviewed",
     description: "Mark a fact re-verified — reset its staleness clock. Forward-sets review_by (default: today + the type's review window; or pass ttl/reviewBy). Bare on a durable type (user/feedback) marks review_by:never. Never edits the body — use remember(replace:) if the fact itself changed.",
     annotations: { readOnlyHint: false, openWorldHint: false },
-    inputSchema: {
+    inputSchema: z.object({
       slug: z.string().describe("Slug of the fact you re-verified (as returned by recall/list)."),
       ttl: z.string().optional().describe("Shelf life: <N>d|w|m|y sets review_by = today + N; \"never\" marks the fact durable. Mutually exclusive with reviewBy."),
       reviewBy: z.string().optional().describe("Explicit next-review date YYYY-MM-DD (or \"never\"). Mutually exclusive with ttl."),
-    },
-  }, async ({ slug, ttl, reviewBy }) => {
+    }),
+  }, track(async ({ slug, ttl, reviewBy }) => {
     try {
       const store = await getStore();
       const res = await markReviewed(store, root, slug, { ttl, reviewBy });
@@ -398,14 +403,14 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
     } catch (err) {
       return sanitizeToolError(err);
     }
-  });
+  }));
 
   server.registerTool("get", {
     title: "Get",
     description: "Fetch one remembered fact in full by slug — the complete body, not the truncated preview recall returns. Errors if no fact has that slug.",
     annotations: { readOnlyHint: true, openWorldHint: false },
-    inputSchema: { slug: z.string().describe("Slug of the memory to fetch (as returned by recall/list).") },
-  }, async ({ slug }) => {
+    inputSchema: z.object({ slug: z.string().describe("Slug of the memory to fetch (as returned by recall/list).") }),
+  }, track(async ({ slug }) => {
     try {
       // An unsafe (traversal/newline) slug makes getFact throw via assertSafeSlug. Its
       // message is path-free and an intentional client-facing signal, so sanitizeToolError
@@ -423,19 +428,19 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
     } catch (err) {
       return sanitizeToolError(err);
     }
-  });
+  }));
 
   server.registerTool("list", {
     title: "List",
     description: "Browse remembered facts by type/tag/project without searching — model-free. An empty corpus is a successful empty result, not an error.",
     annotations: { readOnlyHint: true, openWorldHint: false },
-    inputSchema: {
+    inputSchema: z.object({
       type: MEMORY_TYPES_Z.optional().describe("Scope to one type."),
       tag: z.string().optional(),
       project: z.string().optional().describe("Only facts for this project (plus 'global'); pass 'global' for global-only."),
       platform: PLATFORMS_Z.optional().describe("Only facts valid on this OS family."),
-    },
-  }, async ({ type, tag, project, platform }) => {
+    }),
+  }, track(async ({ type, tag, project, platform }) => {
     try {
       const entries = listFacts(root, { type, tag, project, platform });
       const text = entries.length ? entries.map(e => `[${e.type}] ${e.slug} — ${e.description}${e.supersededBy ? ` [superseded by ${e.supersededBy}]` : ""}`).join("\n") : "No memories.";
@@ -444,7 +449,7 @@ export function buildMemoryServerLazy(getStore: () => Promise<QMDStore>, root: s
     } catch (err) {
       return sanitizeToolError(err);
     }
-  });
+  }));
 
   return server;
 }
@@ -464,9 +469,29 @@ export async function startMcpServer(): Promise<void> {
   // cold start (or an npx/clean-room launch whose binding is unbuilt) still completes the handshake.
   let storeP: Promise<QMDStore> | undefined;
   const getStore = (): Promise<QMDStore> => (storeP ??= openMemoryStore());
-  const server = buildMemoryServerLazy(getStore, root);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const inflight = new Set<Promise<unknown>>();
+  const handle = serveStdio(() => buildMemoryServerLazy(getStore, root, {}, inflight));
+  let shutdownP: Promise<void> | undefined;
+  const shutdown = (): void => {
+    shutdownP ??= (async () => {
+      process.stdin.off("end", shutdown);
+      process.stdin.off("close", shutdown);
+      // Closing the transport prevents further calls while running tools settle.
+      try { await handle.close(); }
+      finally {
+        // These handlers do not cancel their store work when the transport closes.
+        // A drain timeout would race SQLite/model teardown against an active tool.
+        await Promise.allSettled([...inflight]);
+        if (storeP) await (await storeP).close();
+      }
+      process.exitCode = process.exitCode || 0;
+    })().catch(error => { console.error("stdio shutdown error:", error); process.exitCode = 1; });
+  };
+  process.stdin.once("end", shutdown);
+  process.stdin.once("close", shutdown);
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+  if (process.stdin.readableEnded || process.stdin.destroyed) shutdown();
 }
 
 // =============================================================================
@@ -607,36 +632,28 @@ export async function startMcpHttpServer(
   // value for its lifetime, so a token file deleted underneath it does not open the door.
   const token = readOrCreateDaemonToken();
 
-  // qmemd's tools are independent calls on the shared store — no session continuity is needed,
-  // so the MCP transport runs STATELESS. The WebStandard stateless transport cannot be reused
-  // across requests ("Stateless transport cannot be reused across requests. Create a new
-  // transport per request."), so every /mcp request gets a fresh McpServer + transport that is
-  // handled and closed immediately: no session id is issued, no session map is kept, and nothing
-  // accumulates on the long-lived daemon. This replaces the old stateful map keyed by
-  // mcp-session-id that only evicted on transport.onclose and so grew unboundedly when a client
-  // never closed (qmemd-pf9 — the leak was a symptom of statefulness qmemd never needed). The
-  // SDK does not gate tool calls on a per-request initialize, so a client that initializes once
-  // then sends independent tool-call POSTs works. Building a server is cheap (registers the 5
-  // tools, no IO/model); the store stays shared + warm. Daemon snapshot default 'global'
-  // (qmemd-wdf): the daemon cwd is HOME, not a project.
-  async function dispatchMcp(request: Request, parsedBody: unknown): Promise<Response> {
-    const server = buildMemoryServer(store, root, { sessionDefaultProject: "global", warmServer: true, writeProjectPolicy: "required" });
-    const transport = new WebStandardStreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      enableJsonResponse: true,
-    });
-    await server.connect(transport);
+  // The SDK entry builds and closes a server per request for both protocol eras.
+  // The store stays shared and warm; no client session map accumulates in the daemon.
+  const buildServer = () => buildMemoryServer(store, root, { sessionDefaultProject: "global", warmServer: true, writeProjectPolicy: "required" });
+  const mcpHandler = createMcpHandler(buildServer, { responseMode: "json", legacy: "reject" });
+  async function dispatchMcp(request: Request): Promise<Response> {
+    if (!await isLegacyRequest(request)) return mcpHandler.fetch(request);
+    // The SDK's built-in legacy fallback uses SSE. Keep qmemd's JSON response contract.
+    const server = buildServer();
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     try {
-      return await transport.handleRequest(request, parsedBody !== undefined ? { parsedBody } : undefined);
+      await server.connect(transport);
+      return await transport.handleRequest(request);
     } finally {
-      try { await transport.close(); } catch (e) { console.error("transport close error:", e); }
-      try { await server.close(); } catch (e) { console.error("server close error:", e); }
+      try { await transport.close(); } finally { await server.close(); }
     }
   }
 
   function log(msg: string): void { if (!quiet) console.error(msg); }
 
-  const httpServer = createServer(async (nodeReq: IncomingMessage, nodeRes: ServerResponse) => {
+  let stopping = false;
+  const inflight = new Set<Promise<void>>();
+  async function handleHttpRequest(nodeReq: IncomingMessage, nodeRes: ServerResponse): Promise<void> {
     const method = nodeReq.method || "GET";
 
     try {
@@ -684,25 +701,23 @@ export async function startMcpHttpServer(
         return;
       }
 
-      // ---- MCP (stateless): forward every /mcp request to the one shared transport ----
-      // No session lookup or creation — the stateless transport issues no session id and
-      // validates none. POST bodies are JSON-parsed here so a malformed body answers 400 (not a
-      // 500 + per-request stack trace in the daemon log, qmemd-bzq) and the parsed body is
-      // forwarded; GET/DELETE carry no body.
+      // ---- MCP: both eras share the store, with a fresh server per request ----
+      // Validate bounded POST bodies here so malformed JSON answers 400 before SDK routing.
       if (pathname === "/mcp") {
         const headers: Record<string, string> = {};
         for (const [k, v] of Object.entries(nodeReq.headers)) if (typeof v === "string") headers[k] = v;
         let rawBody: string | undefined;
-        let parsedBody: unknown;
         if (method === "POST") {
           rawBody = await collectBody(nodeReq);
-          try { parsedBody = JSON.parse(rawBody); }
+          try { JSON.parse(rawBody); }
           catch { sendJson(nodeRes, 400, { error: "invalid JSON body" }); return; }
         } else if (method !== "GET" && method !== "HEAD") {
           rawBody = await collectBody(nodeReq);
         }
         const request = new Request(`http://localhost:${port}/mcp`, { method, headers, ...(rawBody !== undefined ? { body: rawBody } : {}) });
-        const response = await dispatchMcp(request, parsedBody);
+        // Preserve the existing stateless teardown acknowledgment after all guards/body limits.
+        if (method === "DELETE") { nodeRes.writeHead(200); nodeRes.end(); return; }
+        const response = await dispatchMcp(request);
         nodeRes.writeHead(response.status, Object.fromEntries(response.headers));
         nodeRes.end(Buffer.from(await response.arrayBuffer()));
         return;
@@ -900,6 +915,17 @@ export async function startMcpHttpServer(
       console.error("HTTP handler error:", err);
       if (!nodeRes.headersSent) { nodeRes.writeHead(500); nodeRes.end("Internal Server Error"); }
     }
+  }
+
+  const httpServer = createServer((nodeReq, nodeRes) => {
+    // A request already queued on a connection must not start store work after stop().
+    if (stopping) { sendJson(nodeRes, 503, { error: "server shutting down" }); return; }
+    const task = handleHttpRequest(nodeReq, nodeRes);
+    inflight.add(task);
+    void task.then(
+      () => { inflight.delete(task); },
+      error => { inflight.delete(task); console.error("HTTP request error:", error); },
+    );
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -913,21 +939,22 @@ export async function startMcpHttpServer(
   });
   const actualPort = (httpServer.address() as import("node:net").AddressInfo).port;
 
-  let stopping = false;
-  const stop = async () => {
-    if (stopping) return;
+  let stopP: Promise<void> | undefined;
+  const stop = (): Promise<void> => stopP ??= (async () => {
     stopping = true;
     try {
-      // Per-request MCP servers+transports are already closed after each request (dispatchMcp),
-      // so nothing MCP-persistent remains to tear down here (qmemd-pf9). Stop accepting
-      // connections AND drop keep-alive sockets so close() resolves promptly — without
-      // closeAllConnections an idle keep-alive client can stall it.
+      // Close admission before dropping sockets, including idle keepalive connections.
+      const closed = new Promise<void>(resolve => httpServer.close(() => resolve()));
       httpServer.closeAllConnections?.();
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      await closed;
+      // Socket closure does not cancel asynchronous REST/MCP handlers. Drain their work
+      // before releasing the shared SQLite/model dependencies, without a teardown timeout.
+      await Promise.allSettled([...inflight]);
     } finally {
-      await store.close(); // always release the SQLite handle, even if teardown above throws
+      try { await mcpHandler.close(); }
+      finally { await store.close(); } // release SQLite even if handler teardown throws
     }
-  };
+  })();
 
   // Process-global handlers: startMcpHttpServer is intended to run ONCE per process
   // (the daemon). The returned handle exposes no deregistration, so it must not be
