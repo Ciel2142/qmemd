@@ -2318,31 +2318,58 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     return { kept, projectDropped };
   };
 
-  // Initial fetch + refetch-on-underflow (qmemd-amm): the platform gate runs AFTER ranking
-  // over a bounded pool, so on-platform facts can sit past the pool when many higher-ranked
-  // off-platform facts match. When the gate leaves fewer than `limit` hits BUT the pool was
-  // saturated (rawCount === fetchLimit ⇒ the store had more to give), refetch the whole ranked
-  // corpus once and re-gate — escalating straight to totalDocuments is exact and costs at most
-  // one extra round-trip (no geometric-growth loop). A NON-saturated pool means the corpus is
-  // already exhausted, so the underflow is real and we keep what we have. Same drop-class as
-  // qmemd-pwn, extended to the platform dimension.
+  // Lexical retrieval honors its requested depth. Hybrid retrieval also has hidden
+  // per-source caps (qmd 2.8.3), so a short hybrid page does NOT prove exhaustion.
   let { hits, rawCount, floorDropped } = await runSearch(fetchLimit);
   let { kept: gated, projectDropped: crossProjectHidden } = gate(hits);
-  // Saturation (40h): the store returned exactly the pool we asked for, so matching rows may
-  // sit past the cap — the completeness counters below are then lower bounds. Resolved against
-  // the corpus size (one cheap status query, no extra search): a pool that already covered the
-  // whole corpus is exhaustion, not saturation. The corpus-wide refetch clears it the same way:
-  // its pool IS the corpus, nothing can sit past it. A failed getStatus (total 0) keeps the
-  // flag conservatively true.
   let saturated = rawCount === fetchLimit;
-  if (saturated) {
+  if (saturated || !(opts.lexOnly || lexFallback)) {
     const total = await store.getStatus().then(s => s.totalDocuments).catch(() => 0);
-    if (widen && gated.length < limit && total > fetchLimit) {
-      ({ hits, floorDropped } = await runSearch(total));
+    if (saturated && widen && gated.length < limit && total > fetchLimit) {
+      ({ hits, rawCount, floorDropped } = await runSearch(total));
       ({ kept: gated, projectDropped: crossProjectHidden } = gate(hits));
+      saturated = rawCount >= total;
+    }
+    if (!(opts.lexOnly || lexFallback)) {
+      saturated = total <= 0 || rawCount < total;
+    } else if (total > 0 && rawCount >= total) {
       saturated = false;
-    } else if (total > 0 && total <= fetchLimit) {
-      saturated = false;
+    }
+
+    // Independently fetch lexical candidates when a scoped hybrid pool underfills.
+    // Keep the hybrid scores already obtained; rerank only unseen, readable, in-scope
+    // facts so BM25 scores never bypass the hybrid relevance floor. This recovers
+    // matches outside qmd's source caps without changing the installed dependency.
+    // Even an exhaustive lexical pass cannot certify expanded/vector completeness.
+    if (!(opts.lexOnly || lexFallback) && saturated && widen && gated.length < limit && total > 0) {
+      const seen = new Set([...hits, ...floorDropped].map(h => h.path));
+      const lexical = await store.searchLex(query, { limit: total, collection: MEMORY_COLLECTION });
+      const candidates = gate(lexical.flatMap(r => toHit(r.filepath, r.title, r.score) ?? [])).kept
+        .filter(({ h, fm }) => fm !== null && !seen.has(h.path));
+      if (candidates.length > 0) {
+        try {
+          const rerankRun = store.internal.rerank(query, candidates.map(({ h, fm }) => ({
+            file: h.path, text: `${fm!.frontmatter.description}\n\n${fm!.body}`,
+          })));
+          rerankRun.catch(() => {});
+          const scores = new Map((await raceTimeout(rerankRun, embedTimeoutMs(), "scoped recall rerank"))
+            .map(r => [r.file, r.score]));
+          for (const { h } of candidates) {
+            const score = scores.get(h.path);
+            if (score === undefined || !Number.isFinite(score)) throw new Error("missing scoped rerank score");
+            (score >= minRerank ? hits : floorDropped).push({ ...h, score });
+          }
+          ({ kept: gated, projectDropped: crossProjectHidden } = gate(hits));
+        } catch (e) {
+          console.error(`[qmemd] scoped recall rerank failed, falling back to lexical: ${e instanceof Error ? e.message : String(e)}`);
+          degraded = true;
+          lexFallback = true;
+          vectorsPending = -1;
+          ({ hits, rawCount, floorDropped } = await runSearch(total));
+          ({ kept: gated, projectDropped: crossProjectHidden } = gate(hits));
+          saturated = false; // lexical depth covered the known corpus
+        }
+      }
     }
   }
 
