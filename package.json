@@ -1,6 +1,6 @@
 {
   "name": "@ciel2142/qmemd",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "Durable memory engine — remember/recall/forget over markdown facts, backed by the qmd SDK",
   "keywords": [
     "memory",
@@ -52,10 +52,12 @@
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
     "@tobilu/qmd": "2.8.3",
+    "better-sqlite3": "13.0.3",
     "zod": "^4.2.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0",
+    "@types/better-sqlite3": "7.6.13",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",

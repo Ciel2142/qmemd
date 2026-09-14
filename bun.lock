@@ -7,10 +7,12 @@
       "dependencies": {
         "@modelcontextprotocol/server": "2.0.0",
         "@tobilu/qmd": "2.8.3",
+        "better-sqlite3": "13.0.3",
         "zod": "^4.2.0",
       },
       "devDependencies": {
         "@modelcontextprotocol/client": "2.0.0",
+        "@types/better-sqlite3": "7.6.13",
         "@types/node": "^22.0.0",
         "tsx": "^4.19.0",
         "typescript": "^5.6.0",
@@ -192,6 +194,8 @@
     "@tobilu/qmd": ["@tobilu/qmd@2.8.3", "", { "dependencies": { "@modelcontextprotocol/server": "2.0.0", "better-sqlite3": "^13.0.3", "fast-glob": "3.3.3", "node-llama-cpp": "3.20.0", "picomatch": "4.0.5", "sqlite-vec": "0.1.9", "tree-sitter-go": "0.25.0", "tree-sitter-python": "0.25.0", "tree-sitter-rust": "0.24.0", "tree-sitter-typescript": "0.23.2", "web-tree-sitter": "0.26.12", "yaml": "2.9.0", "zod": "4.2.1" }, "optionalDependencies": { "sqlite-vec-darwin-arm64": "0.1.9", "sqlite-vec-darwin-x64": "0.1.9", "sqlite-vec-linux-arm64": "0.1.9", "sqlite-vec-linux-x64": "0.1.9", "sqlite-vec-windows-x64": "0.1.9" }, "peerDependencies": { "typescript": "^5.9.3" }, "bin": { "qmd": "bin/qmd" } }, "sha512-zjfVwrObPB618B6x8SdhlGv/tX9OxRHsbQnr5DUtBvqPK6HGQ27lM+9/BAY5okpjrHVnW56hLyDkqoTcsrVLzA=="],
 
     "@tybys/wasm-util": ["@tybys/wasm-util@0.10.2", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-RoBvJ2X0wuKlWFIjrwffGw1IqZHKQqzIchKaadZZfnNpsAYp2mM0h36JtPCjNDAHGgYez/15uMBpfGwchhiMgg=="],
+
+    "@types/better-sqlite3": ["@types/better-sqlite3@7.6.13", "", { "dependencies": { "@types/node": "*" } }, "sha512-NMv9ASNARoKksWtsq/SHakpYAYnhBrQgGD8zkLYk/jaK8jUGn08CfEdTRgYhMypUQAfzSP8W6gNLe0q19/t4VA=="],
 
     "@types/chai": ["@types/chai@5.2.3", "", { "dependencies": { "@types/deep-eql": "*", "assertion-error": "^2.0.1" } }, "sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA=="],
 

@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { withMemoryWriteLock } from "./write-lock.js";
+import { atomicWriteFile } from "./file-write.js";
 import { MEMORY_COLLECTION } from "./store.js";
 import { gitCommit, gitPush, type GitDeps, type GitCommitResult, type GitPushResult } from "./git.js";
 import { type QMDStore, Maintenance } from "@tobilu/qmd";
@@ -1400,6 +1402,15 @@ export async function remember(
   input: RememberInput,
   git: GitDeps = {},
 ): Promise<RememberResult> {
+  return withMemoryWriteLock(root, () => rememberUnlocked(store, root, input, git));
+}
+
+async function rememberUnlocked(
+  store: QMDStore,
+  root: string,
+  input: RememberInput,
+  git: GitDeps = {},
+): Promise<RememberResult> {
   let type: MemoryType = input.type ?? "reference";
   // Candidate files the Tier-2.5 near-dup scan could not read (qmemd-e5h); 0 until the scan
   // runs (and stays 0 on the --replace/--force path, which skips dedup entirely).
@@ -1753,7 +1764,7 @@ export async function remember(
   if (leakedTokens.length > 0 && leakedMarkupTokens(input.fact).length > 0) {
     throw new ClientError("could not remove leaked tool-call markup from the fact — strip the framing tokens and retry");
   }
-  writeFileSync(path, serializeMemory(fm, input.fact));
+  atomicWriteFile(path, serializeMemory(fm, input.fact));
 
   // Supersede double-write (bri): stamp superseded_by onto the OLD fact via a surgical
   // single-line edit (setFrontmatterKey) — every other byte of a possibly hand-edited
@@ -1783,7 +1794,7 @@ export async function remember(
         supersedeWarning = `fact written, but '${input.supersedes}' has no frontmatter fence — superseding link not stamped; repair its frontmatter ('qmemd doctor' locates it), then run 'qmemd doctor --fix' to complete the link`;
         console.error(`[qmemd] remember '${slug}': ${supersedeWarning}`);
       } else {
-        writeFileSync(supersedeTarget.path, setFrontmatterKey(raw, "superseded_by", yamlScalar(slug)));
+        atomicWriteFile(supersedeTarget.path, setFrontmatterKey(raw, "superseded_by", yamlScalar(slug)));
         commitPaths.push(`${supersedeTarget.type}/${supersedeTarget.slug}.md`);
       }
     } catch (e) {
@@ -2110,6 +2121,30 @@ async function raceTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<
   }
 }
 
+/** Select query-bearing context before reranking a lexical backfill candidate.
+ * qmd's chunker is private to its SDK. Match its 3600-character rerank window
+ * and query-overlap selection here, with overlap so boundary matches keep context.
+ * Sending a whole long fact would let the model truncate away its relevant tail.
+ */
+function rerankPassage(body: string, query: string): string {
+  const width = 3600;
+  if (body.length <= width) return body;
+  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(t => t.length > 2))];
+  let best = "", bestScore = -1;
+  for (let start = 0; start < body.length; start += 3000) {
+    // Avoid cutting a UTF-16 surrogate pair at either edge.
+    const from = start > 0 && /[\uDC00-\uDFFF]/.test(body[start]!) ? start - 1 : start;
+    let end = Math.min(from + width, body.length);
+    if (end < body.length && /[\uDC00-\uDFFF]/.test(body[end]!)) end--;
+    const passage = body.slice(from, end);
+    const lower = passage.toLowerCase();
+    const score = terms.filter(term => lower.includes(term)).length;
+    if (score > bestScore) { best = passage; bestScore = score; }
+    if (end === body.length) break;
+  }
+  return best;
+}
+
 /**
  * recallQuery + the embed-barrier health signal (qmemd-9t1). Identical search to recallQuery,
  * but returns degraded/vectorsPending so a caller (CLI/MCP/REST) can warn that a hybrid recall
@@ -2318,31 +2353,60 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     return { kept, projectDropped };
   };
 
-  // Initial fetch + refetch-on-underflow (qmemd-amm): the platform gate runs AFTER ranking
-  // over a bounded pool, so on-platform facts can sit past the pool when many higher-ranked
-  // off-platform facts match. When the gate leaves fewer than `limit` hits BUT the pool was
-  // saturated (rawCount === fetchLimit ⇒ the store had more to give), refetch the whole ranked
-  // corpus once and re-gate — escalating straight to totalDocuments is exact and costs at most
-  // one extra round-trip (no geometric-growth loop). A NON-saturated pool means the corpus is
-  // already exhausted, so the underflow is real and we keep what we have. Same drop-class as
-  // qmemd-pwn, extended to the platform dimension.
+  // Lexical retrieval honors its requested depth. Hybrid retrieval also has hidden
+  // per-source caps (qmd 2.8.3), so a short hybrid page does NOT prove exhaustion.
   let { hits, rawCount, floorDropped } = await runSearch(fetchLimit);
   let { kept: gated, projectDropped: crossProjectHidden } = gate(hits);
-  // Saturation (40h): the store returned exactly the pool we asked for, so matching rows may
-  // sit past the cap — the completeness counters below are then lower bounds. Resolved against
-  // the corpus size (one cheap status query, no extra search): a pool that already covered the
-  // whole corpus is exhaustion, not saturation. The corpus-wide refetch clears it the same way:
-  // its pool IS the corpus, nothing can sit past it. A failed getStatus (total 0) keeps the
-  // flag conservatively true.
   let saturated = rawCount === fetchLimit;
-  if (saturated) {
-    const total = await store.getStatus().then(s => s.totalDocuments).catch(() => 0);
-    if (widen && gated.length < limit && total > fetchLimit) {
-      ({ hits, floorDropped } = await runSearch(total));
+  if (saturated || !(opts.lexOnly || lexFallback)) {
+    const total = await store.getStatus().then(s => s.totalDocuments).catch(() => null);
+    if (saturated && widen && gated.length < limit && total !== null && total > fetchLimit) {
+      ({ hits, rawCount, floorDropped } = await runSearch(total));
       ({ kept: gated, projectDropped: crossProjectHidden } = gate(hits));
+      saturated = rawCount >= total;
+    }
+    if (!(opts.lexOnly || lexFallback)) {
+      saturated = total === null || rawCount < total;
+    } else if (total !== null && rawCount >= total) {
       saturated = false;
-    } else if (total > 0 && total <= fetchLimit) {
-      saturated = false;
+    }
+
+    // Independently fetch lexical candidates when a scoped hybrid pool underfills.
+    // Keep the hybrid scores already obtained; rerank only unseen, readable, in-scope
+    // facts so BM25 scores never bypass the hybrid relevance floor. This recovers
+    // matches outside qmd's source caps without changing the installed dependency.
+    // Even an exhaustive lexical pass cannot certify expanded/vector completeness.
+    if (!(opts.lexOnly || lexFallback) && saturated && widen && gated.length < limit && total !== null && total > 0) {
+      try {
+        const seen = new Set([...hits, ...floorDropped].map(h => h.path));
+        const lexical = await store.searchLex(query, { limit: total, collection: MEMORY_COLLECTION });
+        const candidates = gate(lexical.flatMap(r => toHit(r.filepath, r.title, r.score) ?? [])).kept
+          .filter(({ h, fm }) => fm !== null && !seen.has(h.path));
+        if (candidates.length > 0) {
+          const rerankRun = store.internal.rerank(query, candidates.map(({ h, fm }) => ({
+            file: h.path, text: rerankPassage(`${fm!.frontmatter.description}\n\n${fm!.body}`, query),
+          })));
+          rerankRun.catch(() => {});
+          const scores = new Map((await raceTimeout(rerankRun, embedTimeoutMs(), "scoped recall rerank"))
+            .map(r => [r.file, r.score]));
+          const supplemented = candidates.map(({ h }) => {
+            const score = scores.get(h.path);
+            if (score === undefined || !Number.isFinite(score)) throw new Error("missing scoped rerank score");
+            return { ...h, score };
+          });
+          for (const h of supplemented) {
+            (h.score >= minRerank ? hits : floorDropped).push(h);
+          }
+          ({ kept: gated, projectDropped: crossProjectHidden } = gate(hits));
+        }
+      } catch (e) {
+        console.error(`[qmemd] scoped recall supplement failed; retaining hybrid results: ${e instanceof Error ? e.message : String(e)}`);
+        degraded = true;
+        vectorsPending = -1;
+        // Keep valid semantic-only hits from the successful initial search.
+        // A supplemental failure says nothing about their relevance.
+        saturated = true;
+      }
     }
   }
 
@@ -2684,6 +2748,12 @@ export function resolveReviewedDate(type: MemoryType, opts: ReviewedOptions, fro
 export async function markReviewed(
   store: QMDStore, root: string, slug: string, opts: ReviewedOptions, git: GitDeps = {},
 ): Promise<{ slug: string; reviewBy: string; path: string; synced?: boolean; syncWarning?: string }> {
+  return withMemoryWriteLock(root, () => markReviewedUnlocked(store, root, slug, opts, git));
+}
+
+async function markReviewedUnlocked(
+  store: QMDStore, root: string, slug: string, opts: ReviewedOptions, git: GitDeps = {},
+): Promise<{ slug: string; reviewBy: string; path: string; synced?: boolean; syncWarning?: string }> {
   assertSafeSlug(slug); // reject traversal/newline before any fs touch (qmemd-fd8)
   const fact = getFact(root, slug);
   if (!fact) throw new ClientError(`no fact named '${slug}' to mark reviewed`);
@@ -2696,7 +2766,7 @@ export async function markReviewed(
   if (!locateFences(content)) {
     throw new Error(`fact '${slug}' has no frontmatter fence — review_by cannot be stamped; repair the file's frontmatter ('qmemd doctor' locates it), then retry`);
   }
-  writeFileSync(fact.path, setFrontmatterKey(content, "review_by", reviewBy));
+  atomicWriteFile(fact.path, setFrontmatterKey(content, "review_by", reviewBy));
   const commit = gitCommit(root, `reviewed: ${slug}`, `${fact.type}/${slug}.md`, git);
   const push = gitPush(root, git);
   const { synced, syncWarning } = syncOutcome(commit, push);
@@ -2769,6 +2839,10 @@ export function projectOverview(root: string, project: string, types: MemoryType
 // =============================================================================
 
 export async function forget(store: QMDStore, root: string, slug: string, git: GitDeps = {}): Promise<{ removed: boolean; path?: string; synced?: boolean; syncWarning?: string }> {
+  return withMemoryWriteLock(root, () => forgetUnlocked(store, root, slug, git));
+}
+
+async function forgetUnlocked(store: QMDStore, root: string, slug: string, git: GitDeps = {}): Promise<{ removed: boolean; path?: string; synced?: boolean; syncWarning?: string }> {
   assertSafeSlug(slug); // reject traversal/newline before it reaches rmSync (qmemd-fd8)
   for (const type of MEMORY_TYPES) {
     const path = memoryFilePath(root, type, slug);
@@ -2835,6 +2909,16 @@ export async function applyMerge(
   opts: { force?: boolean } = {},
   git: GitDeps = {},
 ): Promise<ApplyMergeResult> {
+  return withMemoryWriteLock(root, () => applyMergeUnlocked(store, root, plan, opts, git));
+}
+
+async function applyMergeUnlocked(
+  store: QMDStore,
+  root: string,
+  plan: MergePlan,
+  opts: { force?: boolean } = {},
+  git: GitDeps = {},
+): Promise<ApplyMergeResult> {
   const cluster = plan.cluster;
   const keeper = plan.keeper ?? cluster.suggestedKeeper;
 
@@ -2875,14 +2959,14 @@ export async function applyMerge(
       pinned: cluster.anyPinned,
       updated: new Date().toISOString(),
     };
-    writeFileSync(keeperFact.path, serializeMemory(fm, plan.foldedBody));
+    atomicWriteFile(keeperFact.path, serializeMemory(fm, plan.foldedBody));
     for (const s of others) {
       const f = live.get(s)!;
       rmSync(f.path);
       commitPaths.push(`${f.type}/${s}.md`);
     }
   } catch (e) {
-    for (const p of preimages) writeFileSync(p.path, p.content); // recreate deletes + undo overwrite
+    for (const p of preimages) atomicWriteFile(p.path, p.content); // recreate deletes + undo overwrite
     throw e;
   }
 

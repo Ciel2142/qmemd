@@ -1,4 +1,7 @@
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { withMemoryWriteLock } from "./write-lock.js";
+import { syncDirectory } from "./file-write.js";
+import { dirname } from "node:path";
+import { existsSync, readFileSync, statSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import {
   walkFactFiles,
   parseMemory,
@@ -181,6 +184,7 @@ interface StagedWrite {
   path: string;
   raw: string;
   tmp: string;
+  mode: number;
 }
 
 function errorCode(e: unknown, fallback = "error"): string {
@@ -209,8 +213,9 @@ function restorePreImages(renamed: readonly StagedWrite[], cause: unknown): unkn
   for (const w of renamed) {
     const restoreTmp = `${w.path}.rescope-restore-${process.pid}.tmp`;
     try {
-      writeFileSync(restoreTmp, w.raw);
+      writeFileSync(restoreTmp, w.raw, { flag: "wx", mode: w.mode, flush: true });
       renameSync(restoreTmp, w.path);
+      syncDirectory(dirname(w.path));
     } catch {
       unrestored.push(`${w.row.type}/${w.row.slug}`);
     }
@@ -224,6 +229,15 @@ function restorePreImages(renamed: readonly StagedWrite[], cause: unknown): unkn
 }
 
 export async function applyRescope(
+  store: QMDStore,
+  root: string,
+  plan: RescopePlan,
+  git: GitDeps = {},
+): Promise<RescopeApplyResult> {
+  return withMemoryWriteLock(root, () => applyRescopeUnlocked(store, root, plan, git));
+}
+
+async function applyRescopeUnlocked(
   store: QMDStore,
   root: string,
   plan: RescopePlan,
@@ -266,12 +280,13 @@ export async function applyRescope(
     path: v.path,
     raw: v.raw,
     tmp: `${v.path}.rescope-${process.pid}.tmp`,
+    mode: statSync(v.path).mode & 0o777,
   }));
 
   for (let i = 0; i < staged.length; i++) {
     const s = staged[i]!;
     try {
-      writeFileSync(s.tmp, setProjectLine(s.raw, yamlScalar(s.row.to)));
+      writeFileSync(s.tmp, setProjectLine(s.raw, yamlScalar(s.row.to)), { flag: "wx", mode: s.mode, flush: true });
     } catch (e) {
       removeTemps(staged.slice(0, i + 1));
       throw e;
@@ -295,11 +310,12 @@ export async function applyRescope(
     const s = staged[i]!;
     try {
       renameSync(s.tmp, s.path);
+      renamed.push(s);
+      syncDirectory(dirname(s.path));
     } catch (e) {
       removeTemps(staged.slice(i));
       throw restorePreImages(renamed, e);
     }
-    renamed.push(s);
   }
 
   const commitPaths = valid.map((v) => `${v.row.type}/${v.row.slug}.md`);
