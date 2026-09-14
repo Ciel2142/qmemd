@@ -38,6 +38,10 @@ jobs:
           restore-keys: |
             npm-${{ runner.os }}-node${{ matrix.node }}-
 
+      # Node 22 bundles npm 10, whose dependency resolver crashes with edgesOut
+      # on this dependency graph. Use the locally verified npm 11 on both nodes.
+      - run: npm install --global npm@11.12.1 --no-audit --no-fund
+
       - run: npm install --no-audit --no-fund
 
       - run: npm run build
