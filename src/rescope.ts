@@ -1,3 +1,5 @@
+import { syncDirectory } from "./file-write.js";
+import { dirname } from "node:path";
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import {
   walkFactFiles,
@@ -209,8 +211,9 @@ function restorePreImages(renamed: readonly StagedWrite[], cause: unknown): unkn
   for (const w of renamed) {
     const restoreTmp = `${w.path}.rescope-restore-${process.pid}.tmp`;
     try {
-      writeFileSync(restoreTmp, w.raw);
+      writeFileSync(restoreTmp, w.raw, { flush: true });
       renameSync(restoreTmp, w.path);
+      syncDirectory(dirname(w.path));
     } catch {
       unrestored.push(`${w.row.type}/${w.row.slug}`);
     }
@@ -271,7 +274,7 @@ export async function applyRescope(
   for (let i = 0; i < staged.length; i++) {
     const s = staged[i]!;
     try {
-      writeFileSync(s.tmp, setProjectLine(s.raw, yamlScalar(s.row.to)));
+      writeFileSync(s.tmp, setProjectLine(s.raw, yamlScalar(s.row.to)), { flush: true });
     } catch (e) {
       removeTemps(staged.slice(0, i + 1));
       throw e;
@@ -295,11 +298,12 @@ export async function applyRescope(
     const s = staged[i]!;
     try {
       renameSync(s.tmp, s.path);
+      renamed.push(s);
+      syncDirectory(dirname(s.path));
     } catch (e) {
       removeTemps(staged.slice(i));
       throw restorePreImages(renamed, e);
     }
-    renamed.push(s);
   }
 
   const commitPaths = valid.map((v) => `${v.row.type}/${v.row.slug}.md`);

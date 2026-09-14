@@ -18,6 +18,7 @@
 // =============================================================================
 
 import { join } from "node:path";
+import { atomicWriteFile } from "./file-write.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { MEMORY_TYPES, parseMemory, yamlScalar, PLATFORMS, splitFlowSeq, setFrontmatterKey, locateFences, isValidReviewBy, leakedMarkupTokens, stripLeakedMarkup, walkFactFiles } from "./engine.js";
 
@@ -446,7 +447,7 @@ function fixLinks(root: string, alreadyBacked: ReadonlySet<string>): FixResult[]
     if (out === content) return;
     if (results.length === 0 && backed.size === 0) ensureBakIgnored(root);
     if (!backed.has(relpath)) { writeFileSync(path + ".bak", content); backed.add(relpath); }
-    writeFileSync(path, out);
+    atomicWriteFile(path, out);
     const slug = relpath.split("/").pop()!.replace(/\.md$/, "");
     results.push({ type: relpath.split("/")[0]!, slug, relpath, fixed: [code], backupRelpath: `${relpath}.bak` });
   };
@@ -483,7 +484,7 @@ export function fixMemory(root: string): FixResult[] {
     if (!outcome) continue;
     if (results.length === 0) ensureBakIgnored(root); // first .bak of this run
     writeFileSync(ff.path + ".bak", ff.raw);     // pre-fix backup
-    writeFileSync(ff.path, outcome.content);     // repaired
+    atomicWriteFile(ff.path, outcome.content);     // repaired
     results.push({ type: ff.type, slug: ff.slug, relpath: ff.relpath, fixed: outcome.fixed, backupRelpath: `${ff.relpath}.bak` });
   }
   // Cross-fact link fixes (bri): runs after the per-file pass, passing the relpaths

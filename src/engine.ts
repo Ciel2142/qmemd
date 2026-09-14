@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { atomicWriteFile } from "./file-write.js";
 import { MEMORY_COLLECTION } from "./store.js";
 import { gitCommit, gitPush, type GitDeps, type GitCommitResult, type GitPushResult } from "./git.js";
 import { type QMDStore, Maintenance } from "@tobilu/qmd";
@@ -1753,7 +1754,7 @@ export async function remember(
   if (leakedTokens.length > 0 && leakedMarkupTokens(input.fact).length > 0) {
     throw new ClientError("could not remove leaked tool-call markup from the fact — strip the framing tokens and retry");
   }
-  writeFileSync(path, serializeMemory(fm, input.fact));
+  atomicWriteFile(path, serializeMemory(fm, input.fact));
 
   // Supersede double-write (bri): stamp superseded_by onto the OLD fact via a surgical
   // single-line edit (setFrontmatterKey) — every other byte of a possibly hand-edited
@@ -1783,7 +1784,7 @@ export async function remember(
         supersedeWarning = `fact written, but '${input.supersedes}' has no frontmatter fence — superseding link not stamped; repair its frontmatter ('qmemd doctor' locates it), then run 'qmemd doctor --fix' to complete the link`;
         console.error(`[qmemd] remember '${slug}': ${supersedeWarning}`);
       } else {
-        writeFileSync(supersedeTarget.path, setFrontmatterKey(raw, "superseded_by", yamlScalar(slug)));
+        atomicWriteFile(supersedeTarget.path, setFrontmatterKey(raw, "superseded_by", yamlScalar(slug)));
         commitPaths.push(`${supersedeTarget.type}/${supersedeTarget.slug}.md`);
       }
     } catch (e) {
@@ -2723,7 +2724,7 @@ export async function markReviewed(
   if (!locateFences(content)) {
     throw new Error(`fact '${slug}' has no frontmatter fence — review_by cannot be stamped; repair the file's frontmatter ('qmemd doctor' locates it), then retry`);
   }
-  writeFileSync(fact.path, setFrontmatterKey(content, "review_by", reviewBy));
+  atomicWriteFile(fact.path, setFrontmatterKey(content, "review_by", reviewBy));
   const commit = gitCommit(root, `reviewed: ${slug}`, `${fact.type}/${slug}.md`, git);
   const push = gitPush(root, git);
   const { synced, syncWarning } = syncOutcome(commit, push);
@@ -2902,14 +2903,14 @@ export async function applyMerge(
       pinned: cluster.anyPinned,
       updated: new Date().toISOString(),
     };
-    writeFileSync(keeperFact.path, serializeMemory(fm, plan.foldedBody));
+    atomicWriteFile(keeperFact.path, serializeMemory(fm, plan.foldedBody));
     for (const s of others) {
       const f = live.get(s)!;
       rmSync(f.path);
       commitPaths.push(`${f.type}/${s}.md`);
     }
   } catch (e) {
-    for (const p of preimages) writeFileSync(p.path, p.content); // recreate deletes + undo overwrite
+    for (const p of preimages) atomicWriteFile(p.path, p.content); // recreate deletes + undo overwrite
     throw e;
   }
 
