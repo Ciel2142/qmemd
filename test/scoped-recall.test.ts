@@ -74,16 +74,66 @@ describe("scoped recall beyond qmd source limits (qp-94v2)", () => {
     expect(result.belowFloor).toBe(0);
   });
 
-  test("a backfill rerank failure returns an explicitly degraded lexical result", async () => {
+  test("a backfill rerank failure is explicit and keeps the original hybrid pool", async () => {
     const rerank = store.internal.rerank.bind(store.internal);
     vi.spyOn(store.internal, "rerank").mockImplementation((query, docs, ...rest) => {
       if (docs.some(d => !d.file.startsWith("qmd://"))) return Promise.reject(new Error("reranker unavailable"));
       return rerank(query, docs, ...rest);
     });
     const result = await recallQueryWithStatus(store, root, "orchard", { project: "alpha" });
-    expect(result.hits.map(h => h.slug)).toEqual([target]);
+    expect(result.hits).toEqual([]);
     expect(result.degraded).toBe(true);
     expect(result.vectorsPending).toBe(-1);
     expect(result.belowFloor).toBe(0);
+    expect(result.saturated).toBe(true);
+  });
+
+  test("an empty hybrid corpus is known complete", async () => {
+    vi.mocked(store.getStatus).mockRestore();
+    await rm(join(root, "project"), { recursive: true });
+    await store.update();
+    const result = await recallQueryWithStatus(store, root, "orchard", { project: "alpha" });
+    expect(result.hits).toEqual([]);
+    expect(result.saturated).toBe(false);
+  });
+
+  test("a failed completeness status read stays conservative", async () => {
+    const status = await store.getStatus();
+    vi.mocked(store.getStatus).mockReset().mockResolvedValueOnce(status).mockRejectedValue(new Error("status unavailable"));
+    const result = await recallQueryWithStatus(store, root, "unmatchedword", { project: "alpha" });
+    expect(result.saturated).toBe(true);
+  });
+
+  test.each(["rerank", "lexical"])("supplemental %s failure cannot discard a semantic-only hybrid hit", async operation => {
+    await writeFile(join(root, "project", "semantic.md"), serializeMemory({
+      name: "semantic", description: "Fruit storage", type: "project", project: "alpha",
+      created: "2026-01-01", tags: [], pinned: false,
+    }, "Fruit storage is cold."));
+    vi.spyOn(store, "search").mockResolvedValue([{
+      file: "qmd://memory/project/semantic.md", title: "Fruit storage", score: 0.8,
+      explain: { rerankScore: 0.8 },
+    }] as any);
+    if (operation === "rerank") vi.spyOn(store.internal, "rerank").mockRejectedValue(new Error("supplement unavailable"));
+    else vi.spyOn(store, "searchLex").mockRejectedValue(new Error("lexical supplement unavailable"));
+    const result = await recallQueryWithStatus(store, root, "orchard", { project: "alpha" });
+    expect(result.hits.map(h => h.slug)).toEqual(["semantic"]);
+    expect(result.hits[0]!.score).toBe(0.8);
+    expect(result.degraded).toBe(true);
+    expect(result.saturated).toBe(true);
+  });
+
+  test("backfill scores a matching passage after a long unrelated preface", async () => {
+    const path = join(root, "project", `${target}.md`);
+    const raw = await readFile(path, "utf8");
+    await writeFile(path, raw.replace("description: Orchard guidance", "description: Guidance")
+      .replace(/Orchard guidance for tree \d+\./, "Unrelated preface.\n".repeat(600) + "Orchard fruit storage guidance."));
+    vi.mocked(store.internal.llm!.rerank).mockImplementation(async (_query, docs) => ({
+      model: "test-reranker", results: docs.map((doc, index) => ({
+        file: doc.file, index, score: doc.text.slice(0, 3600).toLowerCase().includes("orchard") ? 0.8 : 0.2,
+      })),
+    }));
+    const result = await recallQueryWithStatus(store, root, "orchard", { project: "alpha" });
+    expect(result.hits.map(h => h.slug)).toEqual([target]);
+    expect(result.hits[0]!.score).toBe(0.8);
   });
 });

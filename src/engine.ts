@@ -2111,6 +2111,30 @@ async function raceTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<
   }
 }
 
+/** Select query-bearing context before reranking a lexical backfill candidate.
+ * qmd's chunker is private to its SDK. Match its 3600-character rerank window
+ * and query-overlap selection here, with overlap so boundary matches keep context.
+ * Sending a whole long fact would let the model truncate away its relevant tail.
+ */
+function rerankPassage(body: string, query: string): string {
+  const width = 3600;
+  if (body.length <= width) return body;
+  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(t => t.length > 2))];
+  let best = "", bestScore = -1;
+  for (let start = 0; start < body.length; start += 3000) {
+    // Avoid cutting a UTF-16 surrogate pair at either edge.
+    const from = start > 0 && /[\uDC00-\uDFFF]/.test(body[start]!) ? start - 1 : start;
+    let end = Math.min(from + width, body.length);
+    if (end < body.length && /[\uDC00-\uDFFF]/.test(body[end]!)) end--;
+    const passage = body.slice(from, end);
+    const lower = passage.toLowerCase();
+    const score = terms.filter(term => lower.includes(term)).length;
+    if (score > bestScore) { best = passage; bestScore = score; }
+    if (end === body.length) break;
+  }
+  return best;
+}
+
 /**
  * recallQuery + the embed-barrier health signal (qmemd-9t1). Identical search to recallQuery,
  * but returns degraded/vectorsPending so a caller (CLI/MCP/REST) can warn that a hybrid recall
@@ -2325,15 +2349,15 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
   let { kept: gated, projectDropped: crossProjectHidden } = gate(hits);
   let saturated = rawCount === fetchLimit;
   if (saturated || !(opts.lexOnly || lexFallback)) {
-    const total = await store.getStatus().then(s => s.totalDocuments).catch(() => 0);
-    if (saturated && widen && gated.length < limit && total > fetchLimit) {
+    const total = await store.getStatus().then(s => s.totalDocuments).catch(() => null);
+    if (saturated && widen && gated.length < limit && total !== null && total > fetchLimit) {
       ({ hits, rawCount, floorDropped } = await runSearch(total));
       ({ kept: gated, projectDropped: crossProjectHidden } = gate(hits));
       saturated = rawCount >= total;
     }
     if (!(opts.lexOnly || lexFallback)) {
-      saturated = total <= 0 || rawCount < total;
-    } else if (total > 0 && rawCount >= total) {
+      saturated = total === null || rawCount < total;
+    } else if (total !== null && rawCount >= total) {
       saturated = false;
     }
 
@@ -2342,34 +2366,36 @@ export async function recallQueryWithStatus(store: QMDStore, root: string, query
     // facts so BM25 scores never bypass the hybrid relevance floor. This recovers
     // matches outside qmd's source caps without changing the installed dependency.
     // Even an exhaustive lexical pass cannot certify expanded/vector completeness.
-    if (!(opts.lexOnly || lexFallback) && saturated && widen && gated.length < limit && total > 0) {
-      const seen = new Set([...hits, ...floorDropped].map(h => h.path));
-      const lexical = await store.searchLex(query, { limit: total, collection: MEMORY_COLLECTION });
-      const candidates = gate(lexical.flatMap(r => toHit(r.filepath, r.title, r.score) ?? [])).kept
-        .filter(({ h, fm }) => fm !== null && !seen.has(h.path));
-      if (candidates.length > 0) {
-        try {
+    if (!(opts.lexOnly || lexFallback) && saturated && widen && gated.length < limit && total !== null && total > 0) {
+      try {
+        const seen = new Set([...hits, ...floorDropped].map(h => h.path));
+        const lexical = await store.searchLex(query, { limit: total, collection: MEMORY_COLLECTION });
+        const candidates = gate(lexical.flatMap(r => toHit(r.filepath, r.title, r.score) ?? [])).kept
+          .filter(({ h, fm }) => fm !== null && !seen.has(h.path));
+        if (candidates.length > 0) {
           const rerankRun = store.internal.rerank(query, candidates.map(({ h, fm }) => ({
-            file: h.path, text: `${fm!.frontmatter.description}\n\n${fm!.body}`,
+            file: h.path, text: rerankPassage(`${fm!.frontmatter.description}\n\n${fm!.body}`, query),
           })));
           rerankRun.catch(() => {});
           const scores = new Map((await raceTimeout(rerankRun, embedTimeoutMs(), "scoped recall rerank"))
             .map(r => [r.file, r.score]));
-          for (const { h } of candidates) {
+          const supplemented = candidates.map(({ h }) => {
             const score = scores.get(h.path);
             if (score === undefined || !Number.isFinite(score)) throw new Error("missing scoped rerank score");
-            (score >= minRerank ? hits : floorDropped).push({ ...h, score });
+            return { ...h, score };
+          });
+          for (const h of supplemented) {
+            (h.score >= minRerank ? hits : floorDropped).push(h);
           }
           ({ kept: gated, projectDropped: crossProjectHidden } = gate(hits));
-        } catch (e) {
-          console.error(`[qmemd] scoped recall rerank failed, falling back to lexical: ${e instanceof Error ? e.message : String(e)}`);
-          degraded = true;
-          lexFallback = true;
-          vectorsPending = -1;
-          ({ hits, rawCount, floorDropped } = await runSearch(total));
-          ({ kept: gated, projectDropped: crossProjectHidden } = gate(hits));
-          saturated = false; // lexical depth covered the known corpus
         }
+      } catch (e) {
+        console.error(`[qmemd] scoped recall supplement failed; retaining hybrid results: ${e instanceof Error ? e.message : String(e)}`);
+        degraded = true;
+        vectorsPending = -1;
+        // Keep valid semantic-only hits from the successful initial search.
+        // A supplemental failure says nothing about their relevance.
+        saturated = true;
       }
     }
   }
