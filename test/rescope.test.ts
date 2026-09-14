@@ -3,7 +3,7 @@ import { planRescope, applyRescope, setProjectLine, isRescopePlan, type RescopeP
 import { serializeMemory, type MemoryFrontmatter, type MemoryType } from "../src/engine.js";
 import type { QMDStore } from "@tobilu/qmd";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -494,7 +494,7 @@ describe("applyRescope — apply (w2-rescope)", () => {
     const plan: RescopePlan = { known: ["widget"], rows, unmatched: 0, version: 1 };
     const { store, calls } = fakeStore();
 
-    await expect(applyRescope(store, root, plan)).rejects.toThrow(/EISDIR/i);
+    await expect(applyRescope(store, root, plan)).rejects.toThrow(/EISDIR|EEXIST/i);
 
     expect(readFileSync(join(dir, "a.md"), "utf-8")).toBe(beforeA);
     expect(readFileSync(join(dir, "b.md"), "utf-8")).toBe(beforeB);
@@ -503,11 +503,23 @@ describe("applyRescope — apply (w2-rescope)", () => {
   });
 
   // covers: SC-37, INV-3
+  test("rescoping a private fact preserves its permissions", async () => {
+    await writeFact(root, "a", { project: "global" });
+    const path = join(root, "project", "a.md");
+    chmodSync(path, 0o600);
+    const { store } = fakeStore();
+    await applyRescope(store, root, { version: 1, known: ["widget"], unmatched: 0,
+      rows: [{ slug: "a", type: "project", from: "global", to: "widget", reason: "slug-prefix" }] });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  // covers: SC-37, INV-3
   test("a rename failure mid-apply restores every already-renamed file byte-for-byte and leaves no temp behind", async () => {
     await writeFact(root, "a", { project: "global" });
     await writeFact(root, "b", { project: "global" });
     await writeFact(root, "c", { project: "global" });
     const dir = join(root, "project");
+    for (const slug of ["a", "b", "c"]) chmodSync(join(dir, `${slug}.md`), 0o600);
     const before: Record<string, string> = {
       a: readFileSync(join(dir, "a.md"), "utf-8"),
       b: readFileSync(join(dir, "b.md"), "utf-8"),
@@ -528,6 +540,7 @@ describe("applyRescope — apply (w2-rescope)", () => {
 
       for (const slug of ["a", "b", "c"]) {
         expect(readFileSync(join(dir, `${slug}.md`), "utf-8")).toBe(before[slug]);
+        expect(statSync(join(dir, `${slug}.md`)).mode & 0o777).toBe(0o600);
       }
       expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
       expect(gitCalls.filter((a) => a[0] === "commit")).toHaveLength(0);

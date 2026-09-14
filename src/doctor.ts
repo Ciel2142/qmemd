@@ -1,3 +1,4 @@
+import { withMemoryWriteLockSync } from "./write-lock.js";
 // =============================================================================
 // doctor.ts — frontmatter integrity audit + mechanical --fix (qmemd-61h)
 //
@@ -478,6 +479,10 @@ function fixLinks(root: string, alreadyBacked: ReadonlySet<string>): FixResult[]
  * nothing at all.
  */
 export function fixMemory(root: string): FixResult[] {
+  return withMemoryWriteLockSync(root, () => fixMemoryUnlocked(root));
+}
+
+function fixMemoryUnlocked(root: string): FixResult[] {
   const results: FixResult[] = [];
   for (const ff of walkFactFiles(root)) {
     const outcome = fixContent(ff.raw, ff.type, ff.slug);

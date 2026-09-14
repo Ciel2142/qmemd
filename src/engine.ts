@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { withMemoryWriteLock } from "./write-lock.js";
 import { atomicWriteFile } from "./file-write.js";
 import { MEMORY_COLLECTION } from "./store.js";
 import { gitCommit, gitPush, type GitDeps, type GitCommitResult, type GitPushResult } from "./git.js";
@@ -1401,6 +1402,15 @@ export async function remember(
   input: RememberInput,
   git: GitDeps = {},
 ): Promise<RememberResult> {
+  return withMemoryWriteLock(root, () => rememberUnlocked(store, root, input, git));
+}
+
+async function rememberUnlocked(
+  store: QMDStore,
+  root: string,
+  input: RememberInput,
+  git: GitDeps = {},
+): Promise<RememberResult> {
   let type: MemoryType = input.type ?? "reference";
   // Candidate files the Tier-2.5 near-dup scan could not read (qmemd-e5h); 0 until the scan
   // runs (and stays 0 on the --replace/--force path, which skips dedup entirely).
@@ -2738,6 +2748,12 @@ export function resolveReviewedDate(type: MemoryType, opts: ReviewedOptions, fro
 export async function markReviewed(
   store: QMDStore, root: string, slug: string, opts: ReviewedOptions, git: GitDeps = {},
 ): Promise<{ slug: string; reviewBy: string; path: string; synced?: boolean; syncWarning?: string }> {
+  return withMemoryWriteLock(root, () => markReviewedUnlocked(store, root, slug, opts, git));
+}
+
+async function markReviewedUnlocked(
+  store: QMDStore, root: string, slug: string, opts: ReviewedOptions, git: GitDeps = {},
+): Promise<{ slug: string; reviewBy: string; path: string; synced?: boolean; syncWarning?: string }> {
   assertSafeSlug(slug); // reject traversal/newline before any fs touch (qmemd-fd8)
   const fact = getFact(root, slug);
   if (!fact) throw new ClientError(`no fact named '${slug}' to mark reviewed`);
@@ -2823,6 +2839,10 @@ export function projectOverview(root: string, project: string, types: MemoryType
 // =============================================================================
 
 export async function forget(store: QMDStore, root: string, slug: string, git: GitDeps = {}): Promise<{ removed: boolean; path?: string; synced?: boolean; syncWarning?: string }> {
+  return withMemoryWriteLock(root, () => forgetUnlocked(store, root, slug, git));
+}
+
+async function forgetUnlocked(store: QMDStore, root: string, slug: string, git: GitDeps = {}): Promise<{ removed: boolean; path?: string; synced?: boolean; syncWarning?: string }> {
   assertSafeSlug(slug); // reject traversal/newline before it reaches rmSync (qmemd-fd8)
   for (const type of MEMORY_TYPES) {
     const path = memoryFilePath(root, type, slug);
@@ -2883,6 +2903,16 @@ export interface ApplyMergeResult {
  * client-error pattern). Reuses the remember/forget write order: mutate → commit → reindex.
  */
 export async function applyMerge(
+  store: QMDStore,
+  root: string,
+  plan: MergePlan,
+  opts: { force?: boolean } = {},
+  git: GitDeps = {},
+): Promise<ApplyMergeResult> {
+  return withMemoryWriteLock(root, () => applyMergeUnlocked(store, root, plan, opts, git));
+}
+
+async function applyMergeUnlocked(
   store: QMDStore,
   root: string,
   plan: MergePlan,
